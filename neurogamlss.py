@@ -1,123 +1,91 @@
 #!/usr/bin/env python3
 """
-BA_ndm.py - Brain age from normative models (normative deviation mapping, NDM).
+neurogamlss.py - NeuroGAMLSS: vectorized GAMLSS normative models for brain MRI,
+with NormBrainAGE, brain age from inverted normative models.
 
-Prototype of a likelihood-based brain age estimator as an alternative to the
-GPR-based BrainAGE (BA_gpr_ui.m).  Every feature gets its own normative model
+Normative models
+----------------
+Every voxel/vertex gets its own GAMLSS normative model
 
-    y_j ~ N(mu_j(age, sex, site, covariates), sigma_j(age, sex, covariates)^2)
+    y ~ D(mu(age, sex, site, covariates), sigma(age, sex, covariates), shape)
 
-with natural cubic splines of age for mu and log(sigma), fitted by maximum
-likelihood (the location-scale RS algorithm of ComBatLS, ported from
-combat_family.py in the ComCat repository).  Brain age is the age at which the
-subject's data are most likely,
+with natural cubic splines of age, fitted to all voxels/vertices at once.  The
+distribution D (--family) is
 
-    age_hat = argmax_a  log N(z(a); 0, R) - sum_j log sigma_j(a),
+  shash   sinh-arcsinh (SHASHo2 of gamlss.dist, default) with skewness nu and tail
+          weight tau.  It contains the normal distribution (nu = 0, tau = 1); normal
+          priors (--shape-prior) shrink nu and log tau toward it, and tau is bounded
+          (--tau-max), so that extrapolated tails stay plausible.
+  normal  normal location-scale model: fast, for near-Gaussian data such as PCA
+          scores or regional measures
+  gg      generalized gamma (GG of gamlss.dist, as in Brain Charts) for positive
+          data such as volumes
 
-where z(a) are the z-scores at candidate age a and R is the correlation
-between features, estimated from the training z-scores.
+The shape parameters are constant per voxel/vertex or, with --shape-df, splines of
+age where BIC prefers them.  The normal model is fitted by the RS algorithm of
+GAMLSS (ported from ComBatLS); shash and gg start from it and are refined by damped
+Newton steps with exact (shash) or numerical (gg) derivatives and step halving.
+Test subjects get z-maps (normal scores) at chronological age, adapted to a new
+site with its control subjects (--adjust).  --diagnostics writes Q statistics and
+worm plots by age group of the training fit.
 
-Two kinds of models are fitted to the same data:
+NormBrainAGE
+------------
+Brain age is the age at which a subject's data are most likely under normative
+models of the leading principal component scores of the training data (of the whole
+brain and of each lobe, --pca 100) with their full residual correlation R:
 
-  normative model  a location-scale model for every voxel/vertex, which gives
-                   the z-maps of test subjects (--zmaps; --normative-only fits
-                   and applies only this model).  It never uses PCA.
-  NDM brain age    the likelihood above.  By default (--pca 100) its features
-                   are the leading principal component scores of the training
-                   data (of the whole brain and of each region), so that R can
-                   be estimated in full.  --pca, --rank, --psi-min and the age
-                   grid only affect the brain age and its deviation scores.
+    age_hat = argmax_a  log N(z(a); 0, R) - sum_j log sigma_j(a)
 
-With --pca 0 every voxel/vertex is a feature of the brain age and R is a
-low-rank plus diagonal model; the voxel/vertex-wise normative model is then
-shared with the z-maps and fitted only once.  The residual correlation of
-smoothed voxels is spread over hundreds of dimensions, so this model is
-overconfident (standard errors several times too small) and less accurate.
-Treating features as independent (--pca 0 --rank 0) overcounts the evidence of
-correlated features and is worse still.
+These models use the normal family, as PCA scores are close to Gaussian.  --warp
+applies a sinh-arcsinh warp to every voxel/vertex before PCA; unlike shash, a warp
+is a transform of the data that does not depend on age.  With --pca 0 every
+voxel/vertex is a feature, R is low-rank plus diagonal (overconfident and less
+accurate), and with --family normal the voxel-wise model is shared with the z-maps.
 
-The estimate is unbiased conditional on age without a trend correction, comes
-with a per-subject standard error (Laplace approximation) and gives regional
-brain ages when the likelihood is restricted to the features of a region (the
-lobe atlas used by BA_gpr_ui.m with D.parcellation = 1).  Several models
-(tissue, resolution, smoothing, surface measure) are combined by a weighted
-average with weights that sum to one, which keeps the ensemble unbiased
-conditional on age.
+The estimate comes with a standard error (Laplace approximation), regional brain
+ages for the lobes (--parcellation) and a non-aging deviation, the Mahalanobis
+distance of the z-scores at the brain age (NDM.Deviation; at chronological age:
+NDM.Deviation_age).  Several models (tissue, resolution, smoothing, surface
+measure) are combined by a weighted average with weights that sum to one.  For a
+new site, its control subjects (--adjust) correct the estimates (--correction).
+A Python replica of the GPR BrainAGE (BA_gpr.m) is run for comparison when the
+training data are given.
 
-Besides brain age, every subject gets a non-aging deviation: the Mahalanobis
-distance of its z-scores at the estimated brain age, i.e. the atypicality that
-an older or younger brain does not explain (normal score of a chi-square
-distance; NDM.Deviation, also per lobe), and the total deviation at
-chronological age (NDM.Deviation_age).
-
-Covariates such as image quality measures (IQMs) can enter the mean and the
-log SD of all normative models (--train-cov, --test-cov, --cov-mean, --cov-sd,
---cov-df).  One table with a row per subject serves all models.  The models
-condition on every subject's own covariates, so z-maps and brain ages are
-adjusted for them without a reference value.  Covariates that are constant or
-collinear with the rest of the design (e.g. constant within each site) are not
-used.  In tests, an IQM covariate removed its effect from the z-maps but left
-the brain age about as accurate as without it, and a covariate that correlates
-strongly with age made the brain age less accurate.
-
-Non-Gaussian data can be warped per voxel/vertex (sinh-arcsinh, fitted jointly
-with a voxel-wise normative model, as in warped Bayesian linear regression):
---warp-zmaps for the z-maps, where it calibrates the tails (recommended), and
---warp for the brain age models, where it made no difference in tests.
-
-Fitted models can be saved with --save-model (<name>.mat: MATLAB struct
-NDMmodel, <name>.npz: NumPy archive) and applied to new data with --model
-instead of --train, without the training data.  The model file contains a JSON
-description (settings, training sample, covariates and the feature space of
-every model), which is also written to <name>.json and used to check that new
-data are compatible.
-
-For comparison, a Python replica of the GPR BrainAGE (BA_gpr.m, linear kernel,
-PCA, linear trend correction with trend_method = 1) is run on the same folds.
-It needs the training data and is skipped with --model.
-
-Input files are the mat-files written by BA_data2mat.m (Y, age, male and, for
-surface data, ind; MATLAB v5 or v7.3).  Files joined with '+' are concatenated
-and their position serves as site.  Subjects with non-finite age or age <= 0
-(or with missing covariates) are excluded from training and evaluation.
+Covariates, models and inputs
+-----------------------------
+Covariates such as image quality measures enter the mean and the log SD of all
+normative models (--train-cov, --test-cov, --cov-mean, --cov-sd, --cov-df), and the
+models condition on every subject's own values.  Fitted models are saved with
+--save-model (.mat or .npz, with a JSON description) and applied with --model
+instead of --train.  Inputs are the mat-files of BA_data2mat.m (Y, age, male and,
+for surface data, ind); files joined with '+' are concatenated as sites.
 
 Examples
 --------
-10-fold cross-validation on NKIe with 4 models and lobe-wise brain age:
+z-maps with SHASH normative models, saved and applied later:
 
-    python BA_ndm.py --train s4rp1_4mm_NKIe1239_CAT12.9.mat \\
+    python neurogamlss.py --normative-only --train s4rp1_4mm_A_CAT12.9.mat \\
+        --save-model A_norm.npz --diagnostics --out A
+    python neurogamlss.py --normative-only --model A_norm.npz --parcellation \\
+        --test s4rp1_4mm_B_CAT12.9.mat --adjust 1:108 --out B
+
+10-fold cross-validation of NormBrainAGE with 4 models and lobe-wise brain age:
+
+    python neurogamlss.py --train s4rp1_4mm_NKIe1239_CAT12.9.mat \\
         s4rp1_8mm_NKIe1239_CAT12.9.mat s4rp2_4mm_NKIe1239_CAT12.9.mat \\
-        s4rp2_8mm_NKIe1239_CAT12.9.mat --kfold 10 --parcellation --out NKIe_ndm
+        s4rp2_8mm_NKIe1239_CAT12.9.mat --kfold 10 --parcellation --out NKIe
 
-Train on one sample and predict another (models are matched by position).
-The control subjects given by --adjust (1-based, as D.ind_adjust) correct the
-estimates for the test site and estimate the ensemble weights.  By default
-(--correction offset) their median BrainAGE is subtracted from all subjects,
-without a trend correction:
+Brain age and z-maps of another sample, corrected with its controls:
 
-    python BA_ndm.py --train s4rp1_8mm_A_CAT12.9.mat s4rp2_8mm_A_CAT12.9.mat \\
-        --test s4rp1_8mm_B_CAT12.9.mat s4rp2_8mm_B_CAT12.9.mat --adjust 1:108
+    python neurogamlss.py --train s4rp1_8mm_A_CAT12.9.mat s4rp2_8mm_A_CAT12.9.mat \\
+        --test s4rp1_8mm_B_CAT12.9.mat s4rp2_8mm_B_CAT12.9.mat --adjust 1:108 --zmaps
 
-With --correction agefree, the normative models are adapted to the test site
-without the controls' ages (iteratively at their estimated brain ages); the ages
-are then only used for the final offset.
+See README.md for all options and outputs, and docs/models.md for the statistical
+details.
 
-Fit the voxel-wise normative model with two IQMs in the mean, save it, and
-compute z-maps of new data later without the training data:
-
-    python BA_ndm.py --normative-only --train s4rp1_4mm_A_CAT12.9.mat \\
-        --train-cov IQM_A.csv --cov-mean SIQR,res_ECR --save-model A_norm.mat
-    python BA_ndm.py --normative-only --model A_norm.mat --parcellation \\
-        --test s4rp1_4mm_B_CAT12.9.mat --test-cov IQM_B.csv --adjust 1:108 --out B
-
-Brain age models are saved and applied in the same way without
---normative-only (with --zmaps, the voxel-wise models are included).
-
-Results are saved as <out>.mat (readable by MATLAB) and <out>.csv, and z-maps
-as <out>_zmaps_<model>.mat.  With --normative-only, only the z-maps are saved,
-plus the lobe-wise mean z in <out>.csv with --parcellation.
-
-Requirements: numpy, scipy, h5py (v7.3 files), nibabel (surface parcellation)
+Requirements: numpy, scipy, h5py (v7.3 files), nibabel (surface parcellation),
+matplotlib (worm plots)
 """
 
 from __future__ import annotations
@@ -135,12 +103,20 @@ from dataclasses import asdict, dataclass, replace
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ATLAS_DIR = os.path.join(HERE, 'atlases')      # lobe atlas of BA_gpr_ui.m
 
 # regions of the lobe atlas that are not represented on the surface
 _SURF_EXCLUDE = (5, 15)
 
 # format of saved models (save_models, load_models)
-MODEL_FORMAT, MODEL_VERSION = 'BA_ndm model', 1
+MODEL_FORMAT, MODEL_VERSION = 'NeuroGAMLSS model', 1
+LEGACY_FORMATS = ('BA_ndm model',)
+
+# distribution families of the voxel/vertex-wise normative models
+FAMILIES = ('shash', 'normal', 'gg')
+VOXEL_DEFAULTS = dict(family='shash', shape_df=0, tau_max=2.0, shape_prior=1.0)
+TAU_MIN = 0.2                  # lower bound of the shash tail parameter
+LOG2PI = np.log(2 * np.pi)
 
 _NOTES = set()
 
@@ -371,7 +347,7 @@ def _region_names(atlas_dir):
     return names
 
 
-def lobe_atlas(d: Data, atlas_dir=HERE):
+def lobe_atlas(d: Data, atlas_dir=ATLAS_DIR):
     """Lobe label of every feature, the regions used, and their names.
 
     Same atlas files and conventions as BA_gpr_ui.m (D.parcellation = 1).
@@ -537,11 +513,282 @@ def _rank(M, rtol=1e-8):
     return int(np.sum(s > rtol * s[0])) if s.size and s[0] > 0 else 0
 
 
+# ---------------------------------------------------------------------------
+# Distribution families of the voxel/vertex-wise normative models
+# ---------------------------------------------------------------------------
+
+def _logcosh(t):
+    a = np.abs(t)
+    return a + np.log1p(np.exp(-2 * a)) - np.log(2)
+
+
+def shash_terms(y, a, s, n, e, order=2):
+    """SHASHo2 log-density per observation and its derivatives.
+
+    Sinh-arcsinh distribution (Jones & Pewsey 2009) in the SHASHo2 parameterization
+    of gamlss.dist: z = (y - mu) / (sigma tau) and sinh(tau asinh(z) - nu) ~ N(0, 1).
+    a = mu, s = log sigma, n = nu and e = log tau are the linear predictors.  Returns
+    the log-density and, up to the given order, its first derivatives (a, s, n, e)
+    and its exact second derivatives {(i, j): d2 l / d i d j} for i <= j (None if
+    not requested).  nu = 0, tau = 1 is the normal distribution.
+    """
+    with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
+        return _shash_terms(y, a, s, n, e, order)
+
+
+def _shash_terms(y, a, s, n, e, order):
+    tau = np.exp(e)
+    S = np.exp(s + e)
+    z = (y - a) / S
+    q2 = 1 / (1 + z * z)
+    q = np.sqrt(q2)
+    u = np.arcsinh(z)
+    t = np.clip(tau * u - n, -300, 300)
+    r, c = np.sinh(t), np.cosh(t)
+    ll = _logcosh(t) - s + 0.5 * np.log(q2) - 0.5 * r * r - 0.5 * LOG2PI
+    if order < 1:
+        return ll, None, None
+    g = np.tanh(t) - r * c                       # d l / d t
+    Lz = g * tau * q - z * q2                    # d l / d z
+    d1 = (-Lz / S, -1 - z * Lz, -g, g * tau * u - z * Lz)
+    if order < 2:
+        return ll, d1, None
+    gp = 1 / (c * c) - np.cosh(2 * t)            # d g / d t
+    Lzz = gp * (tau * q) ** 2 - g * tau * z * q2 * q - q2 + 2 * (z * q2) ** 2
+    Lze = tau * q * (gp * tau * u + g)
+    w = u - z * q
+    zz = z * Lz + z * z * Lzz
+    d2 = {(0, 0): Lzz / S ** 2, (0, 1): (z * Lzz + Lz) / S, (0, 2): gp * tau * q / S,
+          (0, 3): (z * Lzz - Lze + Lz) / S, (1, 1): zz, (1, 2): z * gp * tau * q,
+          (1, 3): zz - z * Lze, (2, 2): gp, (2, 3): -gp * tau * w,
+          (3, 3): gp * tau ** 2 * u * w + g * tau * w + zz - z * Lze}
+    return ll, d1, d2
+
+
+def shash_score(y, a, s, n, e):
+    """Normal score sinh(tau asinh(z) - nu) of SHASHo2 (see shash_terms)."""
+    z = (y - a) / np.exp(s + e)
+    return np.sinh(np.clip(np.exp(e) * np.arcsinh(z) - n, -300, 300))
+
+
+def _stirling_rest(theta):
+    """theta log theta - theta - lgamma(theta) - log(theta)/2 + log(2 pi)/2 (-> 0)."""
+    from scipy.special import gammaln
+    out = np.empty_like(theta)
+    big = theta > 10
+    tb, ts = theta[big], theta[~big]
+    out[big] = -1 / (12 * tb) + 1 / (360 * tb ** 3) - 1 / (1260 * tb ** 5)
+    out[~big] = ts * np.log(ts) - ts - gammaln(ts) - 0.5 * np.log(ts) + 0.5 * LOG2PI
+    return out
+
+
+def _expm1_rest(x):
+    """(exp(x) - 1 - x) / x^2, stable near 0."""
+    out = np.empty_like(x)
+    small = np.abs(x) < 1e-3
+    xs, xb = x[small], x[~small]
+    out[small] = 0.5 + xs / 6 + xs ** 2 / 24 + xs ** 3 / 120
+    out[~small] = (np.expm1(xb) - xb) / xb ** 2
+    return out
+
+
+def gg_logpdf(y, a, s, n):
+    """Generalized gamma log-density (GG of gamlss.dist, Lopatatzidis & Green; as in
+    Brain Charts) with a = log mu, s = log sigma, n = nu.  With theta = 1/(sigma nu)^2
+    and z = (y/mu)^nu the density is |nu| theta^theta z^theta exp(-theta z) /
+    (Gamma(theta) y); it is evaluated in a form that is smooth through the log-normal
+    limit nu = 0."""
+    with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+        L = np.log(y) - a
+        sig2 = np.exp(2 * s)
+        theta = 1 / (sig2 * n * n)
+        fin = np.isfinite(theta)
+        rest = np.where(fin, _stirling_rest(np.where(fin, theta, 1.0)), 0.0)
+        return -s - 0.5 * LOG2PI - np.log(y) + rest - L * L / sig2 * _expm1_rest(n * L)
+
+
+def gg_terms(y, a, s, n, order=2, h=1e-4):
+    """gg_logpdf and, up to the given order, its first and second derivatives by
+    central differences."""
+    ll = gg_logpdf(y, a, s, n)
+    if order < 1:
+        return ll, None, None
+    e = np.eye(3) * h
+
+    def f(d):
+        return gg_logpdf(y, a + d[0], s + d[1], n + d[2])
+    fp, fm = [f(e[i]) for i in range(3)], [f(-e[i]) for i in range(3)]
+    d1 = tuple((fp[i] - fm[i]) / (2 * h) for i in range(3))
+    if order < 2:
+        return ll, d1, None
+    d2 = {}
+    for i in range(3):
+        d2[(i, i)] = (fp[i] - 2 * ll + fm[i]) / h ** 2
+        for j in range(i + 1, 3):
+            d2[(i, j)] = (f(e[i] + e[j]) - f(e[i] - e[j]) - f(e[j] - e[i])
+                          + f(-e[i] - e[j])) / (4 * h * h)
+    return ll, d1, d2
+
+
+def gg_score(y, a, s, n):
+    """Normal score of the generalized gamma: the gamma cdf of theta (y/mu)^nu (upper
+    tail for nu < 0), Wilson-Hilferty for theta > 1e4 and log-normal at nu = 0."""
+    from scipy.special import gammainc, gammaincc, ndtri
+    L = np.log(y) - a
+    sig = np.exp(s)
+    with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
+        nz = np.where(n == 0, 1.0, n)
+        out = np.where(n == 0, L / sig, 3 / (sig * nz) * np.expm1(n * L / 3) + sig * nz / 3)
+        theta = 1 / (sig * sig * n * n)
+        ex = np.isfinite(theta) & (theta <= 1e4) & np.isfinite(L)
+        if np.any(ex):
+            th, tz = theta[ex], theta[ex] * np.exp(n[ex] * L[ex])
+            P, Q = gammainc(th, tz), gammaincc(th, tz)
+            pos = n[ex] > 0
+            lo, up = np.where(pos, P, Q), np.where(pos, Q, P)
+            out = np.array(out)
+            out[ex] = np.where(lo < 0.5, ndtri(lo), -ndtri(up))
+    return out
+
+
+def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bound=None,
+                     max_iter=500, tol=1e-9, max_elements=2_000_000, rho=100.0, rs_iter=0):
+    """Penalized maximum likelihood fit of a distribution for every column of Y.
+
+    Every parameter block b has a linear predictor eta_b = designs[b] @ coef_b;
+    terms(y, *etas, order) returns the log-density per observation and, for order 2,
+    its first and second derivatives with respect to the linear predictors.
+    Columns are fitted at once by Newton steps: gradient and Hessian are assembled
+    by matrix products over observations.  As in the mixed() algorithm of gamlss,
+    the first rs_iter iterations can ignore the cross-derivatives between parameter
+    blocks (RS: every parameter with its own curvature) before the full Hessian is
+    used (CG); for SHASH this was slower without better fits, hence rs_iter=0 by
+    default.  Where the Hessian is not negative definite, the outer
+    product of the scores is used instead, which is always an ascent direction (the
+    squared-score weights of gamlss).  Steps are halved until the penalized
+    log-likelihood increases (the autostep of gamlss), and columns stop when the
+    Newton decrement falls below tol per observation.
+
+    shape_blocks : blocks whose coefficients get N(0, prior_sd^2) priors, which shrink
+                   the shape parameters toward the normal distribution
+    bound        : (block, lo, hi) soft bound of a linear predictor (quadratic penalty
+                   rho outside [lo, hi], e.g. for log tau)
+    init         : starting coefficients, one (k_b, p) array per block
+    Returns the coefficients (list of (k_b, p)), the log-likelihood (p,) and the
+    convergence flags (p,).
+    """
+    n, p = Y.shape
+    ks = [D.shape[1] for D in designs]
+    off = np.concatenate([[0], np.cumsum(ks)]).astype(int)
+    k, nb = int(off[-1]), len(designs)
+    pairs = [(i, j) for i in range(nb) for j in range(i, nb)]
+    OD = {(i, j): (designs[i][:, :, None] * designs[j][:, None, :]).reshape(n, -1)
+          for i, j in pairs}
+    prior = np.zeros(k)
+    for b in shape_blocks:
+        prior[off[b]:off[b + 1]] = 1 / prior_sd ** 2
+    diag = np.arange(k)
+    coef = np.vstack([np.asarray(c, np.float64) for c in init])
+    loglik, conv = np.full(p, np.nan), np.zeros(p, dtype=bool)
+
+    def evaluate(B, y, hess):
+        etas = [designs[i] @ B[off[i]:off[i + 1]] for i in range(nb)]
+        ll, d1, d2 = terms(y, *etas, order=2 if hess else 0)
+        lsum = ll.sum(axis=0)
+        pen = 0.5 * np.sum(prior[:, None] * B ** 2, axis=0)
+        if bound is not None:
+            b, lo, hi = bound
+            vh, vl = np.maximum(etas[b] - hi, 0), np.maximum(lo - etas[b], 0)
+            pen = pen + 0.5 * rho * np.sum(vh ** 2 + vl ** 2, axis=0)
+            if hess:
+                d1 = list(d1)
+                d1[b] = d1[b] - rho * (vh - vl)
+                d2 = dict(d2)
+                d2[(b, b)] = d2[(b, b)] - rho * ((vh > 0) | (vl > 0))
+        f = lsum - pen
+        return np.where(np.isfinite(f), f, -np.inf), lsum, d1, d2
+
+    step = max(1, int(max_elements // n))
+    for c0 in range(0, p, step):
+        y = np.asarray(Y[:, c0:c0 + step], np.float64)
+        B = coef[:, c0:c0 + step].copy()
+        pc = B.shape[1]
+        f_all, _, d1, d2 = evaluate(B, y, True)
+        active, done_ok = np.arange(pc), np.zeros(pc, dtype=bool)
+        for it in range(max_iter):
+            if not active.size:
+                break
+            Ba = B[:, active]
+            g = np.vstack([designs[i].T @ d1[i] for i in range(nb)]) - prior[:, None] * Ba
+            H = np.empty((active.size, k, k))
+            for i, j in pairs:
+                if i != j and it < rs_iter:           # RS: no cross-derivatives
+                    H[:, off[i]:off[i + 1], off[j]:off[j + 1]] = 0
+                    H[:, off[j]:off[j + 1], off[i]:off[i + 1]] = 0
+                    continue
+                h = (OD[(i, j)].T @ d2[(i, j)]).reshape(ks[i], ks[j], -1).transpose(2, 0, 1)
+                H[:, off[i]:off[i + 1], off[j]:off[j + 1]] = h
+                if i != j:
+                    H[:, off[j]:off[j + 1], off[i]:off[i + 1]] = h.transpose(0, 2, 1)
+            A = -H
+            A[:, diag, diag] += prior
+            A = np.where(np.isfinite(A), A, 0)
+            scl = np.max(np.abs(A[:, diag, diag]), axis=1) + 1e-12
+            bad = ~(np.linalg.eigvalsh(A)[:, 0] > 1e-10 * scl)
+            if np.any(bad):                   # outer product of the scores
+                sc = [np.where(np.isfinite(d1[i][:, bad]), d1[i][:, bad], 0) for i in range(nb)]
+                for i, j in pairs:
+                    if i != j and it < rs_iter:
+                        continue
+                    h = (OD[(i, j)].T @ (sc[i] * sc[j])).reshape(ks[i], ks[j], -1).transpose(2, 0, 1)
+                    A[bad, off[i]:off[i + 1], off[j]:off[j + 1]] = h
+                    if i != j:
+                        A[bad, off[j]:off[j + 1], off[i]:off[i + 1]] = h.transpose(0, 2, 1)
+                bi = np.flatnonzero(bad)[:, None]
+                A[bi, diag, diag] += prior + 1e-8 * scl[bi]
+            gt = np.where(np.isfinite(g), g, 0).T[..., None]
+            delta = np.linalg.solve(A, gt)[..., 0].T
+            decr = np.sum(gt[..., 0].T * delta, axis=0)          # Newton decrement
+            small = (0.5 * decr < tol * n) & (it >= rs_iter)
+            f0, fnew = f_all[active], f_all[active].copy()
+            Bnew, todo, fac = Ba.copy(), np.flatnonzero(~small), np.ones(active.size)
+            for _ in range(30):                                   # step halving
+                if not todo.size:
+                    break
+                cand = Ba[:, todo] + fac[todo] * delta[:, todo]
+                fc = evaluate(cand, y[:, active[todo]], False)[0]
+                good = fc >= f0[todo] - 1e-12 * np.abs(f0[todo])
+                Bnew[:, todo[good]], fnew[todo[good]] = cand[:, good], fc[good]
+                todo = todo[~good]
+                fac[todo] *= 0.5
+            B[:, active], f_all[active] = Bnew, fnew
+            stop = small | np.isin(np.arange(active.size), todo)
+            done_ok[active[small]] = True
+            active = active[~stop]
+            if active.size:
+                f_act, _, d1, d2 = evaluate(B[:, active], y[:, active], True)
+                f_all[active] = f_act
+        coef[:, c0:c0 + step] = B
+        loglik[c0:c0 + step] = evaluate(B, y, False)[1]
+        conv[c0:c0 + step] = done_ok
+    return [coef[off[i]:off[i + 1]] for i in range(nb)], loglik, conv
+
+
 class NormativeModel:
-    """Location-scale normative model for every feature.
+    """Normative model (GAMLSS) for every feature.
 
     mu        = 1 + ns(age, df_mu) + male + site + covariates   (site: fixed effects)
     log sigma = 1 + ns(age, df_sigma) + male + covariates
+    shape     = 1 [+ ns(age, shape_df)]                         (shash: nu, log tau; gg: nu)
+
+    family 'normal' (the brain age models), 'shash' (SHASHo2) or 'gg' (generalized
+    gamma with log links for mu and sigma; positive data only).  The normal model is
+    fitted by the RS algorithm (fit_location_scale).  shash and gg start from it (gg
+    from the normal model of log y, its log-normal limit) and are refined by
+    fit_distribution.  Normal priors with SD shape_prior shrink the shape parameters
+    toward the normal distribution (gg: log-normal), and tau is kept within
+    [TAU_MIN, tau_max].  With shape_df > 0, age-dependent shape is used for a feature
+    only where BIC prefers it over constant shape.
 
     Covariates (cov: columns of C) enter as natural splines with cov.df degrees
     of freedom (1 = linear), centred at their training median, so that the model
@@ -549,13 +796,20 @@ class NormativeModel:
     constant or collinear with the rest of the design are not used.  Predictions
     condition on every subject's own covariates (missing values: median) and use
     the size-weighted mean of the training sites (as ComBat's stand_mean),
-    optionally adapted to a new site by adapt().
+    optionally adapted to a new site by adapt() (location and scale of the z-scores).
     """
 
-    def __init__(self, df_mu=5, df_sigma=3, cov=None, max_iter=2000, tol=1e-6):
+    def __init__(self, df_mu=5, df_sigma=3, cov=None, max_iter=2000, tol=1e-6,
+                 family='normal', shape_df=0, tau_max=2.0, shape_prior=1.0):
+        if family not in FAMILIES:
+            raise ValueError(f"Unknown family {family!r}; use one of {', '.join(FAMILIES)}.")
         self.df_mu, self.df_sigma = df_mu, df_sigma
         self.cov = cov or Covariates()
         self.max_iter, self.tol = max_iter, tol
+        self.family, self.shape_df = family, int(shape_df)
+        self.tau_max, self.shape_prior = float(tau_max), float(shape_prior)
+        self.kappa = self.lam = None
+        self.basis_shape = None
 
     def _cov_columns(self, C, n, names):
         """Spline bases (n, k) of the covariates names, centred at their median."""
@@ -588,6 +842,10 @@ class NormativeModel:
         W.append(self._cov_columns(C, n, self.cov_sd))        # columns (cov_effects)
         return np.hstack(X), np.hstack(W)
 
+    def _shape_design(self, age):
+        one = np.ones((len(age), 1))
+        return one if self.basis_shape is None else np.hstack([one, self.basis_shape(age)])
+
     def _setup(self, age, male, site, C=None):
         """Bases of age and covariates, sites and sex coding of the training data;
         drops constant and collinear covariates; returns site."""
@@ -598,6 +856,8 @@ class NormativeModel:
         self.use_male = np.unique(male).size > 1
         self.basis_mu = NaturalSpline(age, self.df_mu)
         self.basis_sigma = NaturalSpline(age, self.df_sigma)
+        self.basis_shape = (NaturalSpline(age, self.shape_df)
+                            if self.family != 'normal' and self.shape_df > 0 else None)
         self.cov_basis, self.cov_median = {}, {}
         self.cov_mean, self.cov_sd = [], []
         if not self.cov.names:
@@ -637,23 +897,94 @@ class NormativeModel:
         finite = np.all(np.isfinite(Y), axis=0)
         sd = np.zeros(Y.shape[1])
         sd[finite] = np.std(Y[:, finite], axis=0)
-        self.valid = np.flatnonzero(finite & (sd > 0))
+        ok = finite & (sd > 0)
+        if self.family == 'gg':
+            pos = np.zeros(Y.shape[1], dtype=bool)
+            pos[ok] = np.min(Y[:, ok], axis=0) > 0
+            if np.any(ok & ~pos):
+                _note(f"gg: {int(np.sum(ok & ~pos))} feature(s) with values <= 0 are not modelled.")
+            ok &= pos
+        self.valid = np.flatnonzero(ok)
         self.n_features = Y.shape[1]
 
         X, W = self._design(age, male, site, C)
         t0 = time.time()
-        self.beta, self.theta, conv = fit_location_scale(
-            Y[:, self.valid], X, W, self.max_iter, self.tol)
+        Yv = Y[:, self.valid]
+        if self.family == 'gg':
+            Yv = np.log(np.asarray(Yv, np.float64))
+        self.beta, self.theta, conv = fit_location_scale(Yv, X, W, self.max_iter, self.tol)
+        self.converged = conv
         if verbose:
             print(f"    normative model: {self.valid.size} features, "
                   f"{int(np.sum(~conv))} not converged ({time.time() - t0:.1f}s)")
         self.offset = np.zeros(self.valid.size)
         self.scale = np.ones(self.valid.size)
+        if self.family != 'normal':
+            self._fit_shape(Y[:, self.valid], age, X, W, verbose)
         return self
+
+    def _fit_shape(self, Y, age, X, W, verbose=False):
+        """shash or gg from the normal start by penalized ML (fit_distribution)."""
+        t0 = time.time()
+        Y = np.asarray(Y, np.float64)
+        n, p = Y.shape
+        V = self._shape_design(age)
+        shash = self.family == 'shash'
+        nshape = 2 if shash else 1
+        if shash:                       # standardized data, start at nu = 0, tau = 1
+            c, s = Y.mean(axis=0), Y.std(axis=0)
+            Ys = (Y - c) / s
+            b0 = self.beta / s
+            b0[0] -= c / s
+            t0_ = self.theta.copy()
+            t0_[0] -= np.log(s)
+            terms, bound = shash_terms, (3, np.log(TAU_MIN), np.log(self.tau_max))
+        else:                           # scaled data, start at the log-normal limit
+            s = np.exp(np.mean(np.log(Y), axis=0))
+            Ys = Y / s
+            b0 = self.beta.copy()
+            b0[0] -= np.log(s)
+            t0_ = self.theta.copy()
+            terms, bound = gg_terms, None
+        blocks = list(range(2, 2 + nshape))
+        coef, ll, conv = fit_distribution(Ys, [X, W] + [V[:, :1]] * nshape, terms,
+                                          [b0, t0_] + [np.zeros((1, p))] * nshape,
+                                          blocks, self.shape_prior, bound)
+        pad = [np.vstack([c_, np.zeros((V.shape[1] - 1, p))]) for c_ in coef[2:]]
+        self.shape_age = np.zeros(p, dtype=bool)
+        if V.shape[1] > 1:              # age-dependent shape where BIC prefers it
+            coef2, ll2, conv2 = fit_distribution(Ys, [X, W] + [V] * nshape, terms,
+                                                 coef[:2] + pad, blocks, self.shape_prior, bound)
+            use = 2 * (ll2 - ll) > nshape * (V.shape[1] - 1) * np.log(n)
+            coef[:2] = [np.where(use, a2, a1) for a1, a2 in zip(coef[:2], coef2[:2])]
+            pad = [np.where(use, a2, a1) for a1, a2 in zip(pad, coef2[2:])]
+            conv = np.where(use, conv2, conv)
+            self.shape_age = use
+        b, t = coef[0], coef[1]
+        if shash:
+            b = b * s
+            b[0] += c
+            t = t.copy()
+            t[0] += np.log(s)
+        else:
+            b = b.copy()
+            b[0] += np.log(s)
+        self.beta, self.theta = b, t
+        self.kappa = pad[0]
+        self.lam = pad[1] if shash else None
+        self.shape_converged = self.converged = conv
+        if verbose:
+            print(f"    {self.family}: {p} features, {int(np.sum(~conv))} not converged, "
+                  f"{int(np.sum(self.shape_age))} with age-dependent shape ({time.time() - t0:.1f}s)")
+
+    def _normal_only(self):
+        if self.family != 'normal':
+            raise ValueError(f"Only defined for the normal family, not {self.family!r}.")
 
     def mu_sigma(self, age, male, site=None, cols=None, C=None):
         """mu and sigma (n, p_valid) at the given ages and covariates C; cols selects
-        valid features."""
+        valid features (normal family)."""
+        self._normal_only()
         cols = slice(None) if cols is None else cols
         X, W = self._design(np.atleast_1d(age), np.atleast_1d(male), site, C)
         sd = np.exp(W @ self.theta[:, cols])
@@ -662,7 +993,8 @@ class NormativeModel:
 
     def base_mu_sigma(self, age, male, cols=None):
         """Unadapted mu and sigma (n, p_valid) at the reference site and median
-        covariates (male may be a scalar)."""
+        covariates (male may be a scalar; normal family)."""
+        self._normal_only()
         cols = slice(None) if cols is None else cols
         age = np.atleast_1d(age)
         X, W = self._design(age, np.broadcast_to(np.atleast_1d(male), age.shape))
@@ -671,6 +1003,7 @@ class NormativeModel:
     def cov_effects(self, C, cols=None):
         """Effects of the covariates C on mu and on log sigma (n, p_valid) relative
         to median covariates; None if the model has no such covariates."""
+        self._normal_only()
         cols = slice(None) if cols is None else cols
         Xc = self._cov_columns(C, len(C), self.cov_mean)
         Wc = self._cov_columns(C, len(C), self.cov_sd)
@@ -679,9 +1012,22 @@ class NormativeModel:
         return m, lw
 
     def zscores(self, Y, age, male, site=None, C=None):
-        """Normative deviation maps (n, p_valid) at the given ages."""
-        mu, sd = self.mu_sigma(age, male, site, C=C)
-        return (Y[:, self.valid] - mu) / sd
+        """Normative deviation maps (n, p_valid): z-scores (normal) or normal scores
+        (shash, gg) at the given ages, adapted to a new site by adapt()."""
+        if self.family == 'normal':
+            mu, sd = self.mu_sigma(age, male, site, C=C)
+            return (Y[:, self.valid] - mu) / sd
+        age = np.atleast_1d(age)
+        X, W = self._design(age, np.atleast_1d(male), site, C)
+        V = self._shape_design(age)
+        Yv = np.asarray(Y[:, self.valid], np.float64)
+        a, s, nu = X @ self.beta, W @ self.theta, V @ self.kappa
+        if self.family == 'shash':
+            z = shash_score(Yv, a, s, nu, V @ self.lam)
+        else:
+            with np.errstate(invalid='ignore', divide='ignore'):
+                z = gg_score(Yv, a, s, nu)
+        return (z - self.offset) / self.scale
 
     def adapt(self, Y, age, male, C=None):
         """Adapt to a new site using its control subjects.
@@ -692,9 +1038,10 @@ class NormativeModel:
         self.offset[:] = 0
         self.scale[:] = 1
         z = self.zscores(Y, age, male, C=C)
-        self.offset = z.mean(axis=0)
-        self.scale = z.std(axis=0, ddof=1)
+        self.offset = np.nanmean(z, axis=0)
+        self.scale = np.nanstd(z, axis=0, ddof=1)
         self.scale[~(self.scale > 0)] = 1
+        self.offset[~np.isfinite(self.offset)] = 0
 
     def copy(self):
         """Copy that shares the fitted parameters but has its own site adaptation."""
@@ -704,7 +1051,7 @@ class NormativeModel:
 
     def get_state(self):
         used = list(self.cov_basis)
-        return dict(
+        s = dict(
             df_mu=self.df_mu, df_sigma=self.df_sigma, cov=asdict(self.cov),
             use_male=bool(self.use_male), site_levels=np.asarray(self.site_levels),
             site_props=np.asarray(self.site_props, dtype=np.float64),
@@ -713,11 +1060,21 @@ class NormativeModel:
             cov_median=[self.cov_median[nm] for nm in used],
             cov_mean=list(self.cov_mean), cov_sd=list(self.cov_sd),
             n_features=int(self.n_features), valid=self.valid, beta=self.beta,
-            theta=self.theta, offset=self.offset, scale=self.scale)
+            theta=self.theta, offset=self.offset, scale=self.scale,
+            converged=np.asarray(self.converged, dtype=bool), family=self.family,
+            shape_df=self.shape_df, tau_max=self.tau_max, shape_prior=self.shape_prior)
+        if self.family != 'normal':
+            s.update(kappa=self.kappa, shape_age=self.shape_age,
+                     basis_shape=None if self.basis_shape is None else self.basis_shape.get_state())
+            if self.lam is not None:
+                s['lam'] = self.lam
+        return s
 
     @classmethod
     def from_state(cls, s):
-        self = cls(s['df_mu'], s['df_sigma'], Covariates.from_state(s['cov']))
+        self = cls(s['df_mu'], s['df_sigma'], Covariates.from_state(s['cov']),
+                   family=s.get('family', 'normal'), shape_df=s.get('shape_df', 0),
+                   tau_max=s.get('tau_max', 2.0), shape_prior=s.get('shape_prior', 1.0))
         self.use_male = bool(s['use_male'])
         self.site_levels = np.asarray(s['site_levels']).ravel()
         self.site_props = np.asarray(s['site_props'], dtype=np.float64).ravel()
@@ -732,6 +1089,16 @@ class NormativeModel:
         self.beta, self.theta = np.asarray(s['beta']), np.asarray(s['theta'])
         self.offset = np.array(s['offset'], dtype=np.float64).ravel()
         self.scale = np.array(s['scale'], dtype=np.float64).ravel()
+        conv = s.get('converged')                  # not in models of BA_ndm.py
+        self.converged = (np.ones(self.valid.size, dtype=bool) if conv is None
+                          else np.asarray(conv).astype(bool).ravel())
+        if self.family != 'normal':
+            self.shape_converged = self.converged
+            self.kappa = np.asarray(s['kappa'], dtype=np.float64)
+            self.lam = np.asarray(s['lam'], dtype=np.float64) if 'lam' in s else None
+            self.shape_age = np.asarray(s['shape_age']).astype(bool).ravel()
+            self.basis_shape = (None if s.get('basis_shape') is None
+                                else NaturalSpline.from_state(s['basis_shape']))
         return self
 
 
@@ -1139,7 +1506,7 @@ class NDMBrainAge:
               plus diagonal residual correlation.  Its correlation model misses
               most of the dependence between voxels, so the standard errors
               are much too small and the estimates less accurate.  This model
-              can be shared with the z-maps (VoxelModel.from_ndm).
+              can be shared with z-maps of the normal family (VoxelModel.from_ndm).
     warp    : warp every voxel/vertex with a sinh-arcsinh function fitted jointly
               with a voxel-wise normative model (Warp) before all other steps
     cov     : covariates of all normative models (Covariates, columns of Data.C)
@@ -1147,7 +1514,7 @@ class NDMBrainAge:
 
     def __init__(self, df_mu=5, df_sigma=3, pca=100, rank=20, psi_min=0.01,
                  grid_step=0.25, grid_margin=5.0, parcellation=False,
-                 atlas_dir=HERE, warp=False, cov=None, verbose=False):
+                 atlas_dir=ATLAS_DIR, warp=False, cov=None, verbose=False):
         self.df_mu, self.df_sigma = df_mu, df_sigma
         self.pca, self.rank, self.psi_min = pca, rank, psi_min
         self.grid_step, self.grid_margin = grid_step, grid_margin
@@ -1321,7 +1688,7 @@ class NDMBrainAge:
             parts=[p.get_state(index[id(p.model)]) for p in self.parts])
 
     @classmethod
-    def from_state(cls, s, atlas_dir=HERE):
+    def from_state(cls, s, atlas_dir=ATLAS_DIR):
         self = cls(s['df_mu'], s['df_sigma'], s['pca'], s['rank'], s['psi_min'],
                    s['grid_step'], s['grid_margin'], s['parcellation'], atlas_dir, s['warp'],
                    Covariates.from_state(s['cov']))
@@ -1335,47 +1702,47 @@ class NDMBrainAge:
 
 
 class VoxelModel:
-    """Voxel/vertex-wise normative model: the pure normative model, without PCA.
+    """Voxel/vertex-wise normative model: a GAMLSS for every voxel/vertex without PCA
+    (family 'shash', 'normal' or 'gg', see NormativeModel), which gives z-maps.
 
-    A location-scale model for every voxel/vertex (age, sex, site and covariates
-    as in NormativeModel), optionally after a sinh-arcsinh warp (warp), which
-    gives z-maps.  from_ndm() shares the model of an NDMBrainAge with pca=0,
+    from_ndm() shares the normal model of an NDMBrainAge with pca=0 (and its warp),
     which is then fitted only once.
     """
 
-    def __init__(self, df_mu=5, df_sigma=3, warp=False, cov=None, verbose=False):
-        self.df_mu, self.df_sigma = df_mu, df_sigma
-        self.warp, self.cov, self.verbose = warp, cov or Covariates(), verbose
+    def __init__(self, df_mu=5, df_sigma=3, cov=None, family='shash', shape_df=0,
+                 tau_max=2.0, shape_prior=1.0, verbose=False):
+        self.df_mu, self.df_sigma, self.cov = df_mu, df_sigma, cov or Covariates()
+        self.family, self.shape_df = family, shape_df
+        self.tau_max, self.shape_prior, self.verbose = tau_max, shape_prior, verbose
         self.model = self.warper = None
         self.shared = False          # model and warp belong to an NDMBrainAge
 
-    def fit(self, d: Data, warper=None):
-        """Fit to the training data d; warper: a fitted Warp of d to reuse."""
-        if self.warp:
-            self.warper = warper or Warp(self.df_mu, self.df_sigma, cov=self.cov).fit(
-                d.Y, d.age, d.male, d.site, self.verbose, C=d.C)
-            d = replace(d, Y=self.warper.transform(d.Y))
-        self.model = NormativeModel(self.df_mu, self.df_sigma, self.cov).fit(
+    def fit(self, d: Data):
+        """Fit to the training data d."""
+        self.model = NormativeModel(self.df_mu, self.df_sigma, self.cov, family=self.family,
+                                    shape_df=self.shape_df, tau_max=self.tau_max,
+                                    shape_prior=self.shape_prior).fit(
             d.Y, d.age, d.male, d.site, self.verbose, C=d.C)
         return self
 
     @classmethod
     def from_ndm(cls, est):
-        """The voxel/vertex-wise normative model of an NDMBrainAge with pca=0."""
+        """The voxel/vertex-wise normal model of an NDMBrainAge with pca=0."""
         if est.pca:
             raise ValueError("Only an NDMBrainAge with pca=0 has a voxel/vertex-wise model.")
-        self = cls(est.df_mu, est.df_sigma, est.warp, est.cov, est.verbose)
+        self = cls(est.df_mu, est.df_sigma, est.cov, family='normal', verbose=est.verbose)
         self.model, self.warper, self.shared = est.parts[0].model, est.warper, True
         return self
 
     def zmaps(self, d: Data, ctrl=None, ctrl_age=None, parcellation=False,
-              atlas_dir=HERE, chunk=256):
+              atlas_dir=ATLAS_DIR, chunk=256):
         """z-maps of the subjects d at chronological age.
 
         Given the indices ctrl of control subjects of d (and their ages ctrl_age,
         by default their chronological ages), a copy of the model is first
         adapted to the site of d.  Returns Z (n, n_features) as float32, with NaN
-        for features without a model and for subjects without a valid age, and,
+        for features without a model and for subjects without a valid age, the
+        convergence of the fit per feature (1, 0 or NaN without a model) and,
         with parcellation, the lobe-wise mean z (n, n_regions), the region labels
         and their names.
         """
@@ -1391,7 +1758,7 @@ class VoxelModel:
             sub = ok[c0:c0 + chunk]
             Z[np.ix_(sub, model.valid)] = model.zscores(Y[sub], d.age[sub], d.male[sub],
                                                         C=Cs(sub))
-        out = dict(Z=Z)
+        out = dict(Z=Z, converged=_full_map(model.converged[None].astype(float), model)[0])
         if parcellation:
             atlas, regions, names = lobe_atlas(d, atlas_dir)
             with warnings.catch_warnings():
@@ -1403,22 +1770,182 @@ class VoxelModel:
         return out
 
     def get_state(self):
-        return dict(df_mu=self.df_mu, df_sigma=self.df_sigma, warp=bool(self.warp),
-                    cov=asdict(self.cov), shared=bool(self.shared),
+        return dict(df_mu=self.df_mu, df_sigma=self.df_sigma, cov=asdict(self.cov),
+                    family=self.family, shape_df=self.shape_df, tau_max=self.tau_max,
+                    shape_prior=self.shape_prior, shared=bool(self.shared),
                     model=None if self.shared else self.model.get_state(),
                     warper=None if self.shared or self.warper is None else self.warper.get_state())
 
     @classmethod
     def from_state(cls, s, ndm=None):
-        self = cls(s['df_mu'], s['df_sigma'], s['warp'], Covariates.from_state(s['cov']))
+        self = cls(s['df_mu'], s['df_sigma'], Covariates.from_state(s['cov']),
+                   family=s.get('family', 'normal'), shape_df=s.get('shape_df', 0),
+                   tau_max=s.get('tau_max', 2.0), shape_prior=s.get('shape_prior', 1.0))
         if s['shared']:
             if ndm is None:
                 raise ValueError("The voxel-wise model refers to a missing brain age model.")
             self.model, self.warper, self.shared = ndm.parts[0].model, ndm.warper, True
         else:
             self.model = NormativeModel.from_state(s['model'])
-            self.warper = None if s['warper'] is None else Warp.from_state(s['warper'])
+            self.warper = None if s.get('warper') is None else Warp.from_state(s['warper'])
         return self
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics: Q statistics and worm plots by age group
+# ---------------------------------------------------------------------------
+
+def _age_groups(age, n_groups):
+    """Indices of n_groups age groups of (nearly) equal size."""
+    order = np.argsort(age, kind='stable')
+    return [g for g in np.array_split(order, n_groups) if g.size]
+
+
+def q_statistics(Z, age, n_groups=10, n_coef=(0, 0, 0, 0)):
+    """Q statistics (Royston & Wright 2000; Q.stats of gamlss) of z-scores Z (n, p).
+
+    In age groups of equal size, the mean (Z1), variance (Z2, Wilson-Hilferty),
+    skewness (Z3, D'Agostino) and kurtosis (Z4, Anscombe-Glynn) of the z-scores are
+    standardized; Q_k is the sum of Z_k^2 over the groups, with chi-square p-values
+    for n_groups - n_coef[k] degrees of freedom (at least 1).  n_coef[k] is the
+    number of coefficients of the age curve (with intercept) of the parameter that
+    controls moment k: mu, sigma, nu and tau; 0 if it is not fitted (e.g. the shape
+    of the normal family).  Each entry is a number or a (p,) array per feature.
+    Returns Z (4, groups, p), Q (4, p), p (4, p), df (4, p) and the age ranges of
+    the groups.
+    """
+    from scipy.stats import chi2, kurtosistest, skewtest
+    Z = np.asarray(Z, np.float64)
+    groups = _age_groups(age, n_groups)
+    Zs = np.full((4, len(groups), Z.shape[1]), np.nan)
+    for g, idx in enumerate(groups):
+        z = Z[idx]
+        m = np.sum(np.isfinite(z), axis=0)
+        with np.errstate(all='ignore'), warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            Zs[0, g] = np.sqrt(m) * np.nanmean(z, axis=0)
+            v = np.nanvar(z, axis=0, ddof=1)
+            Zs[1, g] = (np.cbrt(v) - (1 - 2 / (9 * (m - 1)))) / np.sqrt(2 / (9 * (m - 1)))
+            Zs[2, g] = np.ma.filled(np.ma.asarray(skewtest(z, axis=0, nan_policy='omit')[0],
+                                                  dtype=float), np.nan)
+            Zs[3, g] = np.ma.filled(np.ma.asarray(kurtosistest(z, axis=0, nan_policy='omit')[0],
+                                                  dtype=float), np.nan)
+    Q = np.sum(Zs ** 2, axis=1)
+    df = np.maximum(len(groups) - np.vstack([np.broadcast_to(np.asarray(c, float), Z.shape[1:])
+                                             for c in n_coef]), 1)
+    return dict(Z=Zs, Q=Q, p=chi2.sf(Q, df), df=df,
+                groups=np.array([(age[g].min(), age[g].max()) for g in groups]))
+
+
+def worm_plot(Z, age, path, n_groups=6, title=''):
+    """Worm plots (van Buuren & Fredriks 2001) by age group, summarized over features:
+    median and 5-95% range over features of the detrended normal QQ plot, with the
+    pointwise 95% band of one well-calibrated feature."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from scipy.stats import norm
+    Z = np.asarray(Z, np.float64)
+    Z = Z[:, np.all(np.isfinite(Z), axis=0)]
+    xg = np.linspace(-2.5, 2.5, 51)
+    groups = _age_groups(age, n_groups)
+    fig, axes = plt.subplots(1, len(groups), figsize=(2.3 * len(groups), 2.8), sharey=True)
+    for ax, idx in zip(np.atleast_1d(axes), groups):
+        m = idx.size
+        x = norm.ppf((np.arange(1, m + 1) - 0.5) / m)
+        dev = np.sort(Z[idx], axis=0) - x[:, None]
+        pos = np.interp(xg, x, np.arange(m))             # same x for all features
+        i0 = np.clip(np.floor(pos).astype(int), 0, m - 2)
+        w = (pos - i0)[:, None]
+        D = (1 - w) * dev[i0] + w * dev[i0 + 1]
+        lo, med, hi = np.percentile(D, [5, 50, 95], axis=1)
+        band = 1.96 * np.sqrt(norm.cdf(xg) * norm.sf(xg) / m) / norm.pdf(xg)
+        ax.fill_between(xg, lo, hi, color='#2a78d6', alpha=0.2, lw=0)
+        ax.plot(xg, med, color='#2a78d6', lw=1.5)
+        ax.plot(xg, band, color='#898781', lw=0.8, ls=(0, (3, 2)))
+        ax.plot(xg, -band, color='#898781', lw=0.8, ls=(0, (3, 2)))
+        ax.axhline(0, color='#c3c2b7', lw=0.6)
+        ax.set_title(f"age {age[idx].min():.0f}-{age[idx].max():.0f}", fontsize=8)
+        ax.set_xlabel('unit normal quantile', fontsize=7)
+        ax.tick_params(labelsize=7)
+    np.atleast_1d(axes)[0].set_ylabel('deviation', fontsize=7)
+    np.atleast_1d(axes)[0].set_ylim(-0.6, 0.6)
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    fig.legend([Line2D([], [], color='#2a78d6', lw=1.5), Patch(color='#2a78d6', alpha=0.2, lw=0),
+                Line2D([], [], color='#898781', lw=0.8, ls=(0, (3, 2)))],
+               ['median over features', '5-95% of features',
+                '95% band of one well-calibrated feature'],
+               loc='lower center', ncol=3, frameon=False, fontsize=7)
+    fig.suptitle(title, fontsize=8)
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def run_diagnostics(sets, train, prefix, n_groups=10):
+    """Q statistics and worm plots of the voxel/vertex-wise models on their training
+    data (z-scores at the subjects' own sites): <prefix>_diagnostics.csv (summary),
+    <prefix>_diagnostics_<model>.mat (Q statistics, p-values, degrees of freedom and
+    convergence per feature) and <prefix>_wormplot_<model>.png."""
+    from scipy.io import savemat
+    rows = []
+    for s, d in zip(sets, train):
+        if s.voxel is None:
+            continue
+        m = s.voxel.model
+        Y = d.Y if s.voxel.warper is None else s.voxel.warper.transform(d.Y)
+        Z = m.copy()
+        Z.offset[:], Z.scale[:] = 0, 1
+        Z = Z.zscores(Y, d.age, d.male, d.site, C=d.C)       # at the subjects' own sites
+        n_coef = [1 + m.basis_mu.df, 1 + m.basis_sigma.df, 0, 0]   # age curves with intercept
+        if m.family != 'normal':
+            shape = 1 + (0 if m.basis_shape is None else m.basis_shape.df * m.shape_age)
+            n_coef[2] = shape                                     # nu
+            n_coef[3] = shape if m.family == 'shash' else 0       # tau (gg has none)
+        q = q_statistics(Z, d.age, n_groups, n_coef)
+        name = os.path.splitext(d.name.split('+')[0])[0]
+        savemat(f'{prefix}_diagnostics_{name}.mat', {'NDMdiag': dict(
+            Q=_full_map(q['Q'], m), p_Q=_full_map(q['p'], m), df_Q=_full_map(q['df'], m),
+            age_groups=q['groups'], converged=_full_map(m.converged[None].astype(float), m)[0],
+            family=m.family, model=d.name)}, do_compression=True)
+        try:
+            worm_plot(Z, d.age, f'{prefix}_wormplot_{name}.png',
+                      title=f'{_model_key(d.name)}: {m.family}, {d.n} training subjects')
+        except ImportError:
+            _note("matplotlib is not installed: no worm plots.")
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            from scipy.stats import kurtosis, skew
+            sk, ku = np.abs(skew(Z, axis=0)), np.abs(kurtosis(Z, axis=0))
+        rows.append((d.name, m.family, *[100 * np.mean(q['p'][k] < 0.05) for k in range(4)],
+                     np.nanmedian(sk), np.nanmedian(ku),
+                     100 * np.mean(m.shape_age) if m.family != 'normal' else 0.0,
+                     100 * np.mean(~m.converged)))
+    if not rows:
+        return
+    head = ['model', 'family', 'Q1_mean_pct_p05', 'Q2_variance_pct_p05', 'Q3_skewness_pct_p05',
+            'Q4_kurtosis_pct_p05', 'median_abs_skew', 'median_abs_excess_kurtosis',
+            'pct_age_dependent_shape', 'pct_not_converged']
+    with open(prefix + '_diagnostics.csv', 'w') as f:
+        f.write(','.join(head) + '\n')
+        for r in rows:
+            f.write(','.join([r[0], r[1]] + [f'{v:.4f}' for v in r[2:]]) + '\n')
+    print(f"\nDiagnostics on the training data ({n_groups} age groups); share of features "
+          "with p < 0.05 (5% expected):")
+    print(f"  {'model':40s} {'family':7s} {'Q1 mean':>8s} {'Q2 var':>7s} {'Q3 skew':>8s} "
+          f"{'Q4 kurt':>8s} {'|skew|':>7s} {'|kurt|':>7s}")
+    for r in rows:
+        print(f"  {r[0][:40]:40s} {r[1]:7s} {r[2]:7.1f}% {r[3]:6.1f}% {r[4]:7.1f}% {r[5]:7.1f}% "
+              f"{r[6]:7.3f} {r[7]:7.3f}")
+    print(f"Saved {prefix}_diagnostics.csv, {prefix}_diagnostics_*.mat and {prefix}_wormplot_*.png")
+
+
+def _full_map(values, m):
+    """(k, p_valid) values of a model as (k, n_features) with NaN for invalid features."""
+    full = np.full((values.shape[0], m.n_features), np.nan)
+    full[:, m.valid] = values
+    return full
 
 
 # ---------------------------------------------------------------------------
@@ -1495,7 +2022,7 @@ def _used_covariates(sets):
 
 
 def _git_version():
-    """Short git commit of BA_ndm.py, if available."""
+    """Short git commit of neurogamlss.py, if available."""
     try:
         import subprocess
         out = subprocess.run(['git', '-C', HERE, 'rev-parse', '--short', 'HEAD'],
@@ -1505,7 +2032,7 @@ def _git_version():
         return None
 
 
-def model_description(train, kw, contents, warp_zmaps=False, age_range=(0, np.inf),
+def model_description(train, kw, contents, vkw=None, age_range=(0, np.inf),
                       sets=None):
     """Description of the models sets fitted to train (list of Data with the
     training subjects used): settings, training sample and covariates (requested
@@ -1514,10 +2041,10 @@ def model_description(train, kw, contents, warp_zmaps=False, age_range=(0, np.in
     cov = kw.get('cov') or Covariates()
     sites = d0.name.split('+')
     settings = {k: v for k, v in kw.items() if k not in ('cov', 'atlas_dir', 'verbose')}
-    settings.update(warp_zmaps=bool(warp_zmaps),
+    settings.update(voxel_model={**VOXEL_DEFAULTS, **(vkw or {})},
                     age_range=[float(x) if np.isfinite(x) else None for x in age_range])
     desc = dict(format=MODEL_FORMAT, version=MODEL_VERSION,
-                created=time.strftime('%Y-%m-%d %H:%M:%S'), ba_ndm=_git_version(),
+                created=time.strftime('%Y-%m-%d %H:%M:%S'), neurogamlss=_git_version(),
                 contents=contents, settings=settings,
                 training=dict(files=[d.name for d in train], n=int(d0.n),
                               age_min=float(np.min(d0.age)), age_max=float(np.max(d0.age)),
@@ -1620,27 +2147,27 @@ def save_models(path, sets, description):
     print(f"Saved models to {path} and their description to {json_path}")
 
 
-def load_models(path, atlas_dir=HERE):
+def load_models(path, atlas_dir=ATLAS_DIR):
     """Models saved by save_models(): (list of ModelSet, description)."""
     ext = os.path.splitext(path)[1].lower()
     if ext == '.npz':
         with np.load(path, allow_pickle=False) as f:
             if '__meta__' not in f.files:
-                raise ValueError(f"{path} is not a BA_ndm model file.")
+                raise ValueError(f"{path} is not a NeuroGAMLSS model file.")
             state = _from_tree(json.loads(str(f['__meta__'])), lambda key: f[key])
     elif ext == '.mat':
         from scipy.io import loadmat
         m = loadmat(path, squeeze_me=False, struct_as_record=False)
         if 'meta_json' not in m or 'NDMmodel' not in m:
-            raise ValueError(f"{path} is not a BA_ndm model file.")
+            raise ValueError(f"{path} is not a NeuroGAMLSS model file.")
         tree = json.loads(str(np.asarray(m['meta_json']).ravel()[0]))
         state = _from_tree(tree, lambda key: _mat_get(m['NDMmodel'], key))
     else:
         raise ValueError(f"{path}: the model file needs the extension .mat or .npz.")
-    if state.get('format') != MODEL_FORMAT:
-        raise ValueError(f"{path} is not a BA_ndm model file.")
+    if state.get('format') not in (MODEL_FORMAT,) + LEGACY_FORMATS:
+        raise ValueError(f"{path} is not a NeuroGAMLSS model file.")
     if state.get('version', 0) > MODEL_VERSION:
-        raise ValueError(f"{path} was saved by a newer version of BA_ndm.py.")
+        raise ValueError(f"{path} was saved by a newer version of neurogamlss.py.")
     sets = []
     for s in state.pop('models'):
         est = None if s['brainage'] is None else NDMBrainAge.from_state(s['brainage'], atlas_dir)
@@ -1854,28 +2381,35 @@ def cross_validate(datas, kfold=10, seed=0, age_range=(0, np.inf), gpr=True,
     return _summarize(datas, res, d0.age, ok, ensemble, gpr, fold=fold)
 
 
-def fit_models(train, kw, brainage=True, voxel=False, warp_zmaps=False):
+def fit_models(train, kw, brainage=True, voxel=False, vkw=None):
     """Fit models to every training input (list of Data with the subjects to use).
 
-    brainage   : NDMBrainAge(**kw) for the brain age
-    voxel      : VoxelModel for the z-maps (warped with warp_zmaps); with pca=0 and
-                 the same warp, the model of the brain age is shared (fitted once)
+    brainage : NDMBrainAge(**kw) for the brain age
+    voxel    : VoxelModel for the z-maps with vkw (family, shape_df, tau_max,
+               shape_prior; VOXEL_DEFAULTS); with pca=0 and the normal family, the
+               voxel-wise model of the brain age is shared (fitted once)
     Returns a list of ModelSet.
     """
+    vkw = {**VOXEL_DEFAULTS, **(vkw or {})}
     sets = []
     for d in train:
         t0 = time.time()
         est = NDMBrainAge(**kw).fit(d) if brainage else None
-        vm = None
+        vm, info = None, ''
         if voxel:
-            if est is not None and not est.pca and est.warp == warp_zmaps:
+            if est is not None and not est.pca and vkw['family'] == 'normal':
                 vm = VoxelModel.from_ndm(est)
             else:
-                vm = VoxelModel(kw.get('df_mu', 5), kw.get('df_sigma', 3), warp_zmaps,
-                                kw.get('cov')).fit(
-                    d, warper=est.warper if est is not None and warp_zmaps else None)
+                vm = VoxelModel(kw.get('df_mu', 5), kw.get('df_sigma', 3), kw.get('cov'),
+                                **vkw).fit(d)
+            m = vm.model
+            if m.family != 'normal':
+                info = (f"; {m.family}: {int(np.sum(~m.shape_converged))} of {m.valid.size} "
+                        "not converged")
+                if m.basis_shape is not None:
+                    info += f", age-dependent shape in {int(np.sum(m.shape_age))}"
         sets.append(ModelSet(data_info(d), est, vm))
-        print(f"  {d.name}: fitted in {time.time() - t0:.1f}s", flush=True)
+        print(f"  {d.name}: fitted in {time.time() - t0:.1f}s{info}", flush=True)
     return sets
 
 
@@ -1928,7 +2462,8 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         for s, d in zip(sets, test):
             t0 = time.time()
             z = s.voxel.zmaps(d, zc, parcellation=parcellation)
-            zm.append(dict(z, model=d.name, ind=d.ind, age=age, male=d.male))
+            zm.append(dict(z, model=d.name, family=s.voxel.model.family, ind=d.ind,
+                           age=age, male=d.male))
             print(f"  {d.name}: {time.time() - t0:.1f}s", flush=True)
         if zc is None:
             print("No adaptation to the test site: z-maps at the reference site of the "
@@ -1982,16 +2517,18 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
     if cov_names:
         out['covariates'] = np.array(cov_names, dtype=object)
     if zmaps_out:
-        out['zmaps'] = [dict(r['zmaps'], model=r['name'], ind=d.ind, age=age, male=d.male)
-                        for r, d in zip(res, test)]
+        out['zmaps'] = [dict(r['zmaps'], model=r['name'], family=s.voxel.model.family,
+                             ind=d.ind, age=age, male=d.male)
+                        for r, d, s in zip(res, test, sets)]
     return out
 
 
 def train_test(train, test, adjust=None, correction='offset', age_range=(0, np.inf),
-               gpr=True, ensemble='gls', zmaps_out=False, warp_zmaps=False, **kw):
+               gpr=True, ensemble='gls', zmaps_out=False, vkw=None, **kw):
     """Train on one sample and predict another (fit_models and apply_models).
 
-    Arguments as for apply_models; kw are passed to NDMBrainAge.  Without sex in
+    Arguments as for apply_models; kw are passed to NDMBrainAge and vkw to
+    VoxelModel (family, shape_df, tau_max, shape_prior).  Without sex in
     the test data, sex is dropped from all models.
     """
     if not all(d.has_male for d in test):
@@ -2000,7 +2537,7 @@ def train_test(train, test, adjust=None, correction='offset', age_range=(0, np.i
         test = [replace(d, male=np.zeros_like(d.male)) for d in test]
     sel = np.flatnonzero(_valid_train(train[0], age_range))
     train = [d.subset(sel) for d in train]
-    sets = fit_models(train, kw, True, zmaps_out, warp_zmaps)
+    sets = fit_models(train, kw, True, zmaps_out, vkw)
     return apply_models(sets, test, adjust, correction, ensemble, zmaps_out, train=train, gpr=gpr)
 
 
@@ -2062,7 +2599,7 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
               f"{np.corrcoef(ba_ndm[ctrl], gpr_ens[ctrl])[0, 1]:.3f}")
 
     e = ens[ensemble]
-    reg_names = _region_names(HERE)
+    reg_names = _region_names(ATLAS_DIR)
     if e['regions']:
         print("\nRegional NDM BrainAGE (ensemble), controls: mean / MAE / r(BA, age)")
         for j, rid in enumerate(e['regions']):
@@ -2123,8 +2660,8 @@ def save_results(out, prefix):
 
     Brain age: <prefix>.mat (struct NDM) and <prefix>.csv.  z-maps, if computed:
     one <prefix>_zmaps_<model>.mat per model (struct NDMzmap: Z (n, n_features) in
-    the feature order of the input Y, regional_z, regions, region_names, age, male,
-    model, ind).  With --normative-only, only the z-maps are saved and, with
+    the feature order of the input Y, converged (n_features,), regional_z, regions,
+    region_names, age, male, model, family, ind).  With --normative-only, only the z-maps are saved and, with
     regional z, their lobe-wise means as <prefix>.csv.
     """
     from scipy.io import savemat
@@ -2164,7 +2701,8 @@ def save_results(out, prefix):
 
 def main(argv=None):
     p = argparse.ArgumentParser(
-        description="Brain age and voxel/vertex-wise normative models (NDM prototype).",
+        description="NeuroGAMLSS: vectorized GAMLSS normative models for brain MRI "
+                    "and NormBrainAGE.",
         formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     p.add_argument('--train', nargs='+', help="training mat-file per model ('+' joins sites)")
     p.add_argument('--model', help="saved models (--save-model) to apply to --test instead "
@@ -2193,10 +2731,24 @@ def main(argv=None):
     p.add_argument('--warp', action='store_true',
                    help="warp every voxel/vertex for the brain age models (sinh-arcsinh, "
                         "fitted jointly with a voxel-wise normative model)")
-    p.add_argument('--warp-zmaps', action='store_true',
-                   help="warp the data of the voxel/vertex-wise normative models (recommended: "
-                        "calibrated tails of the z-maps); independent of --warp, but shares "
-                        "its fit")
+    p.add_argument('--family', choices=FAMILIES, default='shash',
+                   help="distribution of the voxel/vertex-wise normative models: shash "
+                        "(sinh-arcsinh with skewness and tail weight; default), normal "
+                        "(fast; near-Gaussian data) or gg (generalized gamma as in Brain "
+                        "Charts; positive data only)")
+    p.add_argument('--shape-df', type=int, default=0,
+                   help="spline df of age for the shape parameters of shash/gg, used per "
+                        "voxel/vertex only where BIC prefers it (default 0 = constant shape)")
+    p.add_argument('--tau-max', type=float, default=2.0,
+                   help="upper bound of the shash tail parameter tau (> 1: lighter tails "
+                        "than normal; bounds the z-scores of values far outside the "
+                        "training range; default 2)")
+    p.add_argument('--shape-prior', type=float, default=1.0,
+                   help="SD of the normal priors that shrink the shape parameters toward "
+                        "the normal distribution (default 1)")
+    p.add_argument('--diagnostics', action='store_true',
+                   help="Q statistics and worm plots by age group of the voxel/vertex-wise "
+                        "models on the training data")
     p.add_argument('--train-cov', help="covariate table of the training subjects (e.g. IQMs): "
                                        "one row per subject in the order of the mat-files, "
                                        "used for all models; header with column names "
@@ -2232,7 +2784,7 @@ def main(argv=None):
     p.add_argument('--ensemble', choices=['gls', 'mae', 'mean'], default='gls')
     p.add_argument('--no-gpr', action='store_true', help="skip the GPR baseline")
     p.add_argument('--seed', type=int, default=0)
-    p.add_argument('--out', default='BA_ndm_results', help="output prefix")
+    p.add_argument('--out', default='neurogamlss_results', help="output prefix")
     a = p.parse_args(argv)
 
     if bool(a.train) == bool(a.model):
@@ -2255,8 +2807,11 @@ def main(argv=None):
             p.error("--correction agefree needs brain age models (not with --normative-only).")
     elif not (a.test or a.save_model or kfold):
         p.error("nothing to do: --kfold 0 without --test or --save-model.")
-    if a.warp_zmaps and not voxel:
-        print("--warp-zmaps has no effect without --zmaps or --normative-only.")
+    if a.diagnostics and not (a.train and voxel):
+        p.error("--diagnostics needs --train and voxel/vertex-wise models "
+                "(--normative-only or --zmaps).")
+    vkw = dict(family=a.family, shape_df=a.shape_df, tau_max=a.tau_max,
+               shape_prior=a.shape_prior)
     t0 = time.time()
 
     test = None
@@ -2299,14 +2854,16 @@ def main(argv=None):
                 print(f"{int(np.sum(~ok))} training subject(s) excluded (invalid age, outside "
                       "age range or missing covariates).")
             fit_train = [d.subset(np.flatnonzero(ok)) for d in train]
-            contents = ('voxel/vertex-wise normative models' if not brainage else
-                        'brain age and voxel/vertex-wise normative models' if voxel else
-                        'brain age models')
+            contents = (f'voxel/vertex-wise normative models ({a.family})' if not brainage else
+                        f'brain age and voxel/vertex-wise normative models ({a.family})'
+                        if voxel else 'brain age models')
             print(f"Fitting {contents} to {fit_train[0].n} subjects", flush=True)
-            sets = fit_models(fit_train, kw, brainage, voxel, a.warp_zmaps)
-            desc = model_description(fit_train, kw, contents, a.warp_zmaps, a.age_range, sets)
+            sets = fit_models(fit_train, kw, brainage, voxel, vkw)
+            desc = model_description(fit_train, kw, contents, vkw, a.age_range, sets)
             if a.save_model:
                 save_models(a.save_model, sets, desc)
+            if a.diagnostics:
+                run_diagnostics(sets, fit_train, a.out)
         if test is None:
             if brainage and kfold:
                 if a.zmaps:
