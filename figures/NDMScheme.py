@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-NDMScheme.py - Figure of the NDM brain age (BA_ndm.py) and of its difference
-to the conventional use of normative models.
+NDMScheme.py - Figure of the NDM brain age (NormBrainAGE in neurogamlss.py) and
+of its difference to the conventional use of normative models.
 
   a  pipeline: both approaches share the normative models; the conventional
      approach computes z-scores at chronological age, NDM estimates the age at
@@ -15,7 +15,7 @@ to the conventional use of normative models.
 b-d are simulated: 12 features whose mean and SD change with age, sorted by
 the size of the age effect, and one subject (chronological age 45 years) whose
 data were drawn at age 58 years with non-aging deviations in features 5 and 9.
-The brain age is estimated as in BA_ndm.py (grid search with parabolic
+The brain age is estimated as in neurogamlss.py (grid search with parabolic
 refinement and Laplace standard error), here with R = I.  e uses two features
 with equal, age-independent SD and R = I, where the non-aging deviation is
 orthogonal to the normative trajectory.
@@ -93,7 +93,7 @@ def loglik(y, grid):
 y_sub = mu(AGE_TRUE, ALL) + sig(AGE_TRUE, ALL) * EPS
 grid = np.arange(15, 95.001, 0.25)
 ll = loglik(y_sub, grid)
-g = np.argmax(ll)                          # as BA_ndm._argmax_refine
+g = np.argmax(ll)                          # as neurogamlss._argmax_refine
 curv = ll[g - 1] - 2 * ll[g] + ll[g + 1]
 a_hat = grid[g] + 0.5 * (ll[g - 1] - ll[g + 1]) / curv * 0.25
 se = 0.25 / np.sqrt(-curv)
