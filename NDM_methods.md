@@ -1,6 +1,6 @@
 # Brain age from normative models (NDM): methods
 
-> Draft methods section for the NDM brain age implemented in `BA_ndm.py`. Values in square brackets are study-specific and need to be filled in. The notes at the end are for the authors and are not part of the manuscript text.
+> Draft methods section for the NDM brain age (NormBrainAGE) implemented in `neurogamlss.py` of NeuroGAMLSS. Values in square brackets are study-specific and need to be filled in. The notes at the end are for the authors and are not part of the manuscript text.
 
 ![Figure 1](figures/NDMScheme.png)
 
@@ -150,7 +150,7 @@ This corresponds to the location and scale step of ComBat (Johnson et al., 2007;
 
 ## Non-Gaussian features (optional)
 
-Skewed or heavy-tailed data can be transformed voxel- or vertex-wise before all other steps with a sinh–arcsinh warp (Jones and Pewsey, 2009),
+For brain age, skewed or heavy-tailed data can be transformed voxel- or vertex-wise before all other steps with a sinh–arcsinh warp (Jones and Pewsey, 2009),
 
 $$
 w = \sinh\!\left(\delta\, \operatorname{asinh}(x) - \varepsilon\right),
@@ -161,7 +161,7 @@ where $x$ is the standardized value. As in warped Bayesian linear regression (Fr
 
 ## Voxel- and vertex-wise deviation maps
 
-To localize deviations, we also computed conventional deviation maps (Fig. 1a, orange). A location–scale model (1)–(2) was fitted to every voxel or vertex of the training data, optionally after the warp (12). When control subjects were available, it was adapted to the test site with (11), using the controls' chronological ages, or their brain ages for the age-free adaptation. It was then evaluated with (3) at chronological age. With the lobe atlas, the maps were also averaged within regions.
+To localize deviations, we also computed conventional deviation maps (Fig. 1a, orange). Voxel- and vertex-wise data are often skewed or heavy-tailed. We therefore fitted a GAMLSS with the sinh–arcsinh distribution (Jones and Pewsey, 2009) to every voxel or vertex of the training data instead of the normal model (1). In the SHASHo2 parameterization of gamlss.dist (Rigby et al., 2019), $\sinh(\tau \operatorname{asinh}(z) - \nu)$ follows a standard normal distribution, with $z = (y - \mu)/(\sigma\tau)$. The location $\mu$ and the log scale $\log\sigma$ depend on age, sex, site and covariates as in (2). The skewness $\nu$ and the tail weight $\tau$ are constant for each voxel or vertex. With $\nu = 0$ and $\tau = 1$, the model reduces to (1). Normal priors with standard deviation 1 on $\nu$ and $\log\tau$ shrink the shape toward the normal distribution, and $\tau$ was kept between 0.2 and 2. The fit started from the normal model and continued with damped Newton steps using exact derivatives. The deviation map is the normal score $\sinh(\tau \operatorname{asinh}(z) - \nu)$ at chronological age, which equals (3) for the normal model. When control subjects were available, the controls' normal scores were standardized to mean 0 and standard deviation 1, which is equivalent to (11) for the normal model. This used the controls' chronological ages, or their brain ages for the age-free adaptation. With the lobe atlas, the maps were also averaged within regions. The calibration of the voxel- and vertex-wise models was checked in [10] age groups of the training sample with Q statistics (Royston and Wright, 2000) and worm plots (van Buuren and Fredriks, 2001).
 
 ## Voxel-wise variant
 
@@ -175,7 +175,7 @@ Within a dataset, accuracy was assessed with [10]-fold cross-validation. Folds w
 
 ## Implementation
 
-NDM is implemented in Python with NumPy and SciPy, using h5py for MATLAB v7.3 files and nibabel for surface atlases. It is available as `BA_ndm.py` in the BrainAGE toolbox (https://github.com/ChristianGaser/BrainAGE). The script reads the data files written by `BA_data2mat` and saves the results in MATLAB and CSV format. Because $\mathbf{R}$ does not depend on age, the quadratic form in (5) can be expanded, so that $\ell$ for all subjects of one sex and all grid ages is obtained with a few matrix products. [Computation times.]
+NDM is implemented in Python with NumPy and SciPy, using h5py for MATLAB v7.3 files and nibabel for surface atlases. It is available as NormBrainAGE in `neurogamlss.py` of NeuroGAMLSS (https://github.com/ChristianGaser/NeuroGAMLSS), which also fits the voxel- and vertex-wise normative models. The script reads the data files written by `BA_data2mat` and saves the results in MATLAB and CSV format. Because $\mathbf{R}$ does not depend on age, the quadratic form in (5) can be expanded, so that $\ell$ for all subjects of one sex and all grid ages is obtained with a few matrix products. [Computation times.]
 
 ## Figure legend
 
@@ -203,20 +203,24 @@ NDM is implemented in Python with NumPy and SciPy, using h5py for MATLAB v7.3 fi
 - Marquand, A.F., Kia, S.M., Zabihi, M., Wolfers, T., Buitelaar, J.K., Beckmann, C.F., 2019. Conceptualizing mental disorders as deviations from normative functioning. Molecular Psychiatry 24, 1415–1424.
 - Osborne, C., 1991. Statistical calibration: a review. International Statistical Review 59, 309–336.
 - Rigby, R.A., Stasinopoulos, D.M., 2005. Generalized additive models for location, scale and shape. Journal of the Royal Statistical Society, Series C 54, 507–554.
+- Rigby, R.A., Stasinopoulos, D.M., Heller, G.Z., De Bastiani, F., 2019. Distributions for Modeling Location, Scale, and Shape: Using GAMLSS in R. Chapman and Hall/CRC, Boca Raton.
+- Royston, P., Wright, E.M., 2000. Goodness-of-fit statistics for age-specific reference intervals. Statistics in Medicine 19, 2943–2962.
 - Rutherford, S., Kia, S.M., Wolfers, T., et al., 2022. The normative modeling framework for computational psychiatry. Nature Protocols 17, 1711–1734.
 - Smith, S.M., Vidaurre, D., Alfaro-Almagro, F., Nichols, T.E., Miller, K.L., 2019. Estimation of brain age delta from brain imaging. NeuroImage 200, 528–539.
 - Toro, R., Chupin, M., Garnero, L., et al., 2009. Brain volumes and Val66Met polymorphism of the BDNF gene: local or global effects? Brain Structure and Function 213, 501–509.
+- van Buuren, S., Fredriks, M., 2001. Worm plot: a simple diagnostic device for modelling growth reference curves. Statistics in Medicine 20, 1259–1277.
 - Wilson, E.B., Hilferty, M.M., 1931. The distribution of chi-square. Proceedings of the National Academy of Sciences 17, 684–688.
 - Wolfers, T., Doan, N.T., Kaufmann, T., et al., 2018. Mapping the heterogeneous phenotype of schizophrenia and bipolar disorder using normative models. JAMA Psychiatry 75, 1146–1155.
 
 ## Notes for the authors (not part of the manuscript)
 
-- **Figure source.** `figures/NDMScheme.py` generates Figure 1 from a simulation, and the numbers in the legend come from that script. Panels b–d use the estimator of `BA_ndm.py` with independent features.
+- **Figure source.** `figures/NDMScheme.py` generates Figure 1 from a simulation, and the numbers in the legend come from that script. Panels b–d use the estimator of `neurogamlss.py` with independent features.
 - **References.** The bibliographic details were written from memory and need checking. This applies especially to ComBatLS, whose final journal publication is not confirmed. The docstring names the ComCat repository as the source of the port.
-- **In-sample ensemble weights.** In cross-validation, `BA_ndm.py` estimates the ensemble weights on the same out-of-fold estimates that it evaluates. With few models the optimism is small, but nested estimation or equal weights would avoid the objection.
+- **In-sample ensemble weights.** In cross-validation, `neurogamlss.py` estimates the ensemble weights on the same out-of-fold estimates that it evaluates. With few models the optimism is small, but nested estimation or equal weights would avoid the objection.
 - **Degrees of freedom of the non-aging deviation.** $d^2(\hat a)$ is minimized over one parameter, so its reference distribution is closer to $\chi^2_{K-1}$. With $K = 100$, using $K$ shifts the normal score by about −0.02.
 - **Reference site in cross-validation.** Test subjects from training sites are evaluated at the reference site, not at their own site. In pooled multi-site samples, site offsets then add to the variance of BrainAGE. The paper should state this choice or evaluate subjects at their own site.
 - **In-sample residual correlation.** $\mathbf{R}$ comes from training z-scores, which are slightly less dispersed than out-of-sample z-scores. The reported coverage of the 95% intervals shows whether the standard errors are calibrated.
 - **Ensemble deviation.** The mean of normal scores over correlated models has a standard deviation below one in controls. Report it as such or standardize it.
-- **Claims from the code documentation.** The docstring states that the voxel-wise variant is overconfident and less accurate, that the warp does not improve brain age, and that it calibrates the tails of the z-maps. These statements need results before they appear in the paper.
-- **GPR baseline.** `BA_ndm.py` contains a Python replica of `BA_gpr` that differs slightly because of PCA sign conventions. State whether the GPR results come from the replica or from `BA_gpr_ui.m`.
+- **Claims from the code documentation.** The docstring states that the voxel-wise variant is overconfident and less accurate. This statement needs results before it appears in the paper.
+- **Family of the deviation maps.** The SHASH default for the deviation maps rests on the diagnostics of one training sample (GM and WM at 8 mm): the share of voxels with skewness or kurtosis misfit (Q statistics, p < 0.05) fell from 85–89% with the normal model to 36–40% with SHASH. Run `--diagnostics` on the study data and report these numbers, or state that the normal model was used.
+- **GPR baseline.** `neurogamlss.py` contains a Python replica of `BA_gpr` that differs slightly because of PCA sign conventions. State whether the GPR results come from the replica or from `BA_gpr_ui.m`.
