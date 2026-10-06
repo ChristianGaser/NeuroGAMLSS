@@ -215,3 +215,77 @@ def test_convergence_saved(tmp_path):
     assert np.array_equal(m.shape_converged, m.converged)
     conv = vm.zmaps(d)['converged']
     assert conv.shape == (8,) and conv[1] == 0
+
+
+def simulate_trajectories(n=900, p=60, wiggly=False, seed=11):
+    """Normal data whose mean depends on age linearly or with several bends."""
+    rng = np.random.default_rng(seed)
+    age = rng.uniform(10, 80, n)
+    male = rng.integers(0, 2, n).astype(float)
+    site = rng.integers(0, 2, n)
+    u = (age - 10) / 70
+    shape = np.sin(3 * np.pi * u) if wiggly else u
+    Y = shape[:, None] * rng.uniform(0.5, 1.5, p) + 0.1 * site[:, None] + 0.3 * rng.standard_normal((n, p))
+    return NG.Data(Y.astype(np.float32), age, male, site, 'sim_8mm_X.mat', res='8')
+
+
+def test_select_df_normative_follows_the_trajectory():
+    lin = NG.select_df_normative(simulate_trajectories(), max_features=60)
+    wig = NG.select_df_normative(simulate_trajectories(wiggly=True), max_features=60)
+    assert lin[0] <= 3 and wig[0] >= 5
+    assert lin[2]['selected'] and len(lin[2]['stages']) == 2
+    fixed = NG.select_df_normative(simulate_trajectories(), df_mu=4, max_features=60)
+    assert fixed[0] == 4 and fixed[2]['stages'][0]['df_mu'] == [4] * len(NG.DF_GRID_VOXEL['sigma'])
+
+
+def simulate_brain(n=500, p=300, seed=12):
+    """Features with age effects of different shapes, for NDMBrainAge."""
+    rng = np.random.default_rng(seed)
+    age = rng.uniform(20, 80, n)
+    male = rng.integers(0, 2, n).astype(float)
+    u = (age - 20) / 60
+    load = rng.standard_normal((3, p))
+    Y = (np.column_stack([u, u ** 2, np.sqrt(u)]) @ load + 0.5 * rng.standard_normal((n, p)))
+    return NG.Data(Y.astype(np.float32), age, male, np.zeros(n, int), 'sim_8mm_X.mat', res='8')
+
+
+def test_with_df_equals_a_new_fit():
+    d = simulate_brain()
+    est = NG.NDMBrainAge(pca=10).fit(d)
+    a = est.with_df(d, 2, 1).predict(d)
+    b = NG.NDMBrainAge(df_mu=2, df_sigma=1, pca=10).fit(d).predict(d)
+    assert np.allclose(a['age'], b['age']) and np.allclose(a['sd'], b['sd'], equal_nan=True)
+
+
+def test_select_df_brainage():
+    d = simulate_brain()
+    dm, ds, rec = NG.select_df_brainage(d, dict(pca=10))
+    assert dm in NG.DF_GRID_BRAINAGE['mu'] and ds in NG.DF_GRID_BRAINAGE['sigma']
+    first, last = rec['stages']
+    assert first['df_mu'] == list(NG.DF_GRID_BRAINAGE['mu']) and set(last['df_mu']) == {dm}
+    assert last['mae'][last['df_sigma'].index(ds)] == min(last['mae'])
+    assert NG.select_df_brainage(d, dict(pca=10), 2, 3)[2]['selected'] is False
+
+
+def test_command_line_stores_the_chosen_df(tmp_path):
+    import json
+    from scipy.io import loadmat
+    d = simulate_trajectories(n=500, p=40)
+    files = {}
+    for name, sel in (('TR', slice(0, 350)), ('TE', slice(350, 500))):
+        files[name] = str(tmp_path / f's4rp1_8mm_{name}_CAT12.9.mat')
+        savemat(files[name], dict(Y=d.Y[sel], age=d.age[sel][:, None], male=d.male[sel][:, None]))
+    model, out = str(tmp_path / 'norm.npz'), str(tmp_path / 'res')
+    NG.main(['--normative-only', '--family', 'normal', '--train', files['TR'],
+             '--save-model', model, '--diagnostics', '--out', out])
+    with open(str(tmp_path / 'norm.json')) as f:
+        rec = json.load(f)['models'][0]['df_voxel']
+    assert rec['selected'] and rec['df_mu'] in NG.DF_GRID_VOXEL['mu']
+    loaded = NG.load_models(model)[0][0]
+    assert loaded.info['df_voxel']['df_mu'] == rec['df_mu'] == loaded.voxel.model.df_mu
+    NG.main(['--normative-only', '--model', model, '--test', files['TE'], '--out', out])
+    z = loadmat(out + '_zmaps_s4rp1_8mm_TE_CAT12.9.mat', squeeze_me=True)['NDMzmap']
+    assert int(z['df_mu']) == rec['df_mu'] and int(z['df_sigma']) == rec['df_sigma']
+    NG.main(['--normative-only', '--df-mu', '4', '--df-sigma', '2', '--train', files['TR'],
+             '--save-model', model, '--out', out])
+    assert NG.load_models(model)[0][0].voxel.model.df_mu == 4
