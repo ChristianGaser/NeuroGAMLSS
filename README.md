@@ -2,6 +2,9 @@
 
 Vectorized GAMLSS normative models for voxel- and vertex-wise brain MRI, with z-maps and NormBrainAGE brain age.
 
+> [!WARNING]
+> This project is **currently under construction** and might contain bugs. **If you experience any issues, please [let me know](https://github.com/ChristianGaser/ComCat/issues)!**
+
 NeuroGAMLSS fits a generalized additive model for location, scale and shape (GAMLSS) to every voxel or vertex of a reference sample at once. Each model describes how a brain measure is distributed as a function of age, sex, scanner site and optional covariates such as image quality measures. New subjects then get deviation maps (z-maps) at their chronological age. NormBrainAGE, the brain-age module, uses the same kind of models in the opposite direction: it estimates the age at which a subject's data are most likely.
 
 - **Distribution families:** sinh-arcsinh (SHASH, the default) for skewed or heavy-tailed voxel data, normal for near-Gaussian data, and generalized gamma (GG) as in Brain Charts for positive data.
