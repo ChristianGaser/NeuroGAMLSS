@@ -144,8 +144,8 @@ Covariates are centred at their training median, and z-scores condition on every
 
 NormBrainAGE reduces the training data of each model by principal component analysis (PCA), by default to 100 components for the whole brain and, with `--parcellation`, for each lobe. Normal location-scale models describe the component scores as functions of age, and their residual correlation is estimated from the training sample. The brain age of a subject is the age that maximizes the likelihood of its scores. The method yields:
 
-- **Brain age and BrainAGE,** the difference between brain age and chronological age, with a standard error from the curvature of the likelihood.
-- **Regional brain ages** for the lobes with `--parcellation`.
+- **BrainAGE,** the difference between brain age and chronological age, with a standard error from the curvature of the likelihood.
+- **Regional BrainAGE** for the lobes with `--parcellation`.
 - **A non-aging deviation,** the normal score of the Mahalanobis distance of the subject's z-scores at its brain age. It measures the atypicality that an older or younger brain does not explain.
 - **An ensemble** of all models, weighted by generalized least squares (`--ensemble`).
 
