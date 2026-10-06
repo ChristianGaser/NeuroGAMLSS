@@ -20,7 +20,7 @@ g(\mu_i) &= \beta_0 + \mathbf{b}_\mu(a_i)^\top \boldsymbol\beta + \beta_s s_i + 
 $$
 
 - **Link of the location.** $g$ is the identity for the normal and SHASH families and the logarithm for GG.
-- **Age.** $\mathbf{b}_\mu$, $\mathbf{b}_\sigma$ and $\mathbf{b}_\nu$ are natural cubic spline bases without intercept, with 5, 3 and `--shape-df` degrees of freedom (Hastie et al., 2009). Their knots lie at equally spaced quantiles of the training ages. The splines are linear beyond the youngest and the oldest training age, so the models extrapolate linearly.
+- **Age.** $\mathbf{b}_\mu$, $\mathbf{b}_\sigma$ and $\mathbf{b}_\nu$ are natural cubic spline bases without intercept (Hastie et al., 2009). The degrees of freedom of $\mathbf{b}_\mu$ and $\mathbf{b}_\sigma$ are chosen for every training sample, see [Flexibility of the age curves](#flexibility-of-the-age-curves), and those of $\mathbf{b}_\nu$ are given by `--shape-df`. Their knots lie at equally spaced quantiles of the training ages. The splines are linear beyond the youngest and the oldest training age, so the models extrapolate linearly.
 - **Sex** enters location and log scale as a main effect. It is left out when the training sample has only one sex or the test data contain no sex.
 - **Site** enters the location as a fixed effect, with $\gamma_1 = 0$. Predictions for new data use the size-weighted mean of the site effects, as the standardized mean of ComBat.
 - **Covariates** $\mathbf{h}(\mathbf{x})$ are natural splines with `--cov-df` degrees of freedom, linear by default, centred at their training median. A covariate is dropped from a predictor when it is constant or collinear with the other columns of that predictor.
@@ -112,6 +112,49 @@ $$
 $$
 
 where $\ell_1$ and $\ell_2$ are the unpenalized log-likelihoods of the two fits, $m$ is the number of shape parameters (2 for SHASH, 1 for GG) and $n$ is the number of subjects. In gray and white matter at 8 mm with $k = 3$, BIC chose age-dependent shape for 8% of the voxels.
+
+## Flexibility of the age curves
+
+By default, the degrees of freedom (df) of the age splines of $\mu$ and $\sigma$ are chosen for every training sample and model by 5-fold cross-validation. The folds are stratified by site and age: the subjects of every site are sorted by age and dealt to the folds in turn. The same df apply to all voxels and to all component scores.
+
+- **Voxel-wise models.** Normal models of 1,000 random voxels are fitted to the training folds, and every setting is scored by the median over voxels of its held-out log-likelihood per subject, relative to the mean of the settings compared. The df of $\mu$ are searched first, from 2 to 12 with 3 for $\sigma$, and then those of $\sigma$, from 1 to 5. The normal model keeps the search fast, and for SHASH the same df were best in tests.
+- **NormBrainAGE.** Every setting is scored by the mean absolute error of the held-out global brain age after removing its median. The df of $\mu$ are searched from 1 to 8 with 3 for $\sigma$, then those of $\sigma$ from 1 to 4. The principal components of every fold are computed once and reused for all settings, and the warp is left out during the search. With `--pca 0`, the voxel-wise model is shared with the z-maps, and its df are chosen as for them.
+
+Given numbers in `--df-mu` or `--df-sigma` are not searched. The choice, its criterion and the scores of all settings tried are stored with the models (`df_voxel` and `df_brain_age` in the JSON description). With `--kfold`, the df are chosen once on all subjects before the folds, which makes the cross-validated errors slightly optimistic.
+
+### Evidence
+
+Three comparisons on 8 mm gray and white matter of the 2,241 lifespan subjects motivated this design. The first used 5-fold cross-validation within the sample with SHASH models. Gains are the held-out log-likelihood per subject and voxel relative to the former fixed 5 and 3 df, in thousandths of a nat:
+
+| SHASH, choice of the df | Gray matter | White matter |
+|---|---|---|
+| 3 and 2 df for all voxels | 1.12 | 0.85 |
+| Per voxel by the Akaike information criterion | 0.92 | 0.65 |
+| Per voxel by the Bayesian information criterion | 1.07 | 0.84 |
+| Per voxel by cross-validation | 1.00 | 0.73 |
+| Best df of every voxel, an upper bound | 1.90 | 1.59 |
+
+A choice voxel by voxel, which penalized splines with automatic smoothing such as `pb()` in gamlss would make, was no better than one setting for all voxels. The z-scores changed by about 0.05 standard deviations between these settings, which is small compared with the change between the normal model and SHASH. For the normal model, very flexible standard-deviation curves failed badly out of sample in a few near-empty voxels. This dominated the mean log-likelihood, so the criterion uses the median over voxels.
+
+Brain age depends more on the flexibility, because flexible curves fit noise in the age effects of weak component scores, which looks like age information. The second comparison trained on the lifespan sample and tested on 258 NKI adults, with 258 other NKI adults as controls. The error ratio is the standard deviation of the brain-age error divided by its standard error, which is 1 when the standard errors are calibrated:
+
+| df of $\mu$ for all component scores | Gray matter error | White matter error | Gray matter error ratio | White matter error ratio |
+|---|---|---|---|---|
+| 1 | 5.65 | 6.73 | 1.05 | 1.15 |
+| 2 | 5.07 | 5.78 | 1.15 | 1.14 |
+| 5, the former default | 5.25 | 6.03 | 1.45 | 1.49 |
+| 8 | 5.35 | 6.02 | 1.86 | 1.98 |
+| Per component, Akaike criterion | 5.35 | 5.92 | 1.58 | 1.51 |
+| Per component, Bayesian criterion | 5.19 | 5.98 | 1.18 | 1.17 |
+
+Choosing the df per component did not beat one setting for all components. The third comparison used the automatic choice on the same data. It picked 3 df for $\mu$ and 1 or 2 for $\sigma$ for brain age, and 2 or 3 for $\mu$ and 2 for $\sigma$ for the z-maps:
+
+| Brain age on NKI adults | Gray matter | White matter |
+|---|---|---|
+| Mean absolute error, former 5 and 3 df | 5.25 | 6.03 |
+| Mean absolute error, chosen df | 5.11 | 5.98 |
+| Error ratio, former 5 and 3 df | 1.45 | 1.49 |
+| Error ratio, chosen df | 1.23 | 1.23 |
 
 ## Normal scores and new sites
 

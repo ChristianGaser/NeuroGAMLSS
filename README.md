@@ -8,7 +8,7 @@ Vectorized GAMLSS normative models for voxel- and vertex-wise brain MRI, with z-
 NeuroGAMLSS fits a generalized additive model for location, scale and shape (GAMLSS) to every voxel or vertex of a reference sample at once. Each model describes how a brain measure is distributed as a function of age, sex, scanner site and optional covariates such as image quality measures. New subjects then get deviation maps (z-maps) at their chronological age. NormBrainAGE, the brain-age module, uses the same kind of models in the opposite direction: it estimates the age at which a subject's data are most likely.
 
 - **Distribution families:** sinh-arcsinh (SHASH, the default) for skewed or heavy-tailed voxel data, normal for near-Gaussian data, and generalized gamma (GG) as in Brain Charts for positive data.
-- **Age curves:** natural cubic splines for location and scale. The shape is constant or, where BIC prefers it, also a function of age.
+- **Age curves:** natural cubic splines for location and scale, whose flexibility is chosen for each training sample by cross-validation. The shape is constant or, where BIC prefers it, also a function of age.
 - **Speed:** all voxels are fitted together. SHASH models for 30,000 voxels and 2,241 subjects take four to seven minutes on a laptop.
 - **Sites and covariates:** sites enter as fixed effects, and new sites are adapted with their control subjects. Covariates such as image quality measures can enter the mean and the standard deviation.
 - **Diagnostics:** Q statistics and worm plots by age group show how well the models fit.
@@ -95,6 +95,13 @@ python neurogamlss.py --train s4rp1_8mm_A_CAT12.9.mat s4rp2_8mm_A_CAT12.9.mat \
 
 **GG** is the generalized gamma distribution that Brain Charts used (Bethlehem et al., 2022). It needs positive data, and features with values of zero or below get no model. The log-normal distribution is its special case ν = 0. On positive gray matter voxels, it removed most of the skewness left by the normal model, though less than SHASH.
 
+**Flexibility of the age curves.** By default, NeuroGAMLSS chooses the spline degrees of freedom (df) of location and scale for each training sample and model by 5-fold cross-validation, with folds stratified by site and age. The same df apply to all voxels. In tests, one setting for all voxels did as well as choosing the df voxel by voxel, which is what penalized splines with automatic smoothing such as `pb()` in gamlss would do. The criteria differ between the two kinds of models:
+
+- **z-maps:** normal models of 1,000 random voxels are compared by their held-out likelihood, using the median over voxels. The df of location are chosen first, from 2 to 12, and then those of scale, from 1 to 5.
+- **NormBrainAGE:** the models of the component scores are compared by the mean absolute error of the held-out brain age. The df of location range from 1 to 8 and those of scale from 1 to 4.
+
+In the example data, the choice took 40 to 80 s for each kind of model and picked 2 or 3 df for location and 1 or 2 for scale, stiffer than the former fixed 5 and 3. On an independent sample, this made brain age more accurate and its standard errors better calibrated. `--df-mu` and `--df-sigma` set fixed df instead. The chosen df are stored in the model file, its JSON description and all output files. With `--kfold`, the df are chosen once on all subjects before the folds, so the cross-validated errors are slightly optimistic.
+
 **Age-dependent shape.** By default, the shape parameters are constant for each voxel. `--shape-df 3` also fits ν and τ as natural splines of age and keeps them for a voxel only where the Bayesian information criterion (BIC) prefers them. In the example data, BIC chose age-dependent shape for about 8% of the voxels, and fitting took about twice as long. Use it where the diagnostics show that the shape misfit depends on age.
 
 ## Checking the fit
@@ -157,7 +164,7 @@ When the training data are given, a Python replica of the GPR BrainAGE of the Br
 
 ## Saved models
 
-`--save-model` writes the fitted models to a `.npz` file (NumPy) or a `.mat` file (MATLAB struct `NDMmodel`). Neither format runs code when it is loaded. A JSON file with the same name describes the models. It records the settings, the training sample with its age range and sites, the covariates, and the feature space of every model.
+`--save-model` writes the fitted models to a `.npz` file (NumPy) or a `.mat` file (MATLAB struct `NDMmodel`). Neither format runs code when it is loaded. A JSON file with the same name describes the models. It records the settings, the training sample with its age range and sites, the covariates, and for every model its feature space and the chosen df with the scores of the cross-validation.
 
 `--model` applies a saved file to `--test` data instead of fitting new models. NeuroGAMLSS stops with an error if the test data do not match the models: surface instead of volume data or the reverse, or a different number of voxels or vertices, resolution, volume dimensions or vertex indices. It also stops if the models use sex or covariates that the test data lack. It reports test subjects outside the training age range or covariate range, where the models extrapolate linearly.
 
@@ -167,11 +174,11 @@ When the training data are given, a Python replica of the GPR BrainAGE of the Br
 
 | File | Content |
 |---|---|
-| `<out>_zmaps_<model>.mat` | struct `NDMzmap`: `Z` (subjects × features), `converged`, `family`, `age`, `male`, `model`, `ind`, and with `--parcellation` `regional_z`, `regions`, `region_names` |
+| `<out>_zmaps_<model>.mat` | struct `NDMzmap`: `Z` (subjects × features), `converged`, `family`, `df_mu`, `df_sigma`, `age`, `male`, `model`, `ind`, and with `--parcellation` `regional_z`, `regions`, `region_names` |
 | `<out>.csv` | normative models only: mean z of each lobe for every subject (with `--parcellation`) |
-| `<out>.mat`, `<out>.csv` | brain age: struct `NDM` and a table with BrainAGE, standard errors and deviations of every model and of the ensemble |
+| `<out>.mat`, `<out>.csv` | brain age: struct `NDM`, including the df of every model in `df_mu` and `df_sigma`, and a table with BrainAGE, standard errors and deviations of every model and of the ensemble |
 | `<out>_diagnostics.csv` | summary of the diagnostics for every model |
-| `<out>_diagnostics_<model>.mat` | struct `NDMdiag`: `Q`, `p_Q` and `df_Q` (4 × features: mean, variance, skewness, kurtosis), `converged`, `age_groups`, `family`, `model` |
+| `<out>_diagnostics_<model>.mat` | struct `NDMdiag`: `Q`, `p_Q` and `df_Q` (4 × features: mean, variance, skewness, kurtosis), `converged`, `age_groups`, `family`, `model`, `df_mu`, `df_sigma` |
 | `<out>_wormplot_<model>.png` | worm plots |
 
 `Z` has the same feature order as `Y` in the input file, so it maps back to the image or surface like the input data. Features without a model, such as voxels with zero variance, are NaN. `converged` is 1 for voxels whose fit converged, 0 for the others and NaN without a model.
@@ -192,7 +199,7 @@ When the training data are given, a Python replica of the GPR BrainAGE of the Br
 | `--shape-df` | 0 | spline degrees of freedom of the shape parameters, chosen by BIC per voxel |
 | `--tau-max` | 2 | upper bound of the SHASH tail parameter τ |
 | `--shape-prior` | 1 | standard deviation of the priors on the shape parameters |
-| `--df-mu`, `--df-sigma` | 5, 3 | spline degrees of freedom of age for location and scale |
+| `--df-mu`, `--df-sigma` | `auto` | spline degrees of freedom of age for location and scale, chosen by cross-validation or given as numbers |
 | `--diagnostics` | off | Q statistics and worm plots of the training fit |
 | `--adjust` | | 1-based indices of the test controls |
 | `--correction` | `offset` | use of the controls, see above |
@@ -235,6 +242,13 @@ Times for 2,241 training subjects on an Apple M2 laptop, in one process:
 | 4 mm volume | 29,852 | 26 s | 4.4 min | 7.3 min |
 
 The normal times are for gray matter, and white matter took the same time at 8 mm. White matter is more skewed than gray matter, and its SHASH fits take longer. Memory is bounded by processing the features in chunks.
+
+The automatic choice of the df adds the following times for gray matter. Fixed df given with `--df-mu` and `--df-sigma` skip it.
+
+| Choice of the df | 8 mm | 4 mm |
+|---|---|---|
+| z-map models | 40 s | 41 s |
+| brain age models | 40 s | 77 s |
 
 ## Tests
 
