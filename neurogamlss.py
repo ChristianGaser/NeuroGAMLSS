@@ -21,8 +21,12 @@ distribution D (--family) is
   gg      generalized gamma (GG of gamlss.dist, as in Brain Charts) for positive
           data such as volumes
 
-The shape parameters are constant per voxel/vertex or, with --shape-df, splines of
-age where BIC prefers them.  The normal model is fitted by the RS algorithm of
+The spline df of age of mu and sigma are chosen per training sample by
+cross-validation (--df-mu/--df-sigma auto, the default), the same for all
+voxels/vertices: by the held-out likelihood for the z-maps and by the error of
+the brain age for NormBrainAGE.  The choice is stored with the models and in the
+output files.  The shape parameters are constant per voxel/vertex or, with
+--shape-df, splines of age where BIC prefers them.  The normal model is fitted by the RS algorithm of
 GAMLSS (ported from ComBatLS); shash and gg start from it and are refined by damped
 Newton steps with exact (shash) or numerical (gg) derivatives and step halving.
 Test subjects get z-maps (normal scores) at chronological age, adapted to a new
@@ -116,6 +120,14 @@ LEGACY_FORMATS = ('BA_ndm model',)
 FAMILIES = ('shash', 'normal', 'gg')
 VOXEL_DEFAULTS = dict(family='shash', shape_df=0, tau_max=2.0, shape_prior=1.0)
 TAU_MIN = 0.2                  # lower bound of the shash tail parameter
+
+# choice of the spline df of age per training sample (--df-mu/--df-sigma auto): grids
+# searched, df of sigma while the df of mu is searched (z-maps), folds and the number
+# of random features used for the z-map models
+DF_AUTO = 'auto'
+DF_GRID_VOXEL = dict(mu=(2, 3, 4, 5, 6, 8, 10, 12), sigma=(1, 2, 3, 4, 5))
+DF_GRID_BRAINAGE = dict(mu=(1, 2, 3, 4, 5, 6, 8), sigma=(1, 2, 3, 4))
+DF_START_SIGMA, DF_FOLDS, DF_MAX_FEATURES = 3, 5, 1000
 LOG2PI = np.log(2 * np.pi)
 
 _NOTES = set()
@@ -1576,6 +1588,26 @@ class NDMBrainAge:
                               self.grid_step)
         return self
 
+    def with_df(self, d, df_mu, df_sigma, inputs=None):
+        """Copy with the normative models and residual correlations refitted to the
+        training data d with other spline df, keeping the PCA (pca > 0).  inputs are
+        the model inputs of d for every part (part.model_input), if already computed."""
+        if not self.pca:
+            raise ValueError("with_df needs principal component models (pca > 0).")
+        new = copy.copy(self)
+        new.df_mu, new.df_sigma = int(df_mu), int(df_sigma)
+        d = self._prep(d)
+        new.parts = []
+        for i, part in enumerate(self.parts):
+            q = copy.copy(part)
+            F = part.model_input(d.Y) if inputs is None else inputs[i]
+            q.model = new._normative(F, d)
+            q.mcols = np.arange(q.model.valid.size)
+            Z = q.model.zscores(F, d.age, d.male, d.site, C=d.C)
+            q.corr = ResidualCorrelation(Z.shape[1], self.psi_min).fit(Z)
+            new.parts.append(q)
+        return new
+
     def _models(self):
         """One part per distinct normative model (voxel-wise mode shares one model)."""
         models = {}
@@ -1792,6 +1824,166 @@ class VoxelModel:
 
 
 # ---------------------------------------------------------------------------
+# Choice of the spline df of age per training sample
+# ---------------------------------------------------------------------------
+
+def _df_folds(d, k, seed=0):
+    """Folds stratified by site and age: the subjects of every site, sorted by age
+    with ties at random, are dealt to the folds in turn."""
+    rng = np.random.default_rng(seed)
+    fold = np.empty(d.n, dtype=int)
+    for s in np.unique(d.site):
+        idx = np.flatnonzero(d.site == s)
+        idx = idx[np.lexsort((rng.random(idx.size), d.age[idx]))]
+        fold[idx] = (np.arange(idx.size) + rng.integers(k)) % k
+    return fold
+
+
+def _search_df(criteria, df_mu, df_sigma, grid):
+    """Coordinate search of (df_mu, df_sigma): df_mu with df_sigma fixed (its given
+    value or DF_START_SIGMA), then df_sigma given the chosen df_mu.  criteria(configs)
+    returns one value per configuration (higher is better); ties go to the smaller
+    df.  Given numbers are not searched.  Returns df_mu, df_sigma and the stages."""
+    mus = grid['mu'] if df_mu == DF_AUTO else (int(df_mu),)
+    sigmas = grid['sigma'] if df_sigma == DF_AUTO else (int(df_sigma),)
+    best = (mus[0], DF_START_SIGMA if df_sigma == DF_AUTO else int(df_sigma))
+    stages = []
+    for stage in ('mu', 'sigma'):
+        configs = ([(m, best[1]) for m in mus] if stage == 'mu'
+                   else [(best[0], s) for s in sigmas])
+        if len(configs) > 1:
+            crit = [float(c) for c in criteria(configs)]
+            best = configs[int(np.argmax(crit))]
+            stages.append(dict(df_mu=[c[0] for c in configs], df_sigma=[c[1] for c in configs],
+                               criterion=crit))
+        else:
+            best = configs[0]
+    return int(best[0]), int(best[1]), stages
+
+
+def select_df_normative(d, cov=None, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS,
+                        max_features=DF_MAX_FEATURES, seed=0):
+    """Spline df of age of mu and sigma of the voxel/vertex-wise normative models,
+    the same for all features of the training data d, by k-fold cross-validation.
+
+    Normal models are fitted to up to max_features random features (fast; for SHASH
+    the same df were best in tests) in folds stratified by site and age.  A setting
+    is scored by the median over features of its held-out log-likelihood per
+    subject, relative to the mean of the settings compared: the median is robust to
+    the few degenerate features, such as near-empty voxels, in which flexible curves
+    fail out of sample.  df_mu is searched first (_search_df).  Returns df_mu,
+    df_sigma and a record of the search."""
+    ok = np.flatnonzero(np.all(np.isfinite(d.Y), axis=0) & (np.std(d.Y, axis=0) > 0))
+    rng = np.random.default_rng(seed)
+    cols = np.sort(rng.choice(ok, min(max_features, ok.size), replace=False))
+    Y = np.asarray(d.Y[:, cols], np.float64)
+    fold = _df_folds(d, k, seed)
+    Cs = (lambda idx: None) if d.C is None else (lambda idx: d.C[idx])
+    cache = {}
+
+    def heldout(dm, ds):
+        if (dm, ds) not in cache:
+            ll = np.zeros(cols.size)
+            for f in range(k):
+                tr, te = np.flatnonzero(fold != f), np.flatnonzero(fold == f)
+                m = NormativeModel(dm, ds, cov).fit(Y[tr], d.age[tr], d.male[tr], d.site[tr],
+                                                    C=Cs(tr))
+                known = np.isin(d.site[te], m.site_levels)     # sites seen in training
+                mu = np.empty((te.size, m.valid.size))
+                sd = np.empty_like(mu)
+                for sel, site in ((known, d.site[te]), (~known, None)):
+                    if np.any(sel):
+                        idx = te[sel]
+                        mu[sel], sd[sel] = m.mu_sigma(d.age[idx], d.male[idx],
+                                                      None if site is None else site[sel],
+                                                      C=Cs(idx))
+                z = (Y[te][:, m.valid] - mu) / sd
+                lf = np.full(cols.size, np.nan)
+                lf[m.valid] = np.sum(-np.log(sd) - 0.5 * z ** 2, axis=0)
+                ll += lf
+            cache[(dm, ds)] = ll / d.n
+        return cache[(dm, ds)]
+
+    def criteria(configs):
+        L = np.stack([heldout(*c) for c in configs])
+        return np.nanmedian(L - np.nanmean(L, axis=0), axis=1)
+
+    dm, ds, stages = _search_df(criteria, df_mu, df_sigma, DF_GRID_VOXEL)
+    return dm, ds, dict(
+        df_mu=dm, df_sigma=ds, selected=bool(stages), method='cross-validation',
+        criterion='median over features of the held-out log-likelihood per subject of '
+                  'normal models, relative to the mean of the settings compared',
+        folds=k, features=int(cols.size), stages=stages)
+
+
+def select_df_brainage(d, kw, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS, seed=0):
+    """Spline df of age of the normative models of NDMBrainAge, the same for all
+    principal component scores and regions, by k-fold cross-validation of the global
+    brain age of the training data d (folds stratified by site and age).
+
+    A setting is scored by the mean absolute error of the held-out brain age after
+    removing its median; df_mu is searched first (_search_df).  The PCA of every
+    fold is computed once (with_df), and the warp is not used during the search.
+    With pca = 0 the voxel-wise model is shared with the z-maps, and its df are
+    chosen as for them (select_df_normative).  Returns df_mu, df_sigma and a record.
+    """
+    if not kw.get('pca', 100):
+        return select_df_normative(d, kw.get('cov'), df_mu, df_sigma, k, seed=seed)
+    if DF_AUTO not in (df_mu, df_sigma):
+        return int(df_mu), int(df_sigma), dict(df_mu=int(df_mu), df_sigma=int(df_sigma),
+                                                selected=False)
+    base = {key: v for key, v in kw.items() if key not in ('df_mu', 'df_sigma', 'verbose')}
+    base.update(parcellation=False, warp=False)
+    fold = _df_folds(d, k, seed)
+    folds = []
+    for f in range(k):
+        tr, te = np.flatnonzero(fold != f), np.flatnonzero(fold == f)
+        dtr = d.subset(tr)
+        est = NDMBrainAge(**base).fit(dtr)
+        meta = replace(dtr, Y=np.empty((tr.size, 0), np.float32))     # without the data
+        folds.append((te, est, [part.model_input(dtr.Y) for part in est.parts], meta))
+        del dtr
+    cache = {}
+
+    def mae(dm, ds):
+        if (dm, ds) not in cache:
+            pred = np.full(d.n, np.nan)
+            for te, est, inputs, meta in folds:
+                pred[te] = est.with_df(meta, dm, ds, inputs).predict(d.subset(te))['age']
+            err = pred - d.age
+            cache[(dm, ds)] = float(np.nanmean(np.abs(err - np.nanmedian(err))))
+        return cache[(dm, ds)]
+
+    dm, ds, stages = _search_df(lambda configs: [-mae(*c) for c in configs], df_mu,
+                                df_sigma, DF_GRID_BRAINAGE)
+    for st in stages:
+        st['mae'] = [-c for c in st.pop('criterion')]
+    return dm, ds, dict(
+        df_mu=dm, df_sigma=ds, selected=True, method='cross-validation',
+        criterion='mean absolute error of the held-out global brain age after removing '
+                  'its median', folds=k, stages=stages)
+
+
+def _resolve_df(d, kw, which):
+    """Numeric (df_mu, df_sigma) for the brain age ('brainage') or the voxel/vertex-
+    wise models ('voxel') of the training data d, chosen by cross-validation where kw
+    gives 'auto' (default without df: 5 and 3), and the record of the choice."""
+    dm, ds = kw.get('df_mu', 5), kw.get('df_sigma', 3)
+    if DF_AUTO not in (dm, ds):
+        return int(dm), int(ds), dict(df_mu=int(dm), df_sigma=int(ds), selected=False)
+    t0 = time.time()
+    print(f"  {d.name}: choosing the spline df of the "
+          f"{'brain age models' if which == 'brainage' else 'z-map models'} by "
+          f"{DF_FOLDS}-fold cross-validation", flush=True)
+    if which == 'brainage':
+        dm, ds, rec = select_df_brainage(d, kw, dm, ds)
+    else:
+        dm, ds, rec = select_df_normative(d, kw.get('cov'), dm, ds)
+    rec['seconds'] = round(time.time() - t0, 1)
+    return dm, ds, rec
+
+
+# ---------------------------------------------------------------------------
 # Diagnostics: Q statistics and worm plots by age group
 # ---------------------------------------------------------------------------
 
@@ -1908,7 +2100,8 @@ def run_diagnostics(sets, train, prefix, n_groups=10):
         savemat(f'{prefix}_diagnostics_{name}.mat', {'NDMdiag': dict(
             Q=_full_map(q['Q'], m), p_Q=_full_map(q['p'], m), df_Q=_full_map(q['df'], m),
             age_groups=q['groups'], converged=_full_map(m.converged[None].astype(float), m)[0],
-            family=m.family, model=d.name)}, do_compression=True)
+            family=m.family, model=d.name, df_mu=m.basis_mu.df, df_sigma=m.basis_sigma.df)},
+            do_compression=True)
         try:
             worm_plot(Z, d.age, f'{prefix}_wormplot_{name}.png',
                       title=f'{_model_key(d.name)}: {m.family}, {d.n} training subjects')
@@ -1921,16 +2114,17 @@ def run_diagnostics(sets, train, prefix, n_groups=10):
         rows.append((d.name, m.family, *[100 * np.mean(q['p'][k] < 0.05) for k in range(4)],
                      np.nanmedian(sk), np.nanmedian(ku),
                      100 * np.mean(m.shape_age) if m.family != 'normal' else 0.0,
-                     100 * np.mean(~m.converged)))
+                     100 * np.mean(~m.converged), m.basis_mu.df, m.basis_sigma.df))
     if not rows:
         return
     head = ['model', 'family', 'Q1_mean_pct_p05', 'Q2_variance_pct_p05', 'Q3_skewness_pct_p05',
             'Q4_kurtosis_pct_p05', 'median_abs_skew', 'median_abs_excess_kurtosis',
-            'pct_age_dependent_shape', 'pct_not_converged']
+            'pct_age_dependent_shape', 'pct_not_converged', 'df_mu', 'df_sigma']
     with open(prefix + '_diagnostics.csv', 'w') as f:
         f.write(','.join(head) + '\n')
         for r in rows:
-            f.write(','.join([r[0], r[1]] + [f'{v:.4f}' for v in r[2:]]) + '\n')
+            f.write(','.join([r[0], r[1]] + [f'{v:.4f}' for v in r[2:-2]]
+                             + [str(int(v)) for v in r[-2:]]) + '\n')
     print(f"\nDiagnostics on the training data ({n_groups} age groups); share of features "
           "with p < 0.05 (5% expected):")
     print(f"  {'model':40s} {'family':7s} {'Q1 mean':>8s} {'Q2 var':>7s} {'Q3 skew':>8s} "
@@ -2349,19 +2543,25 @@ def cross_validate(datas, kfold=10, seed=0, age_range=(0, np.inf), gpr=True,
     fold[order] = np.arange(order.size) % kfold
 
     n = d0.n
-    res = []
+    res, kws = [], []
     for d in datas:
+        # df chosen once on all subjects (slightly optimistic for the CV estimates)
+        dm, ds, rec = _resolve_df(d.subset(np.flatnonzero(ok)), kw, 'brainage')
+        kws.append(dict(kw, df_mu=dm, df_sigma=ds))
+        if rec.get('selected'):
+            print(f"{d.name}: df of mu {dm}, of sigma {ds} chosen by cross-validation on all "
+                  f"subjects ({rec['seconds']:.0f}s)", flush=True)
         res.append(dict(name=d.name, age=np.full(n, np.nan), sd=np.full(n, np.nan),
                         deviation=np.full(n, np.nan), deviation_age=np.full(n, np.nan),
                         at_bound=np.zeros(n, bool), regional=None, regions=[],
-                        region_names=[], gpr=np.full(n, np.nan)))
+                        region_names=[], gpr=np.full(n, np.nan), df_mu=dm, df_sigma=ds))
     for f in range(kfold):
         tr, te = np.flatnonzero(fold != f) , np.flatnonzero(fold == f)
         tr = tr[ok[tr]]
         print(f"fold {f + 1}/{kfold}: {tr.size} training, {te.size} test subjects", flush=True)
-        for d, r in zip(datas, res):
+        for d, r, kd in zip(datas, res, kws):
             t0 = time.time()
-            est = NDMBrainAge(**kw).fit(d.subset(tr))
+            est = NDMBrainAge(**kd).fit(d.subset(tr))
             out = est.predict(d.subset(te))
             for key in ('age', 'sd', 'at_bound', 'deviation', 'deviation_age'):
                 r[key][te] = out[key]
@@ -2388,28 +2588,38 @@ def fit_models(train, kw, brainage=True, voxel=False, vkw=None):
     voxel    : VoxelModel for the z-maps with vkw (family, shape_df, tau_max,
                shape_prior; VOXEL_DEFAULTS); with pca=0 and the normal family, the
                voxel-wise model of the brain age is shared (fitted once)
+    Spline df given as 'auto' in kw are chosen per input by cross-validation
+    (select_df_brainage, select_df_normative); the choice and its record are kept
+    in ModelSet.info ('df_brain_age', 'df_voxel') and saved with the models.
     Returns a list of ModelSet.
     """
     vkw = {**VOXEL_DEFAULTS, **(vkw or {})}
     sets = []
     for d in train:
         t0 = time.time()
-        est = NDMBrainAge(**kw).fit(d) if brainage else None
-        vm, info = None, ''
+        info, est, vm, msg, dfs = data_info(d), None, None, '', []
+        if brainage:
+            dm, ds, info['df_brain_age'] = _resolve_df(d, kw, 'brainage')
+            est = NDMBrainAge(**dict(kw, df_mu=dm, df_sigma=ds)).fit(d)
+            dfs.append(f"brain age {dm}/{ds}")
         if voxel:
             if est is not None and not est.pca and vkw['family'] == 'normal':
                 vm = VoxelModel.from_ndm(est)
+                info['df_voxel'] = info['df_brain_age']
             else:
-                vm = VoxelModel(kw.get('df_mu', 5), kw.get('df_sigma', 3), kw.get('cov'),
-                                **vkw).fit(d)
+                dm, ds, info['df_voxel'] = _resolve_df(d, kw, 'voxel')
+                vm = VoxelModel(dm, ds, kw.get('cov'), **vkw).fit(d)
+                dfs.append(f"z-maps {dm}/{ds}")
             m = vm.model
             if m.family != 'normal':
-                info = (f"; {m.family}: {int(np.sum(~m.shape_converged))} of {m.valid.size} "
-                        "not converged")
+                msg = (f"; {m.family}: {int(np.sum(~m.shape_converged))} of {m.valid.size} "
+                       "not converged")
                 if m.basis_shape is not None:
-                    info += f", age-dependent shape in {int(np.sum(m.shape_age))}"
-        sets.append(ModelSet(data_info(d), est, vm))
-        print(f"  {d.name}: fitted in {time.time() - t0:.1f}s{info}", flush=True)
+                    msg += f", age-dependent shape in {int(np.sum(m.shape_age))}"
+        chosen = any(r.get('selected') for key, r in info.items() if key.startswith('df_'))
+        print(f"  {d.name}: fitted in {time.time() - t0:.1f}s; df mu/sigma {', '.join(dfs)}"
+              f"{' (chosen by cross-validation)' if chosen else ''}{msg}", flush=True)
+        sets.append(ModelSet(info, est, vm))
     return sets
 
 
@@ -2463,7 +2673,8 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
             t0 = time.time()
             z = s.voxel.zmaps(d, zc, parcellation=parcellation)
             zm.append(dict(z, model=d.name, family=s.voxel.model.family, ind=d.ind,
-                           age=age, male=d.male))
+                           age=age, male=d.male, df_mu=s.voxel.model.df_mu,
+                           df_sigma=s.voxel.model.df_sigma))
             print(f"  {d.name}: {time.time() - t0:.1f}s", flush=True)
         if zc is None:
             print("No adaptation to the test site: z-maps at the reference site of the "
@@ -2491,7 +2702,7 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
             est.adapt_agefree(dte.subset(ctrl))
         out = est.predict(dte)
         r = dict(name=dte.name, age=correct_age(out['age'], age, ctrl, post),
-                 sd=out['sd'], at_bound=out['at_bound'],
+                 sd=out['sd'], at_bound=out['at_bound'], df_mu=est.df_mu, df_sigma=est.df_sigma,
                  regional=correct_age(out['regional'], age, ctrl, post), regions=est.regions,
                  region_names=est.region_names, gpr=np.full(n, np.nan),
                  offset=np.nanmedian(out['age'][ctrl] - age[ctrl]))
@@ -2518,7 +2729,8 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         out['covariates'] = np.array(cov_names, dtype=object)
     if zmaps_out:
         out['zmaps'] = [dict(r['zmaps'], model=r['name'], family=s.voxel.model.family,
-                             ind=d.ind, age=age, male=d.male)
+                             ind=d.ind, age=age, male=d.male, df_mu=s.voxel.model.df_mu,
+                             df_sigma=s.voxel.model.df_sigma)
                         for r, d, s in zip(res, test, sets)]
     return out
 
@@ -2618,7 +2830,9 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
         regions=np.array(e['regions']),
         region_names=np.array([reg_names.get(r_, str(r_)) for r_ in e['regions']], dtype=object),
         BrainAGE_regional_ensemble=e['regional'] - age[:, None] if e['regions'] else np.zeros((len(age), 0)),
-        ind_control=ctrl + 1)
+        ind_control=ctrl + 1,
+        df_mu=np.array([r.get('df_mu', np.nan) for r in res], dtype=np.float64),
+        df_sigma=np.array([r.get('df_sigma', np.nan) for r in res], dtype=np.float64))
     out['BrainAGE'] = out['PredictedAge'] - age[:, None]
     
     # non-aging deviation (at brain age) and total deviation (at chronological age),
@@ -2699,6 +2913,19 @@ def save_results(out, prefix):
     print(f"\nSaved {prefix}.mat and {prefix}.csv" + (f" and {zfiles}" if zm else ''))
 
 
+def _df_arg(value):
+    """Spline df of the command line: 'auto' or a positive integer."""
+    if value == DF_AUTO:
+        return value
+    try:
+        df = int(value)
+    except ValueError:
+        df = 0
+    if df < 1:
+        raise argparse.ArgumentTypeError(f"invalid df {value!r}: use 'auto' or a positive integer")
+    return df
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(
         description="NeuroGAMLSS: vectorized GAMLSS normative models for brain MRI "
@@ -2774,8 +3001,12 @@ def main(argv=None):
                         "(default 20)")
     p.add_argument('--psi-min', type=float, default=0.01,
                    help="NDM brain age: floor of the unique variance of the residual correlation")
-    p.add_argument('--df-mu', type=int, default=5, help="spline df of age for mu")
-    p.add_argument('--df-sigma', type=int, default=3, help="spline df of age for sigma")
+    p.add_argument('--df-mu', type=_df_arg, default=DF_AUTO,
+                   help="spline df of age for mu: auto (default) chooses one value per "
+                        "training sample and model by cross-validation (brain age: error "
+                        "of the brain age; z-maps: held-out likelihood), or a number")
+    p.add_argument('--df-sigma', type=_df_arg, default=DF_AUTO,
+                   help="spline df of age for sigma: auto (default) or a number, as --df-mu")
     p.add_argument('--grid-step', type=float, default=0.25,
                    help="NDM brain age: age grid step [years]")
     p.add_argument('--grid-margin', type=float, default=5.0,
@@ -2876,6 +3107,11 @@ def main(argv=None):
     else:
         sets, desc = load_models(a.model)
         print(_describe(desc, a.model))
+        for s in sets:
+            dfs = [f"{label} {m.df_mu}/{m.df_sigma}" for label, m in
+                   (('brain age', s.brainage), ('z-maps', None if s.voxel is None else s.voxel.model))
+                   if m is not None]
+            print(f"  {s.info['name']}: df mu/sigma {', '.join(dfs)}")
         cov = Covariates.from_state(desc['covariates']) if desc.get('covariates') else None
         if len(sets) != len(test):
             p.error(f"--test needs one file per saved model ({len(sets)}).")
