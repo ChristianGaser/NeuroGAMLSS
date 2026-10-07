@@ -26,6 +26,30 @@ $$
 - **Covariates** $\mathbf{h}(\mathbf{x})$ are natural splines with `--cov-df` degrees of freedom, linear by default, centred at their training median. A covariate is dropped from a predictor when it is constant or collinear with the other columns of that predictor.
 - **Shape.** The shape parameters $\nu$ and $\tau$ are constant by default. The terms in square brackets are added with `--shape-df` where BIC prefers them, see [Age-dependent shape](#age-dependent-shape).
 
+## Voxels and vertices that are modelled
+
+A voxel or vertex $j$ is modelled if its training values are finite and not constant and if their mean reaches a threshold,
+
+$$
+\bar y_j = \frac{1}{n} \sum_i y_{ij} \ge t .
+$$
+
+`--mask-threshold` gives $t$ as a number, an absolute value, or as a percentage of the median of $\bar y_j$ over all voxels or vertices. The defaults are $t = 0.05$ for volume data, a tissue density, and 5% of the median for surface data, whose measures have different units. A threshold of 0 keeps all voxels and vertices with finite, varying values. If the median is not positive, as for signed measures, a percentage is not used.
+
+- **Why.** In near-empty voxels most subjects have values close to zero, a point mass that no continuous distribution describes. Their z-scores mean little, because a tiny absolute difference becomes a large z, and flexible curves fail there out of sample.
+- **Why the mean.** A rule on the minimum, like the absolute threshold masking of SPM, would drop border voxels in which older subjects lose tissue, which is the effect of interest. On surfaces, it would also drop half of the sulc vertices, which are zero or negative on gyral crowns.
+- **Use.** The mask is computed from the training data when the models are fitted, also within the folds of cross-validation and of the choice of the df. It is stored with the models, and the JSON description records the threshold and the number of voxels or vertices used. Z-maps and brain age use the same mask. Masked features are NaN in the z-maps and left out of the principal component analysis. Test subjects are not masked individually, because their low values are data.
+
+In 8 mm data of the 2,241 lifespan subjects, the voxels below 0.05 contained nearly all voxels with problems, although they are few:
+
+| Voxels with a mean below 0.05 | Gray matter | White matter |
+|---|---|---|
+| Share of all voxels | 5% | 14% |
+| Share of the SHASH fits that did not converge | 96% | 94% |
+| Share of the voxels whose flexible SD curves failed out of sample | 97% | 67% |
+
+On the surface data of NKI-Rockland, the default of 5% removed no vertex of thickness, area, depth, fractal dimension, gyrification and toroGI, and 7.5% of the sulc vertices. The mask changed the mean absolute error of the default brain age by at most 0.05 years. It made the voxel-wise variant more accurate, because there every voxel enters the likelihood.
+
 ## Families
 
 ### Normal
@@ -101,7 +125,7 @@ The coefficients are updated by Newton steps for all voxels at once:
 - **Convergence.** A voxel stops when half its Newton decrement falls below $10^{-9}$ per subject. Voxels that reach 500 iterations, or whose step cannot be improved by halving, keep their best fit and are flagged as not converged.
 - **Mixed algorithm.** The optimizer can start with iterations that ignore the cross-derivatives between predictors, as the RS phase of the mixed algorithm of gamlss (`rs_iter` of `fit_distribution`). This was slower without better fits for SHASH and is off by default.
 
-In 8 mm gray and white matter of 2,241 subjects, 0.7% and 0.9% of the voxels did not converge. These voxels contain almost no tissue, with a median density of 0.001, and only a few subjects have nonzero values. Their raw skewness is about 10, and most of them have $\tau$ between 0.2 and 0.4.
+In 8 mm gray and white matter of 2,241 subjects without a mask, 0.7% and 0.9% of the voxels did not converge. These voxels contain almost no tissue, with a median density of 0.001, and only a few subjects have nonzero values. Their raw skewness is about 10, and most of them have $\tau$ between 0.2 and 0.4. With the default mask, none of 3,546 gray matter voxels and 1 of 3,242 white matter voxels did not converge.
 
 ### Age-dependent shape
 
@@ -111,7 +135,7 @@ $$
 2(\ell_2 - \ell_1) > m k \log n,
 $$
 
-where $\ell_1$ and $\ell_2$ are the unpenalized log-likelihoods of the two fits, $m$ is the number of shape parameters (2 for SHASH, 1 for GG) and $n$ is the number of subjects. In gray and white matter at 8 mm with $k = 3$, BIC chose age-dependent shape for 8% of the voxels.
+where $\ell_1$ and $\ell_2$ are the unpenalized log-likelihoods of the two fits, $m$ is the number of shape parameters (2 for SHASH, 1 for GG) and $n$ is the number of subjects. In gray and white matter at 8 mm with $k = 3$, BIC chose age-dependent shape for 7% of the voxels.
 
 ## Flexibility of the age curves
 
@@ -191,16 +215,16 @@ Worm plots (van Buuren and Fredriks, 2001) show, for six age groups, the differe
 
 ### Example
 
-Gray and white matter at 8 mm from 2,241 subjects of CamCAN, IXI, OASIS-3 and SALD gave the following shares of voxels with $p < 0.05$, which would be 5% for a perfect model:
+Gray and white matter at 8 mm from 2,241 subjects of CamCAN, IXI, OASIS-3 and SALD gave the following shares of voxels with $p < 0.05$, which would be 5% for a perfect model. The models used the default mask and the df chosen by cross-validation, 3 for $\mu$ and 2 for $\sigma$ in both tissues:
 
 | Tissue | Family | Mean | Variance | Skewness | Kurtosis | Median \|skewness\| |
 |---|---|---|---|---|---|---|
-| GM | normal | 12% | 27% | 87% | 85% | 0.54 |
-| GM | shash | 24% | 14% | 40% | 37% | 0.02 |
-| GM | shash, `--shape-df 3` | 21% | 12% | 34% | 36% | 0.02 |
-| WM | normal | 11% | 35% | 89% | 88% | 0.77 |
-| WM | shash | 28% | 19% | 36% | 37% | 0.02 |
-| WM | shash, `--shape-df 3` | 26% | 16% | 33% | 36% | 0.02 |
+| GM | normal | 12% | 25% | 87% | 84% | 0.51 |
+| GM | shash | 20% | 13% | 38% | 34% | 0.02 |
+| GM | shash, `--shape-df 3` | 18% | 12% | 33% | 33% | 0.02 |
+| WM | normal | 11% | 29% | 88% | 86% | 0.65 |
+| WM | shash | 22% | 15% | 31% | 31% | 0.02 |
+| WM | shash, `--shape-df 3` | 21% | 13% | 29% | 30% | 0.02 |
 
 SHASH removed most of the skewness and kurtosis misfit of the normal model. Age-dependent shape improved the fit only slightly. The mean is flagged more often with SHASH than with the normal model. Two effects probably contribute: least squares keeps the residual mean of the normal model close to zero in every age range by construction, while the location of SHASH also absorbs part of any change of shape with age. With 224 subjects per age group, the tests detect small misfit, so the worm plots and the median skewness are better guides to its size.
 
