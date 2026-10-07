@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neurogamlss"
+version = "0.1.0"
+description = "Vectorized GAMLSS normative models for voxel- and vertex-wise brain MRI, with z-maps and NormBrainAGE brain age"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Christian Gaser" }]
+keywords = ["GAMLSS", "normative modeling", "brain age", "neuroimaging", "MRI", "CAT12"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dependencies = [
+    "numpy>=1.21",
+    "scipy>=1.7",
+]
+
+[project.optional-dependencies]
+mat73 = ["h5py>=3.0"]          # MATLAB v7.3 input files
+surface = ["nibabel>=3.0"]     # lobe atlas of surface data (--parcellation)
+plots = ["matplotlib>=3.3"]    # worm plots (--diagnostics)
+all = ["h5py>=3.0", "nibabel>=3.0", "matplotlib>=3.3"]
+test = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/ChristianGaser/NeuroGAMLSS"
+Issues = "https://github.com/ChristianGaser/NeuroGAMLSS/issues"
+
+[project.scripts]
+neurogamlss = "neurogamlss:main"
+
+[tool.setuptools]
+py-modules = ["neurogamlss"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,6 @@
+# Packages needed by neurogamlss.py: pip install -r requirements.txt
+numpy>=1.21
+scipy>=1.7
+h5py>=3.0          # MATLAB v7.3 input files
+nibabel>=3.0       # lobe atlas of surface data (--parcellation)
+matplotlib>=3.3    # worm plots (--diagnostics)
