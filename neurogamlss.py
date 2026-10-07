@@ -21,20 +21,21 @@ distribution D (--family) is
   gg      generalized gamma (GG of gamlss.dist, as in Brain Charts) for positive
           data such as volumes
 
-Only voxels/vertices whose mean over the training subjects reaches a threshold
-are modelled (--mask-threshold; default 0.05 for volume data, 5% of the median of
-the means for surface data), which removes near-empty voxels without meaningful
+Only voxels/vertices whose mean over the training subjects reaches a threshold are
+modelled (--mask-threshold; default 0.05 for volume data, 5% of the median of the
+means for surface data), which removes near-empty voxels without meaningful
 z-scores.  The spline df of age of mu and sigma are chosen per training sample by
 cross-validation (--df-mu/--df-sigma auto, the default), the same for all
-voxels/vertices: by the held-out likelihood for the z-maps and by the error of
-the brain age for NormBrainAGE.  The choice is stored with the models and in the
+voxels/vertices: by the held-out likelihood for the z-maps and by the error of the
+brain age for NormBrainAGE.  The choice is stored with the models and in the
 output files.  The shape parameters are constant per voxel/vertex or, with
---shape-df, splines of age where BIC prefers them.  The normal model is fitted by the RS algorithm of
-GAMLSS (ported from ComBatLS); shash and gg start from it and are refined by damped
-Newton steps with exact (shash) or numerical (gg) derivatives and step halving.
-Test subjects get z-maps (normal scores) at chronological age, adapted to a new
-site with its control subjects (--adjust).  --diagnostics writes Q statistics and
-worm plots by age group of the training fit.
+--shape-df, splines of age where BIC prefers them.  The normal model is fitted by
+the RS algorithm of GAMLSS (ported from ComBatLS); shash and gg start from it and
+are refined by damped Newton steps with exact (shash) or numerical (gg)
+derivatives and step halving, in chunks of voxels/vertices that run in parallel
+threads (--jobs).  Test subjects get z-maps (normal scores) at chronological age,
+adapted to a new site with its control subjects (--adjust).  --diagnostics writes
+Q statistics and worm plots by age group of the training fit.
 
 NormBrainAGE
 ------------
@@ -59,31 +60,48 @@ new site, its control subjects (--adjust) correct the estimates (--correction).
 A Python replica of the GPR BrainAGE (BA_gpr.m) is run for comparison when the
 training data are given.
 
-Covariates, models and inputs
------------------------------
+Covariates and saved models
+---------------------------
 Covariates such as image quality measures enter the mean and the log SD of all
 normative models (--train-cov, --test-cov, --cov-mean, --cov-sd, --cov-df), and the
 models condition on every subject's own values.  Fitted models are saved with
 --save-model (.mat or .npz, with a JSON description) and applied with --model
-instead of --train.  Inputs are the mat-files of BA_data2mat.m (Y, age, male and,
-for surface data, ind); files joined with '+' are concatenated as sites.
+instead of --train.
+
+Inputs
+------
+Inputs are the mat-files of BA_data2mat.m (Y, age, male and, for surface data,
+ind), named like s4rp1_8mm_<sample>_CAT12.9.mat.  --train and --test combine
+files in two ways:
+
+  A.mat+B.mat+C.mat   '+' joins the files of several sites into one sample; every
+                      file becomes a site of the normative models
+  gm.mat wm.mat       spaces separate models of the same subjects, e.g. gray
+                      (rp1) and white matter (rp2) or 4 and 8 mm; brain age
+                      combines them, and --test needs one file per model in the
+                      same order
 
 Examples
 --------
-z-maps with SHASH normative models, saved and applied later:
+z-maps with SHASH normative models of a sample from two sites, A and B, saved
+and applied to a new sample C whose first 108 subjects are controls:
 
-    python neurogamlss.py --normative-only --train s4rp1_4mm_A_CAT12.9.mat \\
-        --save-model A_norm.npz --diagnostics --out A
-    python neurogamlss.py --normative-only --model A_norm.npz --parcellation \\
-        --test s4rp1_4mm_B_CAT12.9.mat --adjust 1:108 --out B
+    python neurogamlss.py --normative-only \\
+        --train s4rp1_4mm_A_CAT12.9.mat+s4rp1_4mm_B_CAT12.9.mat \\
+        --save-model AB_norm.npz --diagnostics --out AB
+    python neurogamlss.py --normative-only --model AB_norm.npz --parcellation \\
+        --test s4rp1_4mm_C_CAT12.9.mat --adjust 1:108 --out C
 
-10-fold cross-validation of NormBrainAGE with 4 models and lobe-wise brain age:
+10-fold cross-validation of NormBrainAGE in one sample, NKIe1239, with 4 models
+of the same subjects (gray and white matter at 4 and 8 mm) and lobe-wise brain
+age:
 
     python neurogamlss.py --train s4rp1_4mm_NKIe1239_CAT12.9.mat \\
         s4rp1_8mm_NKIe1239_CAT12.9.mat s4rp2_4mm_NKIe1239_CAT12.9.mat \\
         s4rp2_8mm_NKIe1239_CAT12.9.mat --kfold 10 --parcellation --out NKIe
 
-Brain age and z-maps of another sample, corrected with its controls:
+Brain age and z-maps of sample B with gray and white matter models of sample A,
+corrected with the first 108 subjects of B as controls:
 
     python neurogamlss.py --train s4rp1_8mm_A_CAT12.9.mat s4rp2_8mm_A_CAT12.9.mat \\
         --test s4rp1_8mm_B_CAT12.9.mat s4rp2_8mm_B_CAT12.9.mat --adjust 1:108 --zmaps
@@ -142,6 +160,29 @@ DF_START_SIGMA, DF_FOLDS, DF_MAX_FEATURES = 3, 5, 1000
 LOG2PI = np.log(2 * np.pi)
 
 _NOTES = set()
+
+# threads for the voxel/vertex-wise fits (--jobs); None: half the CPU count, which on
+# most machines are the physical or performance cores
+JOBS = None
+
+
+def _jobs(jobs=None):
+    """Number of threads: jobs, else JOBS, else half the CPU count (at least 1)."""
+    if jobs is None:
+        jobs = JOBS if JOBS is not None else (os.cpu_count() or 2) // 2
+    return max(1, int(jobs))
+
+
+def _map(func, items, jobs=None):
+    """[func(x) for x in items], in parallel threads.  NumPy releases the GIL in its
+    array operations, and the fits of different features are independent."""
+    items = list(items)
+    jobs = min(_jobs(jobs), len(items))
+    if jobs <= 1:
+        return [func(x) for x in items]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        return list(pool.map(func, items))
 
 
 def _note(msg):
@@ -221,7 +262,7 @@ def _read_mat(path):
 
 def load_data(spec: str) -> Data:
     """Load a mat-file, or several files joined with '+' (one site per file)."""
-    parts = spec.split('+')
+    parts = [os.path.expanduser(part) for part in spec.split('+')]   # '~' after '+' too
     Ys, ages, males, sites, ind, dim = [], [], [], [], None, None
     has_male = True
     for s, path in enumerate(parts):
@@ -273,7 +314,7 @@ def read_table(spec):
 
     missing = ('', 'nan', 'na')
     names, blocks, numeric = None, [], None
-    for path in spec.split('+'):
+    for path in (os.path.expanduser(part) for part in spec.split('+')):
         with open(path) as f:
             lines = [ln.rstrip('\r\n') for ln in f]
         lines = [ln for ln in lines if ln.strip() and not ln.lstrip().startswith('#')]
@@ -502,7 +543,8 @@ def _deviance(r, eta):
     return np.sum(np.log(2 * np.pi) + 2 * eta + r ** 2 * np.exp(-2 * eta), axis=0)
 
 
-def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=4_000_000, init=None):
+def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000, init=None,
+                       jobs=None):
     """ML fit of y_j ~ N(X beta_j, exp(W theta_j)^2) for every column j of Y.
 
     Port of _fit_location_scale() in combat_family.py (ComCat) for data of
@@ -510,8 +552,10 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=4_000_000,
     identity link for mu, log link for sigma): alternate a weighted
     least-squares update of beta with a Fisher-scoring update of theta,
     halving the theta step if the deviance increases.  W[:, 0] must be the
-    intercept.  Features are processed in chunks to bound memory.  init =
-    (beta, theta) starts from a previous solution instead of OLS.
+    intercept.  Features are processed in chunks of max_elements values, in
+    parallel threads (jobs, see _jobs); the chunks do not depend on jobs, so the
+    results do not either.  init = (beta, theta) starts from a previous solution
+    instead of OLS.
 
     Returns beta (kx, p), theta (kw, p), converged (p,)
     """
@@ -526,7 +570,8 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=4_000_000,
     converged = np.zeros(p, dtype=bool)
 
     step = max(1, max_elements // n)
-    for start in range(0, p, step):
+
+    def run(start):
         y_all = np.asarray(Y[:, start:start + step], dtype=np.float64)
 
         if init is not None:
@@ -578,6 +623,7 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=4_000_000,
         beta[:, start:start + step] = b_all
         theta[:, start:start + step] = t_all
 
+    _map(run, range(0, p, step), jobs)
     return beta, theta, converged
 
 
@@ -590,11 +636,6 @@ def _rank(M, rtol=1e-8):
 # ---------------------------------------------------------------------------
 # Distribution families of the voxel/vertex-wise normative models
 # ---------------------------------------------------------------------------
-
-def _logcosh(t):
-    a = np.abs(t)
-    return a + np.log1p(np.exp(-2 * a)) - np.log(2)
-
 
 def shash_terms(y, a, s, n, e, order=2):
     """SHASHo2 log-density per observation and its derivatives.
@@ -612,22 +653,27 @@ def shash_terms(y, a, s, n, e, order=2):
 
 def _shash_terms(y, a, s, n, e, order):
     tau = np.exp(e)
-    S = np.exp(s + e)
+    S = np.exp(s + e)                            # sigma tau
     z = (y - a) / S
-    q2 = 1 / (1 + z * z)
-    q = np.sqrt(q2)
-    u = np.arcsinh(z)
+    z2 = z * z
+    rq = np.sqrt(1 + z2)                         # 1 / q
+    u = np.copysign(np.log1p(np.abs(z) + z2 / (1 + rq)), z)     # asinh(z)
     t = np.clip(tau * u - n, -300, 300)
-    r, c = np.sinh(t), np.cosh(t)
-    ll = _logcosh(t) - s + 0.5 * np.log(q2) - 0.5 * r * r - 0.5 * LOG2PI
+    et = np.exp(t)
+    iet = 1 / et
+    r, c = 0.5 * (et - iet), 0.5 * (et + iet)    # sinh(t), cosh(t)
+    ll = np.log(c) - s - 0.5 * np.log1p(z2) - 0.5 * r * r - 0.5 * LOG2PI
     if order < 1:
         return ll, None, None
-    g = np.tanh(t) - r * c                       # d l / d t
+    q = 1 / rq
+    q2 = q * q
+    g = r / c - r * c                            # d l / d t = tanh(t) - sinh(t) cosh(t)
     Lz = g * tau * q - z * q2                    # d l / d z
     d1 = (-Lz / S, -1 - z * Lz, -g, g * tau * u - z * Lz)
     if order < 2:
         return ll, d1, None
-    gp = 1 / (c * c) - np.cosh(2 * t)            # d g / d t
+    c2 = c * c
+    gp = 1 / c2 - (c2 + r * r)                   # d g / d t = sech(t)^2 - cosh(2 t)
     Lzz = gp * (tau * q) ** 2 - g * tau * z * q2 * q - q2 + 2 * (z * q2) ** 2
     Lze = tau * q * (gp * tau * u + g)
     w = u - z * q
@@ -726,7 +772,8 @@ def gg_score(y, a, s, n):
 
 
 def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bound=None,
-                     max_iter=500, tol=1e-9, max_elements=2_000_000, rho=100.0, rs_iter=0):
+                     max_iter=500, tol=1e-9, max_elements=500_000, rho=100.0, rs_iter=0,
+                     jobs=None):
     """Penalized maximum likelihood fit of a distribution for every column of Y.
 
     Every parameter block b has a linear predictor eta_b = designs[b] @ coef_b;
@@ -741,7 +788,9 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
     product of the scores is used instead, which is always an ascent direction (the
     squared-score weights of gamlss).  Steps are halved until the penalized
     log-likelihood increases (the autostep of gamlss), and columns stop when the
-    Newton decrement falls below tol per observation.
+    Newton decrement falls below tol per observation.  Columns are processed in
+    chunks of max_elements values, in parallel threads (jobs, see _jobs); the chunks
+    do not depend on jobs, so the results do not either.
 
     shape_blocks : blocks whose coefficients get N(0, prior_sd^2) priors, which shrink
                    the shape parameters toward the normal distribution
@@ -783,7 +832,8 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
         return np.where(np.isfinite(f), f, -np.inf), lsum, d1, d2
 
     step = max(1, int(max_elements // n))
-    for c0 in range(0, p, step):
+
+    def run(c0):
         y = np.asarray(Y[:, c0:c0 + step], np.float64)
         B = coef[:, c0:c0 + step].copy()
         pc = B.shape[1]
@@ -845,6 +895,8 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
         coef[:, c0:c0 + step] = B
         loglik[c0:c0 + step] = evaluate(B, y, False)[1]
         conv[c0:c0 + step] = done_ok
+
+    _map(run, range(0, p, step), jobs)
     return [coef[off[i]:off[i + 1]] for i in range(nb)], loglik, conv
 
 
@@ -874,7 +926,7 @@ class NormativeModel:
     """
 
     def __init__(self, df_mu=5, df_sigma=3, cov=None, max_iter=2000, tol=1e-6,
-                 family='normal', shape_df=0, tau_max=2.0, shape_prior=1.0):
+                 family='normal', shape_df=0, tau_max=2.0, shape_prior=1.0, jobs=None):
         if family not in FAMILIES:
             raise ValueError(f"Unknown family {family!r}; use one of {', '.join(FAMILIES)}.")
         self.df_mu, self.df_sigma = df_mu, df_sigma
@@ -882,6 +934,7 @@ class NormativeModel:
         self.max_iter, self.tol = max_iter, tol
         self.family, self.shape_df = family, int(shape_df)
         self.tau_max, self.shape_prior = float(tau_max), float(shape_prior)
+        self.jobs = jobs                 # threads of the fits (_jobs)
         self.kappa = self.lam = None
         self.basis_shape = None
 
@@ -990,7 +1043,8 @@ class NormativeModel:
         Yv = Y[:, self.valid]
         if self.family == 'gg':
             Yv = np.log(np.asarray(Yv, np.float64))
-        self.beta, self.theta, conv = fit_location_scale(Yv, X, W, self.max_iter, self.tol)
+        self.beta, self.theta, conv = fit_location_scale(Yv, X, W, self.max_iter, self.tol,
+                                                         jobs=self.jobs)
         self.converged = conv
         if verbose:
             print(f"    normative model: {self.valid.size} features, "
@@ -1027,12 +1081,13 @@ class NormativeModel:
         blocks = list(range(2, 2 + nshape))
         coef, ll, conv = fit_distribution(Ys, [X, W] + [V[:, :1]] * nshape, terms,
                                           [b0, t0_] + [np.zeros((1, p))] * nshape,
-                                          blocks, self.shape_prior, bound)
+                                          blocks, self.shape_prior, bound, jobs=self.jobs)
         pad = [np.vstack([c_, np.zeros((V.shape[1] - 1, p))]) for c_ in coef[2:]]
         self.shape_age = np.zeros(p, dtype=bool)
         if V.shape[1] > 1:              # age-dependent shape where BIC prefers it
             coef2, ll2, conv2 = fit_distribution(Ys, [X, W] + [V] * nshape, terms,
-                                                 coef[:2] + pad, blocks, self.shape_prior, bound)
+                                                 coef[:2] + pad, blocks, self.shape_prior, bound,
+                                                 jobs=self.jobs)
             use = 2 * (ll2 - ll) > nshape * (V.shape[1] - 1) * np.log(n)
             coef[:2] = [np.where(use, a2, a1) for a1, a2 in zip(coef[:2], coef2[:2])]
             pad = [np.where(use, a2, a1) for a1, a2 in zip(pad, coef2[2:])]
@@ -1950,7 +2005,7 @@ def _search_df(criteria, df_mu, df_sigma, grid):
 
 
 def select_df_normative(d, cov=None, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS,
-                        max_features=DF_MAX_FEATURES, seed=0, mask_threshold=None):
+                        max_features=DF_MAX_FEATURES, seed=0, mask_threshold=None, jobs=None):
     """Spline df of age of mu and sigma of the voxel/vertex-wise normative models,
     the same for all features of the training data d, by k-fold cross-validation.
 
@@ -1959,7 +2014,8 @@ def select_df_normative(d, cov=None, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS
     is scored by the median over features of its held-out log-likelihood per
     subject, relative to the mean of the settings compared: the median is robust to
     the few degenerate features, such as near-empty voxels, in which flexible curves
-    fail out of sample.  The features are drawn from feature_mask(d, mask_threshold).
+    fail out of sample.  The features are drawn from feature_mask(d, mask_threshold),
+    and the folds and settings are fitted in parallel threads (jobs).
     df_mu is searched first (_search_df).  Returns df_mu, df_sigma and a record of
     the search."""
     ok = np.flatnonzero(feature_mask(d, mask_threshold)[0])
@@ -1970,31 +2026,30 @@ def select_df_normative(d, cov=None, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS
     Cs = (lambda idx: None) if d.C is None else (lambda idx: d.C[idx])
     cache = {}
 
-    def heldout(dm, ds):
-        if (dm, ds) not in cache:
-            ll = np.zeros(cols.size)
-            for f in range(k):
-                tr, te = np.flatnonzero(fold != f), np.flatnonzero(fold == f)
-                m = NormativeModel(dm, ds, cov).fit(Y[tr], d.age[tr], d.male[tr], d.site[tr],
+    def heldout(task):
+        (dm, ds), f = task
+        tr, te = np.flatnonzero(fold != f), np.flatnonzero(fold == f)
+        m = NormativeModel(dm, ds, cov, jobs=1).fit(Y[tr], d.age[tr], d.male[tr], d.site[tr],
                                                     C=Cs(tr))
-                known = np.isin(d.site[te], m.site_levels)     # sites seen in training
-                mu = np.empty((te.size, m.valid.size))
-                sd = np.empty_like(mu)
-                for sel, site in ((known, d.site[te]), (~known, None)):
-                    if np.any(sel):
-                        idx = te[sel]
-                        mu[sel], sd[sel] = m.mu_sigma(d.age[idx], d.male[idx],
-                                                      None if site is None else site[sel],
-                                                      C=Cs(idx))
-                z = (Y[te][:, m.valid] - mu) / sd
-                lf = np.full(cols.size, np.nan)
-                lf[m.valid] = np.sum(-np.log(sd) - 0.5 * z ** 2, axis=0)
-                ll += lf
-            cache[(dm, ds)] = ll / d.n
-        return cache[(dm, ds)]
+        known = np.isin(d.site[te], m.site_levels)     # sites seen in training
+        mu = np.empty((te.size, m.valid.size))
+        sd = np.empty_like(mu)
+        for sel, site in ((known, d.site[te]), (~known, None)):
+            if np.any(sel):
+                idx = te[sel]
+                mu[sel], sd[sel] = m.mu_sigma(d.age[idx], d.male[idx],
+                                              None if site is None else site[sel], C=Cs(idx))
+        z = (Y[te][:, m.valid] - mu) / sd
+        lf = np.full(cols.size, np.nan)
+        lf[m.valid] = np.sum(-np.log(sd) - 0.5 * z ** 2, axis=0)
+        return lf
 
     def criteria(configs):
-        L = np.stack([heldout(*c) for c in configs])
+        todo = [c for c in configs if c not in cache]
+        res = _map(heldout, [(c, f) for c in todo for f in range(k)], jobs)
+        for i, c in enumerate(todo):
+            cache[c] = np.sum(res[i * k:(i + 1) * k], axis=0) / d.n
+        L = np.stack([cache[c] for c in configs])
         return np.nanmedian(L - np.nanmean(L, axis=0), axis=1)
 
     dm, ds, stages = _search_df(criteria, df_mu, df_sigma, DF_GRID_VOXEL)
@@ -2597,6 +2652,26 @@ def _valid_train(d: Data, age_range):
     return ok
 
 
+def _subjects_mismatch(datas, specs, option):
+    """Error message if the inputs of a command-line option do not contain the same
+    subjects (one input per model), else None.  Inputs of one model from different
+    sites are probably meant to be joined with '+'."""
+    d0 = datas[0]
+    for d in datas[1:]:
+        if d.n == d0.n and np.allclose(d.age, d0.age, equal_nan=True):
+            continue
+        diff = (f"{d.name} has {d.n} subjects and {d0.name} has {d0.n}" if d.n != d0.n else
+                f"{d.name} and {d0.name} contain subjects of different ages")
+        msg = (f"{option} takes one file per model with the same subjects, such as gray and "
+               f"white matter of one sample, but {diff}.")
+        if len({_model_key(x.name) for x in datas}) == 1:
+            msg += (" These files look like samples of one model from different sites. Join "
+                    f"them with '+' to use them as the sites of one sample:\n  {option} "
+                    + '+'.join(specs))
+        return msg
+    return None
+
+
 def _check_same_subjects(datas):
     for d in datas[1:]:
         if d.n != datas[0].n or not np.allclose(d.age, datas[0].age, equal_nan=True):
@@ -3040,14 +3115,18 @@ def main(argv=None):
         description="NeuroGAMLSS: vectorized GAMLSS normative models for brain MRI "
                     "and NormBrainAGE.",
         formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    p.add_argument('--train', nargs='+', help="training mat-file per model ('+' joins sites)")
+    p.add_argument('--train', nargs='+',
+                   help="training mat-files, one per model with the same subjects (e.g. gray "
+                        "and white matter); join the files of several sites with '+' "
+                        "(A.mat+B.mat)")
     p.add_argument('--model', help="saved models (--save-model) to apply to --test instead "
                                    "of fitting models to --train")
     p.add_argument('--save-model', help="save the fitted models to <name>.mat (MATLAB struct "
                                         "NDMmodel) or <name>.npz (NumPy), with a JSON "
                                         "description in <name>.json")
-    p.add_argument('--test', nargs='+', help="test mat-file per model (same order as --train "
-                                             "or the saved models)")
+    p.add_argument('--test', nargs='+',
+                   help="test mat-files, one per model with the same subjects, in the order of "
+                        "--train or of the saved models")
     p.add_argument('--adjust', help="1-based indices of test controls, e.g. 1:108")
     p.add_argument('--correction', choices=['offset', 'adapt', 'agefree', 'trend', 'none'],
                    default='offset',
@@ -3130,8 +3209,15 @@ def main(argv=None):
     p.add_argument('--ensemble', choices=['gls', 'mae', 'mean'], default='gls')
     p.add_argument('--no-gpr', action='store_true', help="skip the GPR baseline")
     p.add_argument('--seed', type=int, default=0)
+    p.add_argument('--jobs', type=int, default=None,
+                   help="threads for fitting the voxel/vertex-wise models (default: half "
+                        f"the CPU count, here {_jobs()}); the results do not depend on it")
     p.add_argument('--out', default='neurogamlss_results', help="output prefix")
     a = p.parse_args(argv)
+    global JOBS
+    if a.jobs is not None and a.jobs < 1:
+        p.error("--jobs needs a positive number.")
+    JOBS = a.jobs
 
     if bool(a.train) == bool(a.model):
         p.error("give either --train or --model.")
@@ -3163,7 +3249,9 @@ def main(argv=None):
     test = None
     if a.test:
         test = [load_data(s) for s in a.test]
-        _check_same_subjects(test)
+        msg = _subjects_mismatch(test, a.test, '--test')
+        if msg:
+            p.error(msg)
         if a.test_male:
             male = np.loadtxt(a.test_male, dtype=np.float64).ravel()
             if male.size != test[0].n:
@@ -3177,6 +3265,9 @@ def main(argv=None):
         for d in train:
             print(f"{d.name}: {d.n} subjects, {d.Y.shape[1]} features"
                   f"{' (surface)' if d.is_surf else ''}")
+        msg = _subjects_mismatch(train, a.train, '--train')
+        if msg:
+            p.error(msg)
         if test is not None and not all(d.has_male for d in test):
             print("Test data contain no sex: sex is not used in the normative models.")
             train = [replace(d, male=np.zeros_like(d.male)) for d in train]
