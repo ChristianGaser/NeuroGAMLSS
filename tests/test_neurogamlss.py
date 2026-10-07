@@ -251,20 +251,20 @@ def simulate_brain(n=500, p=300, seed=12):
 
 def test_with_df_equals_a_new_fit():
     d = simulate_brain()
-    est = NG.NDMBrainAge(pca=10).fit(d)
+    est = NG.NDMBrainAge(pca=10, mask_threshold=0).fit(d)
     a = est.with_df(d, 2, 1).predict(d)
-    b = NG.NDMBrainAge(df_mu=2, df_sigma=1, pca=10).fit(d).predict(d)
+    b = NG.NDMBrainAge(df_mu=2, df_sigma=1, pca=10, mask_threshold=0).fit(d).predict(d)
     assert np.allclose(a['age'], b['age']) and np.allclose(a['sd'], b['sd'], equal_nan=True)
 
 
 def test_select_df_brainage():
     d = simulate_brain()
-    dm, ds, rec = NG.select_df_brainage(d, dict(pca=10))
+    dm, ds, rec = NG.select_df_brainage(d, dict(pca=10, mask_threshold=0))
     assert dm in NG.DF_GRID_BRAINAGE['mu'] and ds in NG.DF_GRID_BRAINAGE['sigma']
     first, last = rec['stages']
     assert first['df_mu'] == list(NG.DF_GRID_BRAINAGE['mu']) and set(last['df_mu']) == {dm}
     assert last['mae'][last['df_sigma'].index(ds)] == min(last['mae'])
-    assert NG.select_df_brainage(d, dict(pca=10), 2, 3)[2]['selected'] is False
+    assert NG.select_df_brainage(d, dict(pca=10, mask_threshold=0), 2, 3)[2]['selected'] is False
 
 
 def test_command_line_stores_the_chosen_df(tmp_path):
@@ -289,3 +289,69 @@ def test_command_line_stores_the_chosen_df(tmp_path):
     NG.main(['--normative-only', '--df-mu', '4', '--df-sigma', '2', '--train', files['TR'],
              '--save-model', model, '--out', out])
     assert NG.load_models(model)[0][0].voxel.model.df_mu == 4
+
+
+def masked_data(surface=False, n=300, seed=13):
+    """Positive data with near-empty features 0-4, a constant feature 5 and a NaN in feature 6."""
+    rng = np.random.default_rng(seed)
+    age = rng.uniform(20, 80, n)
+    male = rng.integers(0, 2, n).astype(float)
+    scale = 2.5 if surface else 0.5
+    Y = scale * (1 + 0.2 * rng.standard_normal((n, 40))) - 0.002 * (age[:, None] - 50)
+    Y[:, :5] = np.abs(0.02 * scale * rng.standard_normal((n, 5)))        # near zero
+    Y[:, 5] = scale
+    Y[3, 6] = np.nan
+    name = 's12.mesh.thickness_X_CAT12.9.mat' if surface else 's4rp1_8mm_X_CAT12.9.mat'
+    return NG.Data(Y.astype(np.float32), age, male, np.zeros(n, int), name,
+                   is_surf=surface, res=None if surface else '8')
+
+
+def test_feature_mask_rules():
+    vol, surf = masked_data(), masked_data(surface=True)
+    keep, rec = NG.feature_mask(vol)                      # default 0.05, absolute
+    assert rec['spec'] == '0.05' and rec['threshold'] == 0.05
+    assert not keep[:7].any() and keep[7:].all() and rec['n_used'] == 33
+    assert rec['n_without_variance'] == 2 and rec['n_below_threshold'] == 5
+    keep, rec = NG.feature_mask(surf)                     # default 5% of the median of the means
+    assert rec['spec'] == '5%' and np.isclose(rec['threshold'], 0.05 * rec['median_of_means'])
+    assert not keep[:7].any() and keep[7:].all()
+    keep, rec = NG.feature_mask(vol, 0)                   # only finite, not constant
+    assert keep[:5].all() and not keep[5:7].any() and rec['threshold'] == 0
+    neg = NG.Data(-vol.Y, vol.age, vol.male, vol.site, vol.name)
+    assert NG.feature_mask(neg, '5%')[1]['threshold'] == 0  # no positive median: not used
+    for bad in ('-1', 'x', '5 %%'):
+        with pytest.raises(ValueError):
+            NG.parse_mask_threshold(bad)
+
+
+@pytest.mark.parametrize("ext", ['.npz', '.mat'])
+def test_mask_in_models(tmp_path, ext):
+    d = masked_data()
+    vm = NG.VoxelModel(family='normal').fit(d)
+    Z = vm.zmaps(d)['Z']
+    assert np.all(np.isnan(Z[:, :7])) and np.all(np.isfinite(Z[:, 7:]))
+    est = NG.NDMBrainAge(pca=5).fit(d)
+    assert set(est.parts[0].cols) == set(range(7, 40))
+    path = str(tmp_path / f'model{ext}')
+    NG.save_models(path, [NG.ModelSet(dict(NG.data_info(d), mask=vm.mask_info), est, vm)],
+                   NG.model_description([d], dict(cov=None), 'test'))
+    s = NG.load_models(path)[0][0]
+    assert s.voxel.mask_info['n_used'] == 33 and s.brainage.mask_info['threshold'] == 0.05
+    assert np.array_equal(np.isnan(s.voxel.zmaps(d)['Z']), np.isnan(Z))
+
+
+def test_command_line_mask(tmp_path):
+    import json
+    d = masked_data(n=200)
+    f = str(tmp_path / 's4rp1_8mm_TR_CAT12.9.mat')
+    savemat(f, dict(Y=d.Y, age=d.age[:, None], male=d.male[:, None]))
+    model = str(tmp_path / 'norm.npz')
+    NG.main(['--normative-only', '--family', 'normal', '--df-mu', '3', '--df-sigma', '2',
+             '--mask-threshold', '50%', '--train', f, '--save-model', model,
+             '--out', str(tmp_path / 'r')])
+    with open(str(tmp_path / 'norm.json')) as fh:
+        desc = json.load(fh)
+    assert desc['settings']['mask_threshold'] == '50%'
+    assert desc['models'][0]['mask']['spec'] == '50%' and desc['models'][0]['mask']['n_used'] == 33
+    with pytest.raises(SystemExit):
+        NG.main(['--normative-only', '--mask-threshold', 'abc', '--train', f, '--save-model', model])
