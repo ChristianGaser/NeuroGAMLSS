@@ -404,3 +404,49 @@ def test_fit_chunks_in_threads():
     one = NG.fit_location_scale(Y, X, W, max_elements=400 * 7, jobs=1)
     many = NG.fit_location_scale(Y, X, W, max_elements=400 * 7, jobs=3)    # 8 chunks
     assert all(np.array_equal(a, b) for a, b in zip(one, many))
+
+
+def write_brain(tmp_path, name, d, sel, age):
+    path = str(tmp_path / f's4rp{name}_CAT12.9.mat')
+    savemat(path, dict(Y=np.abs(d.Y[sel]) + 0.5, age=np.asarray(age, float)[:, None],
+                       male=d.male[sel][:, None]))
+    return path
+
+
+def test_ages_of_zero_or_nan(tmp_path):
+    from scipy.io import loadmat
+    d = simulate_brain(n=400, p=120)
+    age = d.age.copy()
+    age[[0, 1, 300, 301]] = 0
+    age[[2, 302]] = np.nan
+    tr = write_brain(tmp_path, '1_8mm_TR', d, slice(0, 250), age[:250])
+    te = write_brain(tmp_path, '1_8mm_TE', d, slice(250, 400), age[250:])
+    assert np.isnan(NG.load_data(tr).age[:3]).all()                 # 0 and NaN are unknown
+    out = str(tmp_path / 'r')
+    NG.main(['--train', tr, '--test', te, '--adjust', '1:80', '--zmaps', '--pca', '10',
+             '--df-mu', '3', '--df-sigma', '2', '--no-gpr', '--out', out])
+    r = loadmat(out + '.mat', squeeze_me=True, struct_as_record=False)['NDM']
+    z = loadmat(out + '_zmaps_s4rp1_8mm_TE_CAT12.9.mat', squeeze_me=True,
+                struct_as_record=False)['NDMzmap']
+    bad = [50, 51, 52]
+    assert np.isnan(r.BrainAGE[bad]).all() and np.isfinite(r.PredictedAge[bad]).all()
+    assert np.isfinite(np.delete(r.BrainAGE, bad)).all() and np.isnan(z.Z[bad]).all()
+    assert r.ind_control.size == 77 and not np.isin(bad, r.ind_control - 1).any()   # 3 of 1:80 unknown
+
+
+def test_samples_without_valid_ages(tmp_path):
+    from scipy.io import loadmat
+    d = simulate_brain(n=300, p=120)
+    files = [write_brain(tmp_path, f'{t}_8mm_TR', d, slice(0, 200), d.age[:200]) for t in (1, 2)]
+    tests = [write_brain(tmp_path, f'{t}_8mm_NA', d, slice(200, 300), np.zeros(100)) for t in (1, 2)]
+    out = str(tmp_path / 'r')
+    NG.main(['--train', *files, '--test', *tests, '--pca', '10', '--df-mu', '3', '--df-sigma',
+             '2', '--no-gpr', '--out', out])                       # brain age without ages
+    r = loadmat(out + '.mat', squeeze_me=True, struct_as_record=False)['NDM']
+    assert np.allclose(r.weights, 0.5) and np.isfinite(r.PredictedAge_ensemble).all()
+    with pytest.raises(SystemExit):                                  # controls without ages
+        NG.main(['--train', *files, '--test', *tests, '--adjust', '1:10', '--pca', '10',
+                 '--no-gpr', '--out', out])
+    few = write_brain(tmp_path, '1_8mm_FEW', d, slice(0, 20), np.r_[d.age[:5], np.zeros(15)])
+    with pytest.raises(SystemExit):                                  # too few training ages
+        NG.main(['--normative-only', '--train', few, '--save-model', out + '.npz'])
