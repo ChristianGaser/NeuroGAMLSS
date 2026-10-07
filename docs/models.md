@@ -13,9 +13,9 @@ y_i \sim \mathcal{D}(\mu_i, \sigma_i, \nu_i, \tau_i),
 ```math
 \begin{aligned}
 g(\mu_i) &= \beta_0 + \mathbf{b}_\mu(a_i)^\top \boldsymbol\beta + \beta_s s_i + \gamma_{c_i} + \mathbf{h}(\mathbf{x}_i)^\top \boldsymbol\beta_x,
-\\ \log \sigma_i &= \theta_0 + \mathbf{b}_\sigma(a_i)^\top \boldsymbol\theta + \theta_s s_i + \mathbf{h}(\mathbf{x}_i)^\top \boldsymbol\theta_x,
+\\ \log\, \sigma_i &= \theta_0 + \mathbf{b}_\sigma(a_i)^\top \boldsymbol\theta + \theta_s s_i + \mathbf{h}(\mathbf{x}_i)^\top \boldsymbol\theta_x,
 \\ \nu_i &= \kappa_0 \;[+\, \mathbf{b}_\nu(a_i)^\top \boldsymbol\kappa],
-\\ \log \tau_i &= \lambda_0 \;[+\, \mathbf{b}_\nu(a_i)^\top \boldsymbol\lambda].
+\\ \log\, \tau_i &= \lambda_0 \;[+\, \mathbf{b}_\nu(a_i)^\top \boldsymbol\lambda].
 \end{aligned}
 ```
 
@@ -61,13 +61,13 @@ $`y \sim \mathcal{N}(\mu, \sigma^2)`$, and the z-score is $`z = (y - \mu)/\sigma
 The sinh-arcsinh distribution of Jones and Pewsey (2009) in the SHASHo2 parameterization of gamlss.dist (Rigby et al., 2019). With
 
 ```math
-z = \frac{y - \mu}{\sigma \tau}, \qquad t = \tau \operatorname{asinh}(z) - \nu, \qquad r = \sinh(t),
+z = \frac{y - \mu}{\sigma \tau}, \qquad t = \tau\, \mathrm{asinh}(z) - \nu, \qquad r = \sinh(t),
 ```
 
 $`r`$ follows a standard normal distribution, and the log-density is
 
 ```math
-\log f(y) = \log\cosh t - \log\sigma - \tfrac{1}{2}\log(1 + z^2) - \tfrac{1}{2} r^2 - \tfrac{1}{2}\log 2\pi .
+\log\, f(y) = \log\, \cosh\, t - \log\, \sigma - \tfrac{1}{2}\log(1 + z^2) - \tfrac{1}{2} r^2 - \tfrac{1}{2}\log\, 2\pi .
 ```
 
 - **Special case.** $`\nu = 0`$ and $`\tau = 1`$ give the normal distribution with mean $`\mu`$ and standard deviation $`\sigma`$.
@@ -84,13 +84,13 @@ The GG family of gamlss.dist, which Brain Charts used (Bethlehem et al., 2022), 
 f(y) = \frac{|\nu|\, \theta^\theta\, w^\theta\, e^{-\theta w}}{\Gamma(\theta)\, y}.
 ```
 
-As $`\nu \to 0`$, GG becomes the log-normal distribution with $`\log y \sim \mathcal{N}(\log\mu, \sigma^2)`$. The density is evaluated in a form that is smooth through this limit. With $`L = \log y - \log\mu`$,
+As $`\nu \to 0`$, GG becomes the log-normal distribution with $`\log\, y \sim \mathcal{N}(\log\, \mu, \sigma^2)`$. The density is evaluated in a form that is smooth through this limit. With $`L = \log\, y - \log\, \mu`$,
 
 ```math
-\log f(y) = -\log\sigma - \tfrac{1}{2}\log 2\pi - \log y + S(\theta) - \frac{L^2}{\sigma^2} E(\nu L),
+\log\, f(y) = -\log\, \sigma - \tfrac{1}{2}\log\, 2\pi - \log\, y + S(\theta) - \frac{L^2}{\sigma^2} E(\nu L),
 ```
 
-where $`S(\theta) = \theta\log\theta - \theta - \log\Gamma(\theta) - \tfrac{1}{2}\log\theta + \tfrac{1}{2}\log 2\pi`$ is the remainder of Stirling's formula, which tends to 0, and $`E(x) = (e^x - 1 - x)/x^2`$, which tends to $`\tfrac{1}{2}`$. Both are computed with series expansions where the direct formulas lose precision.
+where $`S(\theta) = \theta\log\, \theta - \theta - \log\, \Gamma(\theta) - \tfrac{1}{2}\log\, \theta + \tfrac{1}{2}\log\, 2\pi`$ is the remainder of Stirling's formula, which tends to 0, and $`E(x) = (e^x - 1 - x)/x^2`$, which tends to $`\tfrac{1}{2}`$. Both are computed with series expansions where the direct formulas lose precision.
 
 The normal score is $`\Phi^{-1}`$ of the regularized incomplete gamma function $`P(\theta, \theta w)`$ for $`\nu \gt 0`$, and of $`1 - P(\theta, \theta w)`$ for $`\nu \lt 0`$. The tail with the smaller probability is used to avoid cancellation. For $`\theta \gt 10^4`$ the Wilson–Hilferty approximation is used, and at $`\nu = 0`$ the log-normal score $`L/\sigma`$.
 
@@ -101,40 +101,40 @@ The normal score is $`\Phi^{-1}`$ of the regularized incomplete gamma function $
 The normal model is fitted by the RS algorithm of GAMLSS, ported from ComBatLS (Gardner et al., 2024). Starting from ordinary least squares and a constant standard deviation, it alternates two updates:
 
 1. a weighted least-squares update of the location coefficients with weights $`\sigma^{-2}`$;
-2. a Fisher scoring step for the coefficients of $`\log\sigma`$, the least-squares regression of $`(z^2 - 1)/2`$ on the design of $`\log\sigma`$. The step is halved, up to 20 times, while the deviance increases.
+2. a Fisher scoring step for the coefficients of $`\log\, \sigma`$, the least-squares regression of $`(z^2 - 1)/2`$ on the design of $`\log\, \sigma`$. The step is halved, up to 20 times, while the deviance increases.
 
-Iterations stop when the location changes by less than $`10^{-6}\sigma`$ and the coefficients of $`\log\sigma`$ by less than $`10^{-6}`$, or after 2,000 iterations. All voxels are updated together with batched linear algebra, in chunks of voxels that run in parallel threads.
+Iterations stop when the location changes by less than $`10^{-6}\sigma`$ and the coefficients of $`\log\, \sigma`$ by less than $`10^{-6}`$, or after 2,000 iterations. All voxels are updated together with batched linear algebra, in chunks of voxels that run in parallel threads.
 
 ### SHASH and GG: penalized Newton steps
 
 The models with shape parameters maximize, for every voxel, the penalized log-likelihood
 
 ```math
-\ell_p = \sum_i \log f(y_i) - \frac{1}{2 s^2} \lVert \boldsymbol\kappa_{\mathrm{all}} \rVert^2 - \frac{1}{2 s^2} \lVert \boldsymbol\lambda_{\mathrm{all}} \rVert^2 - \frac{\rho}{2} \sum_i \left[ (\log\tau_i - \log\tau_{\max})_+^2 + (\log\tau_{\min} - \log\tau_i)_+^2 \right].
+\ell_p = \sum_i \log\, f(y_i) - \frac{1}{2 s^2} \lVert \boldsymbol\kappa_{\mathrm{all}} \rVert^2 - \frac{1}{2 s^2} \lVert \boldsymbol\lambda_{\mathrm{all}} \rVert^2 - \frac{\rho}{2} \sum_i [ (\log\, \tau_i - \log\, \tau_{\max})_+^2 + (\log\, \tau_{\min} - \log\, \tau_i)_+^2 ].
 ```
 
-- **Priors.** $`\boldsymbol\kappa_{\mathrm{all}}`$ and $`\boldsymbol\lambda_{\mathrm{all}}`$ are all coefficients of $`\nu`$ and $`\log\tau`$. Their normal priors with standard deviation $`s`$ (`--shape-prior`, default 1) shrink the shape toward the normal distribution, or toward the log-normal distribution for GG.
+- **Priors.** $`\boldsymbol\kappa_{\mathrm{all}}`$ and $`\boldsymbol\lambda_{\mathrm{all}}`$ are all coefficients of $`\nu`$ and $`\log\, \tau`$. Their normal priors with standard deviation $`s`$ (`--shape-prior`, default 1) shrink the shape toward the normal distribution, or toward the log-normal distribution for GG.
 - **Bound of τ.** A quadratic penalty with $`\rho = 100`$ keeps $`\tau`$ between $`\tau_{\min} = 0.2`$ and $`\tau_{\max}`$ (`--tau-max`, default 2). SHASH with $`\tau \gt 1`$ has lighter tails than the normal distribution, and its normal scores grow like $`z^\tau`$ far from the centre. Without the bound, values outside the training range, which are common in patients, can get extreme z-scores.
-- **Start.** SHASH starts from the fitted normal model with $`\nu = 0`$ and $`\tau = 1`$, which is the same distribution. GG starts from the normal model of $`\log y`$, its log-normal limit. The data of each voxel are standardized for SHASH and divided by their geometric mean for GG, and the coefficients are transformed back after the fit.
+- **Start.** SHASH starts from the fitted normal model with $`\nu = 0`$ and $`\tau = 1`$, which is the same distribution. GG starts from the normal model of $`\log\, y`$, its log-normal limit. The data of each voxel are standardized for SHASH and divided by their geometric mean for GG, and the coefficients are transformed back after the fit.
 
 The coefficients are updated by Newton steps for all voxels at once:
 
-- **Derivatives.** The first and second derivatives of $`\log f`$ with respect to the linear predictors are exact for SHASH. For GG, they are central differences with step $`10^{-4}`$. The gradient and the Hessian of every voxel are assembled from these derivatives with one matrix product per pair of predictors.
+- **Derivatives.** The first and second derivatives of $`\log\, f`$ with respect to the linear predictors are exact for SHASH. For GG, they are central differences with step $`10^{-4}`$. The gradient and the Hessian of every voxel are assembled from these derivatives with one matrix product per pair of predictors.
 - **Squared scores.** Where the negative Hessian plus the prior is not positive definite, the outer product of the scores replaces it (the BHHH approximation). This always gives an ascent direction. gamlss.dist uses the same squared-score approximation for the expected second derivatives of SHASH.
 - **Step halving.** A step is halved, up to 30 times, until the penalized log-likelihood does not decrease, as in the autostep of gamlss.
 - **Convergence.** A voxel stops when half its Newton decrement falls below $`10^{-9}`$ per subject. Voxels that reach 500 iterations, or whose step cannot be improved by halving, keep their best fit and are flagged as not converged.
 - **Parallel chunks.** The voxels are processed in chunks of about 500,000 values, which run in parallel threads (`--jobs`, by default half the CPU count). NumPy releases Python's global lock in its array operations, so the threads use several cores. The chunks do not depend on the number of threads, so neither do the results.
-- **Arithmetic.** One exponential of $`t`$ gives $`\sinh t`$, $`\cosh t`$, $`\tanh t`$ and $`\cosh 2t`$, and $`\operatorname{asinh} z`$ is computed as $`\operatorname{log1p}\bigl(|z| + z^2/(1 + \sqrt{1 + z^2})\bigr)`$ with the sign of $`z`$, which is accurate also for small $`|z|`$.
+- **Arithmetic.** One exponential of $`t`$ gives $`\sinh\, t`$, $`\cosh\, t`$, $`\tanh\, t`$ and $`\cosh\, 2t`$, and $`\mathrm{asinh}\, z`$ is computed as $`\mathrm{log1p}(|z| + z^2/(1 + \sqrt{1 + z^2}))`$ with the sign of $`z`$, which is accurate also for small $`|z|`$.
 - **Mixed algorithm.** The optimizer can start with iterations that ignore the cross-derivatives between predictors, as the RS phase of the mixed algorithm of gamlss (`rs_iter` of `fit_distribution`). This was slower without better fits for SHASH and is off by default.
 
 In 8 mm gray and white matter of 2,241 subjects without a mask, 0.7% and 0.9% of the voxels did not converge. These voxels contain almost no tissue, with a median density of 0.001, and only a few subjects have nonzero values. Their raw skewness is about 10, and most of them have $`\tau`$ between 0.2 and 0.4. With the default mask, none of 3,546 gray matter voxels and 1 of 3,242 white matter voxels did not converge.
 
 ### Age-dependent shape
 
-With `--shape-df k`, every voxel is first fitted with constant shape and then with $`\nu`$ and $`\log\tau`$ as natural splines of age with $`k`$ degrees of freedom, starting from the constant fit. A voxel keeps the age-dependent shape if the Bayesian information criterion prefers it,
+With `--shape-df k`, every voxel is first fitted with constant shape and then with $`\nu`$ and $`\log\, \tau`$ as natural splines of age with $`k`$ degrees of freedom, starting from the constant fit. A voxel keeps the age-dependent shape if the Bayesian information criterion prefers it,
 
 ```math
-2(\ell_2 - \ell_1) > m k \log n,
+2(\ell_2 - \ell_1) > m k \log\, n,
 ```
 
 where $`\ell_1`$ and $`\ell_2`$ are the unpenalized log-likelihoods of the two fits, $`m`$ is the number of shape parameters (2 for SHASH, 1 for GG) and $`n`$ is the number of subjects. In gray and white matter at 8 mm with $`k = 3`$, BIC chose age-dependent shape for 7% of the voxels.
@@ -193,7 +193,7 @@ For a new site, the normal scores of its control subjects are standardized for e
 `--diagnostics` evaluates the fit on the training data. The normal scores are computed at the subjects' own sites, without adaptation, in $`G = 10`$ age groups of equal size. In each group $`g`$ with $`m`$ subjects, four statistics are approximately standard normal for a correct model (Royston and Wright, 2000):
 
 - $`Z_{1g} = \sqrt{m}\, \bar z`$ for the mean;
-- $`Z_{2g} = \left[v^{1/3} - \left(1 - \frac{2}{9(m-1)}\right)\right] \big/ \sqrt{\frac{2}{9(m-1)}}`$ for the variance $`v`$, the Wilson–Hilferty transform;
+- $`Z_{2g} = [v^{1/3} - (1 - 2/(9(m-1)))] / \sqrt{2/(9(m-1))}`$ for the variance $`v`$, the Wilson–Hilferty transform;
 - $`Z_{3g}`$, D'Agostino's test of the skewness;
 - $`Z_{4g}`$, the Anscombe–Glynn test of the kurtosis.
 
@@ -253,7 +253,7 @@ SHASH and GG came close to the expected tails, while the normal model gave five 
 NormBrainAGE models principal component scores with normal distributions. `--warp` can first transform every voxel $`x`$, standardized by its training mean and standard deviation, with a sinh-arcsinh warp (Jones and Pewsey, 2009),
 
 ```math
-w = \sinh(\delta \operatorname{asinh}(x) - \varepsilon).
+w = \sinh(\delta\, \mathrm{asinh}(x) - \varepsilon).
 ```
 
 As in warped Bayesian linear regression (Fraza et al., 2021), $`\varepsilon`$ and $`\delta`$ are estimated jointly with a normal location-scale model of $`w`$, by maximizing the likelihood of $`x`$ including the Jacobian of the warp. Unlike SHASH, the warp does not depend on age. The same transformation therefore applies to all subjects before PCA, which SHASH cannot provide. In our tests, the warp did not change the accuracy of brain age, so it is off by default. The z-maps use the warp only in one case: with `--pca 0 --family normal`, the voxel-wise normal model of brain age, including the warp, is shared with the z-maps.

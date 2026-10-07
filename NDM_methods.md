@@ -21,27 +21,27 @@ For each model, the voxel- or vertex-wise data of the training sample were reduc
 For every feature $`j`$, we fitted a normal location–scale model in which both the mean and the standard deviation depend on age (Fig. 1b):
 
 ```math
-y_{ij} \sim \mathcal{N}\left(\mu_j(a_i, s_i, c_i),\ \sigma_j^2(a_i, s_i)\right),
-\tag{1}
+y_{ij} \sim \mathcal{N}(\mu_j(a_i, s_i, c_i),\ \sigma_j^2(a_i, s_i)),
+\qquad (1)
 ```
 
 ```math
 \begin{aligned}
 \mu_j(a, s, c) &= \beta_{0j} + \mathbf{b}_\mu(a)^\top \boldsymbol{\beta}_j + \beta_{sj}\, s + \gamma_{cj},
-\\ \log \sigma_j(a, s) &= \theta_{0j} + \mathbf{b}_\sigma(a)^\top \boldsymbol{\theta}_j + \theta_{sj}\, s .
+\\ \log\, \sigma_j(a, s) &= \theta_{0j} + \mathbf{b}_\sigma(a)^\top \boldsymbol{\theta}_j + \theta_{sj}\, s .
 \end{aligned}
-\tag{2}
+\qquad (2)
 ```
 
 Here, $`a_i`$ is the age of subject $`i`$, $`s_i`$ its sex (1 for males, 0 for females) and $`c_i`$ its site, with $`\gamma_{1j} = 0`$. The age effects $`\mathbf{b}_\mu(a)`$ and $`\mathbf{b}_\sigma(a)`$ are natural cubic spline bases without intercept (Hastie et al., 2009) with [3] and [1] degrees of freedom. The degrees of freedom were chosen for each model by 5-fold cross-validation within the training sample, with folds stratified by site and age. Those of $`\mu`$ were chosen from 1 to 8 with 3 for $`\sigma`$, and then those of $`\sigma`$ from 1 to 4, by the mean absolute error of the held-out brain age after removing its median. Their knots lie at equally spaced quantiles of the training ages, including boundary knots at the youngest and the oldest age, so the trajectories continue linearly outside the training range. Sex enters the mean and the log standard deviation as a main effect. It is omitted when the training sample contains only one sex or when sex is unknown for the test data. Site enters the mean as a fixed effect. For prediction, the site effect is replaced by its average over the training sites weighted by their sample sizes, $`\bar\gamma_j = \sum_c \pi_c \gamma_{cj}`$, analogous to the standardized mean of ComBat (Johnson et al., 2007). We refer to this as the reference site.
 
-The parameters were estimated by maximum likelihood with the RS algorithm of generalized additive models for location, scale and shape (Rigby and Stasinopoulos, 2005), following its implementation in ComBatLS (Gardner et al., 2024). Starting from ordinary least squares and a constant standard deviation, the algorithm alternates between a weighted least-squares update of the mean parameters, with weights $`\sigma^{-2}`$, and a Fisher scoring step for the parameters of $`\log\sigma`$. For the normal distribution, this step is the least-squares regression of $`(z^2 - 1)/2`$ on the design of $`\log\sigma`$. It is halved, up to 20 times, if the deviance increases. Iterations stopped when the changes of $`\mu`$, in units of $`\sigma`$, and of the $`\log\sigma`$ parameters fell below $`10^{-6}`$, or after 2000 iterations. All features were fitted simultaneously in vectorized form.
+The parameters were estimated by maximum likelihood with the RS algorithm of generalized additive models for location, scale and shape (Rigby and Stasinopoulos, 2005), following its implementation in ComBatLS (Gardner et al., 2024). Starting from ordinary least squares and a constant standard deviation, the algorithm alternates between a weighted least-squares update of the mean parameters, with weights $`\sigma^{-2}`$, and a Fisher scoring step for the parameters of $`\log\, \sigma`$. For the normal distribution, this step is the least-squares regression of $`(z^2 - 1)/2`$ on the design of $`\log\, \sigma`$. It is halved, up to 20 times, if the deviance increases. Iterations stopped when the changes of $`\mu`$, in units of $`\sigma`$, and of the $`\log\, \sigma`$ parameters fell below $`10^{-6}`$, or after 2000 iterations. All features were fitted simultaneously in vectorized form.
 
 The z-scores relative to the normative model at age $`a`$ are
 
 ```math
 z_j(a) = \frac{y_j - \mu_j(a, s)}{\sigma_j(a, s)},
-\tag{3}
+\qquad (3)
 ```
 
 where $`\mu_j(a, s)`$ refers to the reference site. Conventional normative modeling evaluates (3) at the chronological age (Fig. 1a, orange). NDM treats $`a`$ as unknown (Fig. 1a, blue).
@@ -52,7 +52,7 @@ PCA scores are uncorrelated in the training sample, but their z-scores are not. 
 
 ```math
 \mathbf{R} = \frac{1}{n} \sum_{i=1}^{n} \mathbf{z}_i \mathbf{z}_i^\top + \psi\, \mathbf{I}, \qquad \psi = 0.01 .
-\tag{4}
+\qquad (4)
 ```
 
 At the maximum likelihood solution, the mean of $`z_{ij}^2`$ over the training subjects is exactly one, so the first term has a unit diagonal. The small ridge $`\psi`$ stabilizes the inverse.
@@ -62,15 +62,15 @@ At the maximum likelihood solution, the mean of $`z_{ij}^2`$ over the training s
 Under (1)–(4), the log-likelihood of the features $`\mathbf{y}`$ of a test subject at a candidate age $`a`$ is
 
 ```math
-\ell(a) = \log p(\mathbf{y} \mid a, s) = -\frac{1}{2}\, \mathbf{z}(a)^\top \mathbf{R}^{-1} \mathbf{z}(a) - \sum_{j=1}^{K} \log \sigma_j(a, s) + \text{const},
-\tag{5}
+\ell(a) = \log\, p(\mathbf{y} \mid a, s) = -\frac{1}{2}\, \mathbf{z}(a)^\top \mathbf{R}^{-1} \mathbf{z}(a) - \sum_{j=1}^{K} \log\, \sigma_j(a, s) + \text{const},
+\qquad (5)
 ```
 
 where the constant does not depend on $`a`$. The second term is the Jacobian of the standardization. Without it, the estimate would favor ages at which the normative distribution is wide. The brain age is the maximum likelihood estimate, and BrainAGE is its difference from chronological age (Fig. 1c):
 
 ```math
 \hat a = \underset{a}{\arg\max}\ \ell(a), \qquad \mathrm{BrainAGE} = \hat a - a_{\mathrm{chron}} .
-\tag{6}
+\qquad (6)
 ```
 
 The likelihood uses the normative model of the subject's sex at the reference site. This also applies to test subjects from a training site. We evaluated $`\ell`$ on a grid of ages in steps of 0.25 years, from 5 years below the youngest to 5 years above the oldest training subject, but not below zero. The maximum was refined by a parabola through the grid maximum and its two neighbors. Because the whole grid is searched, the global maximum is found even if $`\ell`$ has several local maxima. Estimates at the end of the grid were flagged.
@@ -82,8 +82,8 @@ The estimate maximizes $`p(\mathbf{y} \mid a)`$ and involves no prior distributi
 The standard error of each estimate follows from the curvature of the log-likelihood at its maximum (Laplace approximation):
 
 ```math
-\mathrm{SE}(\hat a) = \left(-\ell''(\hat a)\right)^{-1/2},
-\tag{7}
+\mathrm{SE}(\hat a) = (-\ell''(\hat a))^{-1/2},
+\qquad (7)
 ```
 
 with $`\ell''`$ obtained from the second difference of $`\ell`$ on the grid. This is the standard error of the maximum likelihood estimate based on the observed information. It equals the standard deviation of the Gaussian approximation of the posterior of age under a flat prior. We assessed its calibration by the proportion of control subjects whose BrainAGE lies within $`\pm 1.96\,\mathrm{SE}`$.
@@ -100,9 +100,9 @@ The z-scores at brain age are thus orthogonal to the aging direction in the metr
 
 ```math
 \mathbf{z}(a_{\mathrm{chron}}) =
-\underbrace{\frac{\boldsymbol{\mu}(\hat a) - \boldsymbol{\mu}(a_{\mathrm{chron}})}{\boldsymbol{\sigma}}}_{\text{aging}}
-+ \underbrace{\mathbf{z}(\hat a)}_{\text{non-aging}},
-\tag{8}
+\underset{\text{aging}}{\frac{\boldsymbol{\mu}(\hat a) - \boldsymbol{\mu}(a_{\mathrm{chron}})}{\boldsymbol{\sigma}}}
++ \underset{\text{non-aging}}{\mathbf{z}(\hat a)},
+\qquad (8)
 ```
 
 with element-wise division. The first term is a displacement along the normative trajectory and is determined by chronological age and BrainAGE. The second term is the part of the deviation that an older- or younger-appearing brain does not explain (Fig. 1d). With age-dependent $`\sigma`$, the decomposition holds approximately.
@@ -110,8 +110,8 @@ with element-wise division. The first term is a displacement along the normative
 We summarized each deviation by the squared Mahalanobis distance $`d^2(a) = \mathbf{z}(a)^\top \mathbf{R}^{-1} \mathbf{z}(a)`$. If the model holds, it follows a $`\chi^2`$ distribution with $`K`$ degrees of freedom at the true age. We transformed it into a normal score with the approximation of Wilson and Hilferty (1931):
 
 ```math
-\mathrm{Dev}(a) = \frac{\left(d^2(a)/K\right)^{1/3} - \left(1 - \frac{2}{9K}\right)}{\sqrt{2/(9K)}} .
-\tag{9}
+\mathrm{Dev}(a) = \frac{(d^2(a)/K)^{1/3} - (1 - 2/(9K))}{\sqrt{2/(9K)}} .
+\qquad (9)
 ```
 
 We report the non-aging deviation $`\mathrm{Dev}(\hat a)`$ and the total deviation $`\mathrm{Dev}(a_{\mathrm{chron}})`$. Positive values indicate data that are less typical of the normative population than average.
@@ -128,7 +128,7 @@ The brain ages $`\hat a_m`$ of the $`M`$ models were combined by a weighted aver
 \mathbf{w} = \frac{\mathbf{C}^{-1} \mathbf{1}}{\mathbf{1}^\top \mathbf{C}^{-1} \mathbf{1}},
 \qquad
 C_{mm'} = \frac{1}{n_c} \sum_{i=1}^{n_c} e_{im}\, e_{im'},
-\tag{10}
+\qquad (10)
 ```
 
 where $`e_{im}`$ is the BrainAGE of control subject $`i`$ in model $`m`$ and $`n_c`$ the number of control subjects. These weights account for the correlation of the errors between models and can be negative. Equal weights and weights proportional to the inverse squared mean absolute error, as in the GPR workflow, are available as alternatives. Regional brain ages were combined in the same way for each region. The deviation of the ensemble is the mean of the normal scores of the models.
@@ -143,7 +143,7 @@ Two alternatives adapt the normative models instead. The first estimates, for ev
 \tilde\mu_j(a, s) = \mu_j(a, s) + o_j\, \sigma_j(a, s),
 \qquad
 \tilde\sigma_j(a, s) = r_j\, \sigma_j(a, s) .
-\tag{11}
+\qquad (11)
 ```
 
 This corresponds to the location and scale step of ComBat (Johnson et al., 2007; Fortin et al., 2018) without empirical Bayes shrinkage. The second alternative does not require the controls' ages. It alternates between estimating the controls' brain ages with the current adaptation and re-estimating (11) at these brain ages. It stops when the brain ages change by less than 0.01 years, or after 20 iterations. Without ages, a site effect along the aging trajectory cannot be distinguished from a shift of brain age. The remaining offset is therefore removed with the controls' median BrainAGE. In all cases, the control subjects were also used to estimate the ensemble weights.
@@ -153,19 +153,19 @@ This corresponds to the location and scale step of ComBat (Johnson et al., 2007;
 For brain age, skewed or heavy-tailed data can be transformed voxel- or vertex-wise before all other steps with a sinh–arcsinh warp (Jones and Pewsey, 2009),
 
 ```math
-w = \sinh\!\left(\delta\, \operatorname{asinh}(x) - \varepsilon\right),
-\tag{12}
+w = \sinh(\delta\, \mathrm{asinh}(x) - \varepsilon),
+\qquad (12)
 ```
 
-where $`x`$ is the standardized value. As in warped Bayesian linear regression (Fraza et al., 2021), the warp parameters $`(\varepsilon, \delta)`$ and the location–scale model (1)–(2) of the warped data were estimated jointly. We maximized the likelihood of the original data, including the Jacobian of the warp, with weak normal priors of variance 9 on $`\varepsilon`$ and $`\log\delta`$ that are centered on the identity warp. The optimization uses block-coordinate ascent. Damped Newton steps update $`(\varepsilon, \log\delta)`$ for a fixed location and scale, bounded to $`|\varepsilon| \le 5`$ and $`0.1 \le \delta \le 10`$. A closed-form affine rescaling then carries the location and scale over to the new warp, followed by three warm-started iterations of the RS algorithm. Only steps that increased the likelihood were accepted. Iterations stopped when the gain fell below $`10^{-5}`$ per subject, or after 40 rounds. The warp does not depend on age, so its Jacobian is constant in (5), and the warped data replace the original data in all later steps.
+where $`x`$ is the standardized value. As in warped Bayesian linear regression (Fraza et al., 2021), the warp parameters $`(\varepsilon, \delta)`$ and the location–scale model (1)–(2) of the warped data were estimated jointly. We maximized the likelihood of the original data, including the Jacobian of the warp, with weak normal priors of variance 9 on $`\varepsilon`$ and $`\log\, \delta`$ that are centered on the identity warp. The optimization uses block-coordinate ascent. Damped Newton steps update $`(\varepsilon, \log\, \delta)`$ for a fixed location and scale, bounded to $`|\varepsilon| \le 5`$ and $`0.1 \le \delta \le 10`$. A closed-form affine rescaling then carries the location and scale over to the new warp, followed by three warm-started iterations of the RS algorithm. Only steps that increased the likelihood were accepted. Iterations stopped when the gain fell below $`10^{-5}`$ per subject, or after 40 rounds. The warp does not depend on age, so its Jacobian is constant in (5), and the warped data replace the original data in all later steps.
 
 ## Voxel- and vertex-wise deviation maps
 
-To localize deviations, we also computed conventional deviation maps (Fig. 1a, orange). Voxel- and vertex-wise data are often skewed or heavy-tailed. We therefore fitted a GAMLSS with the sinh–arcsinh distribution (Jones and Pewsey, 2009) to every voxel or vertex of the training data instead of the normal model (1). In the SHASHo2 parameterization of gamlss.dist (Rigby et al., 2019), $`\sinh(\tau \operatorname{asinh}(z) - \nu)`$ follows a standard normal distribution, with $`z = (y - \mu)/(\sigma\tau)`$. The location $`\mu`$ and the log scale $`\log\sigma`$ depend on age, sex, site and covariates as in (2). The skewness $`\nu`$ and the tail weight $`\tau`$ are constant for each voxel or vertex. With $`\nu = 0`$ and $`\tau = 1`$, the model reduces to (1). Normal priors with standard deviation 1 on $`\nu`$ and $`\log\tau`$ shrink the shape toward the normal distribution, and $`\tau`$ was kept between 0.2 and 2. The fit started from the normal model and continued with damped Newton steps using exact derivatives. The deviation map is the normal score $`\sinh(\tau \operatorname{asinh}(z) - \nu)`$ at chronological age, which equals (3) for the normal model. When control subjects were available, the controls' normal scores were standardized to mean 0 and standard deviation 1, which is equivalent to (11) for the normal model. This used the controls' chronological ages, or their brain ages for the age-free adaptation. The degrees of freedom of $`\mu`$ and $`\sigma`$ were the same for all voxels or vertices and were chosen by 5-fold cross-validation of normal models of 1,000 random voxels or vertices: first those of $`\mu`$ from 2 to 12 with 3 for $`\sigma`$, then those of $`\sigma`$ from 1 to 5. The criterion was the median over voxels of the held-out log-likelihood, which is robust to the few near-empty voxels in which flexible curves fail. With the lobe atlas, the maps were also averaged within regions. The calibration of the voxel- and vertex-wise models was checked in [10] age groups of the training sample with Q statistics (Royston and Wright, 2000) and worm plots (van Buuren and Fredriks, 2001).
+To localize deviations, we also computed conventional deviation maps (Fig. 1a, orange). Voxel- and vertex-wise data are often skewed or heavy-tailed. We therefore fitted a GAMLSS with the sinh–arcsinh distribution (Jones and Pewsey, 2009) to every voxel or vertex of the training data instead of the normal model (1). In the SHASHo2 parameterization of gamlss.dist (Rigby et al., 2019), $`\sinh(\tau\, \mathrm{asinh}(z) - \nu)`$ follows a standard normal distribution, with $`z = (y - \mu)/(\sigma\tau)`$. The location $`\mu`$ and the log scale $`\log\, \sigma`$ depend on age, sex, site and covariates as in (2). The skewness $`\nu`$ and the tail weight $`\tau`$ are constant for each voxel or vertex. With $`\nu = 0`$ and $`\tau = 1`$, the model reduces to (1). Normal priors with standard deviation 1 on $`\nu`$ and $`\log\, \tau`$ shrink the shape toward the normal distribution, and $`\tau`$ was kept between 0.2 and 2. The fit started from the normal model and continued with damped Newton steps using exact derivatives. The deviation map is the normal score $`\sinh(\tau\, \mathrm{asinh}(z) - \nu)`$ at chronological age, which equals (3) for the normal model. When control subjects were available, the controls' normal scores were standardized to mean 0 and standard deviation 1, which is equivalent to (11) for the normal model. This used the controls' chronological ages, or their brain ages for the age-free adaptation. The degrees of freedom of $`\mu`$ and $`\sigma`$ were the same for all voxels or vertices and were chosen by 5-fold cross-validation of normal models of 1,000 random voxels or vertices: first those of $`\mu`$ from 2 to 12 with 3 for $`\sigma`$, then those of $`\sigma`$ from 1 to 5. The criterion was the median over voxels of the held-out log-likelihood, which is robust to the few near-empty voxels in which flexible curves fail. With the lobe atlas, the maps were also averaged within regions. The calibration of the voxel- and vertex-wise models was checked in [10] age groups of the training sample with Q statistics (Royston and Wright, 2000) and worm plots (van Buuren and Fredriks, 2001).
 
 ## Voxel-wise variant
 
-Normative models can also be fitted directly to every voxel or vertex instead of to PCA scores. The full residual correlation then cannot be estimated from the training sample. We approximated it by a low-rank plus diagonal model, $`\mathbf{R} = \mathbf{V} \boldsymbol{\Lambda} \mathbf{V}^\top + \boldsymbol{\Psi}`$. Here, $`\mathbf{V}`$ and $`\boldsymbol{\Lambda}`$ contain the leading [20] eigenvectors and eigenvalues of the training z-scores, and $`\Psi_{jj} = \max\left(1 - \sum_k \lambda_k V_{jk}^2,\ \psi\right)`$. $`\mathbf{R}^{-1}`$ was applied with the Woodbury identity. Rank zero treats the features as independent. [Results of this variant: Supplementary Material.]
+Normative models can also be fitted directly to every voxel or vertex instead of to PCA scores. The full residual correlation then cannot be estimated from the training sample. We approximated it by a low-rank plus diagonal model, $`\mathbf{R} = \mathbf{V} \boldsymbol{\Lambda} \mathbf{V}^\top + \boldsymbol{\Psi}`$. Here, $`\mathbf{V}`$ and $`\boldsymbol{\Lambda}`$ contain the leading [20] eigenvectors and eigenvalues of the training z-scores, and $`\Psi_{jj} = \max(1 - \sum_k \lambda_k V_{jk}^2,\ \psi)`$. $`\mathbf{R}^{-1}`$ was applied with the Woodbury identity. Rank zero treats the features as independent. [Results of this variant: Supplementary Material.]
 
 ## Comparison method and evaluation
 
