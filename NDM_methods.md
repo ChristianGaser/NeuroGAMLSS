@@ -209,10 +209,7 @@ NDM is implemented in Python with NumPy and SciPy, using h5py for MATLAB v7.3 fi
 - Wilson, E.B., Hilferty, M.M., 1931. The distribution of chi-square. Proceedings of the National Academy of Sciences 17, 684–688.
 - Wolfers, T., Doan, N.T., Kaufmann, T., et al., 2018. Mapping the heterogeneous phenotype of schizophrenia and bipolar disorder using normative models. JAMA Psychiatry 75, 1146–1155.
 
-## Notes for the authors (not part of the manuscript)
-
-- **Figure source.** `figures/NDMScheme.py` generates Figure 1 from a simulation, and the numbers in the legend come from that script. Panels b and c use the estimator of `neurogamlss.py` with independent features. The script also writes a vector version, `figures/NDMScheme.pdf`.
-- **References.** The bibliographic details were written from memory and need checking. This applies especially to ComBatLS, whose final journal publication is not confirmed. The docstring names the ComCat repository as the source of the port.
+<!--
 - **Degrees of freedom in cross-validation.** With `--kfold`, the degrees of freedom are chosen once on all subjects before the folds, so the cross-validated errors are slightly optimistic. Train/test runs choose them on the training sample only.
 - **In-sample ensemble weights.** In cross-validation, `neurogamlss.py` estimates the ensemble weights on the same out-of-fold estimates that it evaluates. With few models the optimism is small, but nested estimation or equal weights would avoid the objection.
 - **Degrees of freedom of the non-aging deviation.** $`d^2(\hat a)`$ is minimized over one parameter, so its reference distribution is closer to $`\chi^2_{K-1}`$. With $`K = 100`$, using $`K`$ shifts the normal score by about −0.02.
@@ -222,3 +219,4 @@ NDM is implemented in Python with NumPy and SciPy, using h5py for MATLAB v7.3 fi
 - **Claims from the code documentation.** The docstring states that the voxel-wise variant is overconfident and less accurate. This statement needs results before it appears in the paper.
 - **Family of the deviation maps.** The SHASH default for the deviation maps rests on the diagnostics of one training sample (GM and WM at 8 mm): the share of voxels with skewness or kurtosis misfit (Q statistics, p < 0.05) fell from 84–88% with the normal model to 31–38% with SHASH, with the default mask and degrees of freedom. Run `--diagnostics` on the study data and report these numbers, or state that the normal model was used.
 - **GPR baseline.** `neurogamlss.py` contains a Python replica of `BA_gpr` that differs slightly because of PCA sign conventions. State whether the GPR results come from the replica or from `BA_gpr_ui.m`.
+-->
