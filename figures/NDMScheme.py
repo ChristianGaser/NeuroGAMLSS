@@ -9,16 +9,16 @@ of its difference to the conventional use of normative models.
   b  normative model of one feature with the z-score of one subject at its
      chronological age and at its brain age
   c  log-likelihood of age of this subject
-  d  its deviation map at chronological age and at brain age
-  e  schematic of the decomposition of the deviation in feature space
+  d  schematic of the decomposition of the deviation in feature space: the
+     conventional deviation mixes the shift along the aging trajectory (BrainAGE)
+     with the non-aging deviation
 
-b-d are simulated: 12 features whose mean and SD change with age, sorted by
-the size of the age effect, and one subject (chronological age 45 years) whose
-data were drawn at age 58 years with non-aging deviations in features 5 and 9.
-The brain age is estimated as in neurogamlss.py (grid search with parabolic
-refinement and Laplace standard error), here with R = I.  e uses two features
-with equal, age-independent SD and R = I, where the non-aging deviation is
-orthogonal to the normative trajectory.
+b and c are simulated: 12 features whose mean and SD change with age, and one
+subject (chronological age 45 years) whose data were drawn at age 58 years with
+non-aging deviations in two features.  The brain age is estimated as in
+neurogamlss.py (grid search with parabolic refinement and Laplace standard
+error), here with R = I.  d uses two features with equal, age-independent SD and
+R = I, where the non-aging deviation is orthogonal to the normative trajectory.
 
     python3 figures/NDMScheme.py      # writes figures/NDMScheme.png and .pdf
 """
@@ -39,7 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # colours: chronological age / conventional, brain age / NDM, non-aging deviation
 ORANGE, BLUE, AQUA = '#eb6834', '#2a78d6', '#1baf7a'
 INK, INK2, MUTED, AXIS = '#0b0b0b', '#52514e', '#898781', '#c3c2b7'
-FILL_SHARED, FILL_NDM, FILL_CONV, BAND = '#f4f4f1', '#eaf2fc', '#fdeee8', '#efeee9'
+FILL_SHARED, FILL_NDM, FILL_CONV = '#f4f4f1', '#eaf2fc', '#fdeee8'
 FS = 6.5                                   # annotations (pt)
 HALO = [pe.withStroke(linewidth=2.2, foreground='white')]   # text over data
 
@@ -110,14 +110,13 @@ print("z at brain age:        ", np.round(z_hat, 2), int(np.sum(np.abs(z_hat) > 
 # figure layout (mm)
 # ---------------------------------------------------------------------------
 MM = 1 / 25.4
-FIG_W, FIG_H = 180.0, 188.0
+FIG_W, FIG_H = 180.0, 126.0
 A_W, A_H, A_TOP = 0.95 * FIG_W, 47.0, 3.0
 fig = plt.figure(figsize=(FIG_W * MM, FIG_H * MM))
 axa = fig.add_axes([0.035, 1 - (A_TOP + A_H) / FIG_H, 0.95, A_H / FIG_H])
-gs = fig.add_gridspec(2, 2, left=0.075, right=0.985, top=0.678, bottom=0.05,
-                      hspace=0.42, wspace=0.3)
-axb, axc = fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])
-axd, axe = fig.add_subplot(gs[1, 0]), fig.add_subplot(gs[1, 1])
+gs = fig.add_gridspec(1, 3, left=0.068, right=0.99, top=0.505, bottom=0.095,
+                      wspace=0.36, width_ratios=[1, 1, 1])
+axb, axc, axe = (fig.add_subplot(gs[0, i]) for i in range(3))
 to_fig = fig.transFigure.inverted()
 
 
@@ -193,7 +192,8 @@ header(71, yv + hc / 2 + 1.6, "Conventional normative modeling: age is given")
 letter(0.008, to_fig.transform(ax.transData.transform((0, y_head)))[1], 'a')
 
 x_left = 0.008
-x_right = axc.get_position().x0 - 0.067
+x_mid = axc.get_position().x0 - 0.062
+x_right = axe.get_position().x0 - 0.035
 
 # --- b: normative model of one feature -------------------------------------------
 ax, j = axb, 3
@@ -248,8 +248,8 @@ ax.vlines(a_hat, ylo, 0, color=BLUE, lw=0.6, ls=(0, (2, 2)), zorder=2)
 ax.scatter([AGE_CHRON], [l_chron], s=34, color=ORANGE, edgecolor='white', lw=0.8, zorder=5)
 ax.errorbar([a_hat], [0], xerr=[se], fmt='o', color=BLUE, ms=5.5, mec='white', mew=0.8,
             capsize=2, elinewidth=1, zorder=5)
-ax.text(a_hat + se + 1.2, 0.2, f"$\\hat a$ ± SE = {a_hat:.1f} ± {se:.1f} y", ha='left',
-        va='center', color=INK, fontsize=FS)
+ax.text(a_hat + 7.0, -0.3, f"$\\hat a$ ± SE =\n{a_hat:.1f} ± {se:.1f} y", ha='left',
+        va='top', color=INK, fontsize=FS, linespacing=1.2)
 ax.text(AGE_CHRON - 1.5, l_chron, "chronological\nage", ha='right', va='center',
         color=INK, fontsize=FS, linespacing=1.2)
 ya = ylo + 3.0
@@ -262,33 +262,9 @@ ax.set_xlim(25, 85)
 ax.set_ylim(ylo, yhi)
 ax.set_xlabel("candidate age $a$ (years)")
 ax.set_ylabel("log-likelihood $\\ell(a) - \\ell(\\hat a)$")
-title(ax, "NDM: the most likely age of the subject's data", 'c', x_right)
+title(ax, "Likelihood of the subject's age", 'c', x_mid)
 
-# --- d: deviation map at chronological age vs at brain age ------------------------------
-ax = axd
-x = np.arange(1, 13)
-for jj in (5, 9):                          # simulated non-aging deviations
-    ax.axvspan(jj - 0.45, jj + 0.45, color=BAND, lw=0, zorder=0)
-ax.axhline(0, color=AXIS, lw=0.6, zorder=1)
-for t in (1.96, -1.96):
-    ax.axhline(t, color=MUTED, lw=0.6, ls=(0, (3, 2)), zorder=1)
-ax.text(12.5, 1.96 + 0.12, "|z| = 1.96", ha='right', va='bottom', color=INK2, fontsize=6)
-ax.vlines(x - 0.17, 0, z_chron, color=ORANGE, lw=1.4, zorder=2)
-ax.vlines(x + 0.17, 0, z_hat, color=AQUA, lw=1.4, zorder=2)
-ax.scatter(x - 0.17, z_chron, s=16, color=ORANGE, edgecolor='white', lw=0.5, zorder=3,
-           label="at chronological age (conventional)")
-ax.scatter(x + 0.17, z_hat, s=16, color=AQUA, edgecolor='white', lw=0.5, zorder=3,
-           label="at brain age $\\hat a$ (NDM)")
-ax.set_xticks(x)
-ax.set_xlim(0.4, 12.6)
-ax.set_ylim(-5.4, 4.0)
-ax.set_xlabel("feature $j$ (sorted by size of age effect)")
-ax.set_ylabel("z-score $z_j$")
-ax.legend(loc='lower right', frameon=False, handletextpad=0.2, borderaxespad=0.2,
-          labelspacing=0.35)
-title(ax, "Deviation map of the same subject", 'd', x_left)
-
-# --- e: schematic decomposition in feature space -------------------------------------------
+# --- d: schematic decomposition in feature space -------------------------------------------
 ax = axe
 
 
@@ -357,7 +333,7 @@ ax.set_xticks([])
 ax.set_yticks([])
 ax.set_xlabel("feature 1 (SD units)")
 ax.set_ylabel("feature 2 (SD units)")
-title(ax, "Decomposition of the deviation (schematic)", 'e', x_right)
+title(ax, "Decomposition of the deviation", 'd', x_right)
 
 for ext in ('png', 'pdf'):
     fig.savefig(os.path.join(HERE, f'NDMScheme.{ext}'))
