@@ -261,7 +261,8 @@ def _read_mat(path):
 
 
 def load_data(spec: str) -> Data:
-    """Load a mat-file, or several files joined with '+' (one site per file)."""
+    """Load a mat-file, or several files joined with '+' (one site per file).  Ages of
+    0 or NaN mean an unknown age and become NaN."""
     parts = [os.path.expanduser(part) for part in spec.split('+')]   # '~' after '+' too
     Ys, ages, males, sites, ind, dim = [], [], [], [], None, None
     has_male = True
@@ -291,8 +292,17 @@ def load_data(spec: str) -> Data:
         sites.append(np.full(age.size, s))
     base = os.path.basename(parts[0])
     res = re.search(r'_(\d+)mm_', base)
-    return Data(np.vstack(Ys), np.concatenate(ages), np.concatenate(males),
-                np.concatenate(sites), '+'.join(os.path.basename(p) for p in parts),
+    name = '+'.join(os.path.basename(p) for p in parts)
+    age = np.concatenate(ages)
+    bad = ~(np.isfinite(age) & (age > 0))
+    if bad.any():                  # age 0 or NaN: unknown
+        age[bad] = np.nan
+        sample = '+'.join(re.sub(r'\.mat$', '', b[len(_model_key(b)):].lstrip('_') or b)
+                          for b in name.split('+'))
+        _note(f"{sample}: {int(bad.sum())} subject(s) without a valid age (0 or NaN) are not "
+              "used for fitting, as controls or for evaluation; their BrainAGE and z-maps "
+              "are NaN.")
+    return Data(np.vstack(Ys), age, np.concatenate(males), np.concatenate(sites), name,
                 ind, 'mesh' in base, res.group(1) if res else None, has_male, dim)
 
 
@@ -2597,7 +2607,7 @@ def ensemble_weights(pred, age, method='gls'):
     """
     m = pred.shape[1]
     E = pred - age[:, None]
-    if m == 1 or method == 'mean':
+    if m == 1 or method == 'mean' or len(pred) == 0:    # no subjects of known age: equal
         w = np.ones(m)
     elif method == 'mae':
         w = 1 / np.mean(np.abs(E), axis=0) ** 2
@@ -2834,6 +2844,8 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         ctrl = np.flatnonzero(ok)
     else:
         ctrl = np.intersect1d(adjust, np.flatnonzero(ok))
+        if not ctrl.size:
+            raise ValueError("None of the control subjects has a valid age (0 or NaN).")
     zc = None if correction == 'none' else ctrl
     cov_names = test[0].cov_names
 
@@ -2879,7 +2891,7 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
                  mask_threshold=(est.mask_info or {}).get('threshold', np.nan),
                  regional=correct_age(out['regional'], age, ctrl, post), regions=est.regions,
                  region_names=est.region_names, gpr=np.full(n, np.nan),
-                 offset=np.nanmedian(out['age'][ctrl] - age[ctrl]))
+                 offset=np.nanmedian(out['age'][ctrl] - age[ctrl]) if ctrl.size else np.nan)
         for key in ('deviation', 'deviation_age', 'regional_deviation', 'regional_deviation_age'):
             r[key] = out[key]
         if gpr:
@@ -2955,39 +2967,45 @@ def _check_ages(age, desc):
 
 def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_label='trend corr.'):
     ctrl = np.flatnonzero(ok) if ctrl is None else np.intersect1d(ctrl, np.flatnonzero(ok))
+    known = ctrl.size > 0              # subjects of known age for the evaluation
     rows = []
     for r in res:
-        rows.append((f"NDM {r['name']}", metrics(r['age'][ctrl] - age[ctrl], age[ctrl],
-                                                 r['sd'][ctrl])))
+        if known:
+            rows.append((f"NDM {r['name']}", metrics(r['age'][ctrl] - age[ctrl], age[ctrl],
+                                                     r['sd'][ctrl])))
         nb = int(np.sum(r['at_bound'][ctrl]))
         if nb:
             print(f"{r['name']}: {nb} estimate(s) at the boundary of the age grid")
     ens = {m: _combine(res, age, ctrl, m) for m in ('mean', 'mae', 'gls')}
-    for m in ('mean', 'mae', 'gls'):
+    for m in ('mean', 'mae', 'gls') if known else ():
         rows.append((f"NDM ensemble ({m}) w={np.round(ens[m]['weights'], 2)}",
                      metrics(ens[m]['age'][ctrl] - age[ctrl], age[ctrl])))
     if gpr:
-        for r in res:
+        for r in res if known else ():
             rows.append((f"GPR {r['name']} ({gpr_label})",
                          metrics(r['gpr_ba'][ctrl], age[ctrl])))
-                         
+
         # ensemble of the trend-corrected GPR predictions (as BA_gpr_ui.m)
         P = np.column_stack([r['gpr_ba'] + age for r in res])
-        for m in ('mae', 'gls'):
+        for m in ('mae', 'gls') if known else ():
             w = ensemble_weights(P[ctrl], age[ctrl], m)
             rows.append((f"GPR ensemble ({m}) w={np.round(w, 2)}",
                          metrics(P[ctrl] @ w - age[ctrl], age[ctrl])))
         gpr_ens = P @ ensemble_weights(P[ctrl], age[ctrl], ensemble) - age
-    print()
-    _print_table(rows)
-    if gpr:
+    if known:
+        print()
+        _print_table(rows)
+    else:
+        print("\nNo subject has a valid age: the brain age is estimated, but BrainAGE, its "
+              "accuracy and ensemble weights from the data are not available (equal weights).")
+    if gpr and known:
         ba_ndm = ens[ensemble]['age'] - age
         print(f"\ncorr(NDM ensemble BrainAGE, GPR ensemble BrainAGE) in controls: "
               f"{np.corrcoef(ba_ndm[ctrl], gpr_ens[ctrl])[0, 1]:.3f}")
 
     e = ens[ensemble]
     reg_names = _region_names(ATLAS_DIR)
-    if e['regions']:
+    if e['regions'] and known:
         print("\nRegional NDM BrainAGE (ensemble), controls: mean / MAE / r(BA, age)")
         for j, rid in enumerate(e['regions']):
             ba = e['regional'][ctrl, j] - age[ctrl]
@@ -3017,8 +3035,9 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
         out[name] = np.column_stack([r[key] for r in res])
         out[name + '_ensemble'] = np.mean(out[name], axis=1)
     dev = out['Deviation_ensemble']
-    print(f"\nNon-aging deviation (normal score, ensemble) in controls: "
-          f"mean {np.mean(dev[ctrl]):+.2f}, SD {np.std(dev[ctrl]):.2f}")
+    if known:
+        print(f"\nNon-aging deviation (normal score, ensemble) in controls: "
+              f"mean {np.mean(dev[ctrl]):+.2f}, SD {np.std(dev[ctrl]):.2f}")
     if e['regions']:
         n_reg, n_mod = len(e['regions']), len(res)
         R = np.full((len(age), n_reg, n_mod), np.nan)
@@ -3286,8 +3305,11 @@ def main(argv=None):
                   pca=a.pca, rank=a.rank,
                   psi_min=a.psi_min, grid_step=a.grid_step, grid_margin=a.grid_margin,
                   parcellation=a.parcellation, warp=a.warp, cov=cov)
+        ok = _valid_train(train[0], a.age_range)
+        if ok.sum() < 10:
+            p.error(f"Only {int(ok.sum())} training subject(s) have a valid age (not 0 or NaN) "
+                    "within --age-range and all covariates; at least 10 are needed.")
         if test is not None or a.save_model:
-            ok = _valid_train(train[0], a.age_range)
             if not np.all(ok):
                 print(f"{int(np.sum(~ok))} training subject(s) excluded (invalid age, outside "
                       "age range or missing covariates).")
@@ -3349,6 +3371,13 @@ def main(argv=None):
         print("--test-cov is ignored: the models use no covariates.")
     _check_ages(test[0].age, desc)
     adjust = _parse_index(a.adjust, test[0].n) if a.adjust else None
+    if adjust is not None:
+        known = np.isfinite(test[0].age[adjust])
+        if not known.any():
+            p.error("None of the --adjust controls has a valid age (not 0 or NaN).")
+        if not known.all():
+            print(f"{int(np.sum(~known))} of the --adjust controls have no valid age and are "
+                  "not used.")
     out = apply_models(sets, test, adjust, a.correction, a.ensemble, a.zmaps,
                        a.normative_only, a.parcellation, fit_train, not a.no_gpr)
     save_results(out, a.out)
