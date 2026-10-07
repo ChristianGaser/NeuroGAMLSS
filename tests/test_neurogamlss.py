@@ -355,3 +355,52 @@ def test_command_line_mask(tmp_path):
     assert desc['models'][0]['mask']['spec'] == '50%' and desc['models'][0]['mask']['n_used'] == 33
     with pytest.raises(SystemExit):
         NG.main(['--normative-only', '--mask-threshold', 'abc', '--train', f, '--save-model', model])
+
+
+def test_command_line_suggests_joining_sites(tmp_path, capsys):
+    d = masked_data(n=120)
+    files = []
+    for name, sel in (('A', slice(0, 70)), ('B', slice(70, 120))):
+        files.append(str(tmp_path / f's4rp1_8mm_{name}_CAT12.9.mat'))
+        savemat(files[-1], dict(Y=d.Y[sel], age=d.age[sel][:, None], male=d.male[sel][:, None]))
+    with pytest.raises(SystemExit):
+        NG.main(['--normative-only', '--train', *files, '--save-model', str(tmp_path / 'm.npz')])
+    err = capsys.readouterr().err
+    assert "has 50 subjects" in err and "--train " + '+'.join(files) in err
+
+
+def test_tilde_in_joined_files(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    d = masked_data(n=60)
+    for name, sel in (('A', slice(0, 30)), ('B', slice(30, 60))):
+        savemat(str(tmp_path / f's4rp1_8mm_{name}_CAT12.9.mat'),
+                dict(Y=d.Y[sel], age=d.age[sel][:, None], male=d.male[sel][:, None]))
+        np.savetxt(str(tmp_path / f'cov_{name}.txt'), d.age[sel][:, None])
+    joined = NG.load_data('~/s4rp1_8mm_A_CAT12.9.mat+~/s4rp1_8mm_B_CAT12.9.mat')
+    assert joined.n == 60 and np.array_equal(np.unique(joined.site), [0, 1])
+    assert NG.read_table('~/cov_A.txt+~/cov_B.txt')[1].shape == (60, 1)
+
+
+@pytest.mark.parametrize("family", ['shash', 'normal', 'gg'])
+def test_results_do_not_depend_on_threads(family):
+    if family == 'gg':
+        Y, age, male, site, _ = simulate_gg(n=300, p=60)
+    else:
+        Y, age, male, site, _, _ = simulate_shash(n=300, p=60)
+    fits = []
+    for jobs in (1, 4):
+        m = NG.NormativeModel(4, 2, family=family, jobs=jobs)
+        m.fit(Y, age, male, site)
+        fits.append(m)
+    for key in ('beta', 'theta', 'kappa', 'lam', 'converged'):
+        a, b = getattr(fits[0], key), getattr(fits[1], key)
+        assert (a is None and b is None) or np.array_equal(a, b)
+
+
+def test_fit_chunks_in_threads():
+    Y, age, male, site, _, _ = simulate_shash(n=400, p=50)
+    X = np.column_stack([np.ones(400), age])
+    W = X.copy()
+    one = NG.fit_location_scale(Y, X, W, max_elements=400 * 7, jobs=1)
+    many = NG.fit_location_scale(Y, X, W, max_elements=400 * 7, jobs=3)    # 8 chunks
+    assert all(np.array_equal(a, b) for a, b in zip(one, many))
