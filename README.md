@@ -19,14 +19,33 @@ The statistical details are in [docs/models.md](docs/models.md). A draft methods
 
 ## Installation
 
-NeuroGAMLSS is a single Python file, [neurogamlss.py](neurogamlss.py), plus the lobe atlas in [atlases/](atlases/). It needs Python 3.9 or newer with NumPy and SciPy. Three packages are optional: h5py reads MATLAB v7.3 files, nibabel reads the surface atlas, and matplotlib draws the worm plots.
+NeuroGAMLSS is a single Python file, [neurogamlss.py](neurogamlss.py), plus the lobe atlas in [atlases/](atlases/). It needs Python 3.9 or newer.
+
+| Package | Version | Needed for |
+|---|---|---|
+| NumPy | 1.21 or newer | everything |
+| SciPy | 1.7 or newer | everything |
+| h5py | 3.0 or newer | MATLAB v7.3 input files |
+| nibabel | 3.0 or newer | lobe atlas of surface data, `--parcellation` |
+| matplotlib | 3.3 or newer | worm plots, `--diagnostics` |
+
+The tests ran with Python 3.9, NumPy 2.0 and SciPy 1.13. [requirements.txt](requirements.txt) lists all packages, and [pyproject.toml](pyproject.toml) describes the project for pip. Either run the script from the cloned folder:
 
 ```bash
 git clone https://github.com/ChristianGaser/NeuroGAMLSS.git
 cd NeuroGAMLSS
-pip install numpy scipy h5py nibabel matplotlib
+pip install -r requirements.txt
 python neurogamlss.py --help
 ```
+
+Or install it in editable mode, which also adds the command `neurogamlss`. The extra `all` adds the three optional packages, and `test` adds pytest:
+
+```bash
+pip install -e ".[all]"
+neurogamlss --help
+```
+
+The lobe atlas is read from the `atlases` folder next to the script, which an editable install keeps in place. `NEUROGAMLSS_ATLAS_DIR` points to another folder.
 
 ## Input data
 
@@ -41,6 +60,25 @@ The inputs are mat-files written by `BA_data2mat.m` of the [BrainAGE toolbox](ht
 | `dim` | volume dimensions (optional) |
 
 File names follow the BrainAGE convention, for example `s4rp1_8mm_IXI547_CAT12.9.mat`. The part up to the resolution, here `s4rp1_8mm`, names the model. Files joined with `+` are concatenated, and each file becomes one site. Surface data are recognized by `mesh` in the file name.
+
+### Voxels and vertices that are modelled
+
+Near-empty voxels give z-scores without meaning, because a tiny absolute difference becomes a large z, and they cause almost all fits that do not converge. NeuroGAMLSS therefore models a voxel or vertex only if its values in the training sample are finite and not constant, and if their mean reaches a threshold. `--mask-threshold` sets the threshold in two forms:
+
+- **A number** is an absolute value. The default for volume data is 0.05, a tissue density.
+- **A percentage** such as `5%` refers to the median of the means of all voxels or vertices. This is the default for surface data, whose measures have different units.
+- **Zero** keeps all voxels and vertices with finite, varying values.
+
+| Default mask in the example data | Removed |
+|---|---|
+| Gray matter, 4 and 8 mm | 5.4–5.5% of voxels |
+| White matter, 4 and 8 mm | 13.2–13.5% of voxels |
+| Thickness, area, depth, fractal dimension, gyrification, toroGI | none |
+| Sulc | 7.5% of vertices, the gyral crowns where most values are zero or negative |
+
+The surface files of `BA_data2mat.m` already leave out the medial wall through the vertex index `ind`, and medial-wall values stored as NaN or as a constant zero are dropped anyway. The mean is used rather than the minimum. A minimum rule would drop border voxels where older subjects lose tissue, which is the effect of interest, and half of the sulc vertices.
+
+The mask is fixed when the models are fitted and stored with them. Z-maps and brain age use the same mask. Masked voxels and vertices are NaN in the z-maps and left out of brain age. Low values of single test subjects are data and are not masked.
 
 ## Quick start
 
@@ -102,18 +140,18 @@ python neurogamlss.py --train s4rp1_8mm_A_CAT12.9.mat s4rp2_8mm_A_CAT12.9.mat \
 
 In the example data, the choice took 40 to 80 s for each kind of model and picked 2 or 3 df for location and 1 or 2 for scale, stiffer than the former fixed 5 and 3. On an independent sample, this made brain age more accurate and its standard errors better calibrated. `--df-mu` and `--df-sigma` set fixed df instead. The chosen df are stored in the model file, its JSON description and all output files. With `--kfold`, the df are chosen once on all subjects before the folds, so the cross-validated errors are slightly optimistic.
 
-**Age-dependent shape.** By default, the shape parameters are constant for each voxel. `--shape-df 3` also fits ν and τ as natural splines of age and keeps them for a voxel only where the Bayesian information criterion (BIC) prefers them. In the example data, BIC chose age-dependent shape for about 8% of the voxels, and fitting took about twice as long. Use it where the diagnostics show that the shape misfit depends on age.
+**Age-dependent shape.** By default, the shape parameters are constant for each voxel. `--shape-df 3` also fits ν and τ as natural splines of age and keeps them for a voxel only where the Bayesian information criterion (BIC) prefers them. In the example data, BIC chose age-dependent shape for about 7% of the voxels, and fitting took about twice as long. Use it where the diagnostics show that the shape misfit depends on age.
 
 ## Checking the fit
 
 `--diagnostics` checks the fitted models on the training data in ten age groups of equal size. For every voxel, Q statistics (Royston and Wright, 2000) test whether the mean, variance, skewness and kurtosis of the z-scores match the standard normal distribution. The summary table reports, for every model, the share of voxels with p < 0.05 for each moment, which is 5% for a perfect model. It also reports the median absolute skewness and excess kurtosis of the z-scores and the share of voxels whose fit did not converge.
 
-Gray matter at 8 mm from 2,241 subjects of CamCAN, IXI, OASIS-3 and SALD gave these shares of voxels with p < 0.05:
+Gray matter at 8 mm from 2,241 subjects of CamCAN, IXI, OASIS-3 and SALD gave these shares of voxels with p < 0.05, with the default mask and df:
 
 | Family | Mean | Variance | Skewness | Kurtosis | Median absolute skewness |
 |---|---|---|---|---|---|
-| normal | 12% | 27% | 87% | 85% | 0.54 |
-| shash | 24% | 14% | 40% | 37% | 0.02 |
+| normal | 12% | 25% | 87% | 84% | 0.51 |
+| shash | 20% | 13% | 38% | 34% | 0.02 |
 
 Worm plots (van Buuren and Fredriks, 2001) show the same in more detail. Each panel is a detrended normal QQ plot of the z-scores in one of six age groups, summarized over voxels. A well-fitting model has a flat worm inside the dashed band.
 
@@ -164,7 +202,7 @@ When the training data are given, a Python replica of the GPR BrainAGE of the Br
 
 ## Saved models
 
-`--save-model` writes the fitted models to a `.npz` file (NumPy) or a `.mat` file (MATLAB struct `NDMmodel`). Neither format runs code when it is loaded. A JSON file with the same name describes the models. It records the settings, the training sample with its age range and sites, the covariates, and for every model its feature space and the chosen df with the scores of the cross-validation.
+`--save-model` writes the fitted models to a `.npz` file (NumPy) or a `.mat` file (MATLAB struct `NDMmodel`). Neither format runs code when it is loaded. A JSON file with the same name describes the models. It records the settings, the training sample with its age range and sites, and the covariates. For every model, it also records the feature space, the mask with its threshold and the number of voxels or vertices used, and the chosen df with the scores of the cross-validation.
 
 `--model` applies a saved file to `--test` data instead of fitting new models. NeuroGAMLSS stops with an error if the test data do not match the models: surface instead of volume data or the reverse, or a different number of voxels or vertices, resolution, volume dimensions or vertex indices. It also stops if the models use sex or covariates that the test data lack. It reports test subjects outside the training age range or covariate range, where the models extrapolate linearly.
 
@@ -174,14 +212,14 @@ When the training data are given, a Python replica of the GPR BrainAGE of the Br
 
 | File | Content |
 |---|---|
-| `<out>_zmaps_<model>.mat` | struct `NDMzmap`: `Z` (subjects × features), `converged`, `family`, `df_mu`, `df_sigma`, `age`, `male`, `model`, `ind`, and with `--parcellation` `regional_z`, `regions`, `region_names` |
+| `<out>_zmaps_<model>.mat` | struct `NDMzmap`: `Z` (subjects × features), `converged`, `family`, `df_mu`, `df_sigma`, `mask_threshold`, `age`, `male`, `model`, `ind`, and with `--parcellation` `regional_z`, `regions`, `region_names` |
 | `<out>.csv` | normative models only: mean z of each lobe for every subject (with `--parcellation`) |
-| `<out>.mat`, `<out>.csv` | brain age: struct `NDM`, including the df of every model in `df_mu` and `df_sigma`, and a table with BrainAGE, standard errors and deviations of every model and of the ensemble |
+| `<out>.mat`, `<out>.csv` | brain age: struct `NDM`, including the df and the mask threshold of every model in `df_mu`, `df_sigma` and `mask_threshold`, and a table with BrainAGE, standard errors and deviations of every model and of the ensemble |
 | `<out>_diagnostics.csv` | summary of the diagnostics for every model |
-| `<out>_diagnostics_<model>.mat` | struct `NDMdiag`: `Q`, `p_Q` and `df_Q` (4 × features: mean, variance, skewness, kurtosis), `converged`, `age_groups`, `family`, `model`, `df_mu`, `df_sigma` |
+| `<out>_diagnostics_<model>.mat` | struct `NDMdiag`: `Q`, `p_Q` and `df_Q` (4 × features: mean, variance, skewness, kurtosis), `converged`, `age_groups`, `family`, `model`, `df_mu`, `df_sigma`, `mask_threshold` |
 | `<out>_wormplot_<model>.png` | worm plots |
 
-`Z` has the same feature order as `Y` in the input file, so it maps back to the image or surface like the input data. Features without a model, such as voxels with zero variance, are NaN. `converged` is 1 for voxels whose fit converged, 0 for the others and NaN without a model.
+`Z` has the same feature order as `Y` in the input file, so it maps back to the image or surface like the input data. Features without a model are NaN, such as voxels outside the mask. `converged` is 1 for voxels whose fit converged, 0 for the others and NaN without a model.
 
 ## Command-line options
 
@@ -200,6 +238,7 @@ When the training data are given, a Python replica of the GPR BrainAGE of the Br
 | `--tau-max` | 2 | upper bound of the SHASH tail parameter τ |
 | `--shape-prior` | 1 | standard deviation of the priors on the shape parameters |
 | `--df-mu`, `--df-sigma` | `auto` | spline degrees of freedom of age for location and scale, chosen by cross-validation or given as numbers |
+| `--mask-threshold` | 0.05 or 5% | voxels and vertices that are modelled: their training mean must reach this value or this percentage of the median mean; 0 for all |
 | `--diagnostics` | off | Q statistics and worm plots of the training fit |
 | `--adjust` | | 1-based indices of the test controls |
 | `--correction` | `offset` | use of the controls, see above |
@@ -234,7 +273,7 @@ z = m.zscores(Y_new, age_new, male_new)          # columns m.valid of Y_new
 
 ## Speed
 
-Times for 2,241 training subjects on an Apple M2 laptop, in one process:
+Times for fitting with fixed df to 2,241 training subjects on an Apple M2 laptop, in one process:
 
 | Data | Features | normal | shash, gray matter | shash, white matter |
 |---|---|---|---|---|
@@ -253,16 +292,17 @@ The automatic choice of the df adds the following times for gray matter. Fixed d
 ## Tests
 
 ```bash
-python -m pytest tests
+pip install -e ".[all,test]"
+python -m pytest
 ```
 
-The tests use simulated data. They check the SHASH derivatives, the GG density and normal scores, parameter recovery, the τ bound, the BIC choice of age-dependent shape, the calibration of the Q statistics, saving and loading of all families in both formats, and the command line.
+The tests use simulated data. They check the SHASH derivatives, the GG density and normal scores, parameter recovery, the τ bound, the BIC choice of age-dependent shape, the calibration of the Q statistics, the choice of the df, the mask, saving and loading of all families in both formats, and the command line.
 
 ## Limitations
 
 - **Independent voxels.** Every voxel is fitted on its own, without spatial smoothing of the parameters.
 - **Fixed site effects.** Sites are fixed effects of the location. Many small sites would be better served by random effects, which are not implemented.
-- **Non-converged fits.** Less than 1% of the SHASH fits do not converge. These are voxels with almost no tissue, in which only a few subjects have nonzero values. They keep the best fit found and are flagged in `converged`.
+- **Non-converged fits.** Without the mask, about 1% of the SHASH fits did not converge, almost all in near-empty voxels. With the default mask, none of 3,546 gray matter voxels and 1 of 3,242 white matter voxels at 8 mm failed to converge. Such fits keep the best parameters found and are flagged in `converged`.
 - **Bounded data.** Gray and white matter densities are bounded by 0 and 1. SHASH describes the resulting skewness well but is not bounded itself.
 
 ## References
