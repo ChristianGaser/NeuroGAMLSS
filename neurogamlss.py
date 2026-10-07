@@ -21,7 +21,10 @@ distribution D (--family) is
   gg      generalized gamma (GG of gamlss.dist, as in Brain Charts) for positive
           data such as volumes
 
-The spline df of age of mu and sigma are chosen per training sample by
+Only voxels/vertices whose mean over the training subjects reaches a threshold
+are modelled (--mask-threshold; default 0.05 for volume data, 5% of the median of
+the means for surface data), which removes near-empty voxels without meaningful
+z-scores.  The spline df of age of mu and sigma are chosen per training sample by
 cross-validation (--df-mu/--df-sigma auto, the default), the same for all
 voxels/vertices: by the held-out likelihood for the z-maps and by the error of
 the brain age for NormBrainAGE.  The choice is stored with the models and in the
@@ -89,7 +92,8 @@ See README.md for all options and outputs, and docs/models.md for the statistica
 details.
 
 Requirements: numpy, scipy, h5py (v7.3 files), nibabel (surface parcellation),
-matplotlib (worm plots)
+matplotlib (worm plots); see requirements.txt and pyproject.toml
+(pip install -e ".[all]" installs them and the command neurogamlss)
 """
 
 from __future__ import annotations
@@ -107,7 +111,8 @@ from dataclasses import asdict, dataclass, replace
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ATLAS_DIR = os.path.join(HERE, 'atlases')      # lobe atlas of BA_gpr_ui.m
+# lobe atlas of BA_gpr_ui.m (another folder can be set with NEUROGAMLSS_ATLAS_DIR)
+ATLAS_DIR = os.environ.get('NEUROGAMLSS_ATLAS_DIR', os.path.join(HERE, 'atlases'))
 
 # regions of the lobe atlas that are not represented on the surface
 _SURF_EXCLUDE = (5, 15)
@@ -118,7 +123,13 @@ LEGACY_FORMATS = ('BA_ndm model',)
 
 # distribution families of the voxel/vertex-wise normative models
 FAMILIES = ('shash', 'normal', 'gg')
-VOXEL_DEFAULTS = dict(family='shash', shape_df=0, tau_max=2.0, shape_prior=1.0)
+VOXEL_DEFAULTS = dict(family='shash', shape_df=0, tau_max=2.0, shape_prior=1.0,
+                      mask_threshold=None)
+
+# voxels/vertices that are modelled (--mask-threshold): the mean over the training
+# subjects must reach an absolute value (volume data: tissue densities) or a
+# percentage of the median of the means (surface data: measures in any unit)
+MASK_DEFAULT = dict(volume='0.05', surface='5%')
 TAU_MIN = 0.2                  # lower bound of the shash tail parameter
 
 # choice of the spline df of age per training sample (--df-mu/--df-sigma auto): grids
@@ -347,6 +358,53 @@ def covariate_matrix(names, values, cov, n, label, required=None):
                             for nm in cov.names])
 
 
+def parse_mask_threshold(spec):
+    """Check a mask threshold: a number (absolute) or a percentage such as '5%'."""
+    text = str(spec).strip()
+    try:
+        value = float(text[:-1] if text.endswith('%') else text)
+    except ValueError:
+        value = -1.0
+    if not (value >= 0):
+        raise ValueError(f"invalid mask threshold {spec!r}: use a number such as 0.05, a "
+                         "percentage such as 5% or 0")
+    return text
+
+
+def feature_mask(d, spec=None):
+    """Voxels/vertices of the training data d that are modelled, and a record.
+
+    A feature is used if its training values are finite and not constant and if
+    their mean reaches the threshold spec: a number is an absolute value (tissue
+    densities of volume data), a percentage such as '5%' is relative to the median
+    of the means of all features (surface measures in any unit), and 0 keeps all
+    features.  None gives the default of the data type (MASK_DEFAULT).  Low values
+    of single subjects are data and do not matter.  Returns the mask (n_features,)
+    and a record of the rule.
+    """
+    spec = parse_mask_threshold(MASK_DEFAULT['surface' if d.is_surf else 'volume']
+                                if spec is None else spec)
+    p = d.Y.shape[1]
+    finite = np.all(np.isfinite(d.Y), axis=0)
+    Yf = d.Y if finite.all() else d.Y[:, finite]
+    mean, sd = np.full(p, np.nan), np.zeros(p)
+    mean[finite] = np.mean(Yf, axis=0, dtype=np.float64)
+    sd[finite] = np.std(Yf, axis=0)
+    ok = finite & (sd > 0)
+    relative = spec.endswith('%')
+    value = float(spec[:-1]) / 100 if relative else float(spec)
+    median = float(np.median(mean[ok])) if relative and ok.any() else None
+    if relative and value > 0 and not (median is not None and median > 0):
+        _note(f"{d.name}: the median of the means is not positive; the relative mask "
+              f"threshold {spec} is not used.")
+        value = 0.0
+    threshold = value * median if relative and value > 0 else value
+    keep = ok & (mean >= threshold) if threshold > 0 else ok
+    return keep, dict(spec=spec, threshold=float(threshold), median_of_means=median,
+                      n_features=int(p), n_without_variance=int(np.sum(~ok)),
+                      n_below_threshold=int(np.sum(ok & ~keep)), n_used=int(np.sum(keep)))
+
+
 def _region_names(atlas_dir):
     names = {}
     path = os.path.join(atlas_dir, 'Brain_Lobes.csv')
@@ -364,6 +422,10 @@ def lobe_atlas(d: Data, atlas_dir=ATLAS_DIR):
 
     Same atlas files and conventions as BA_gpr_ui.m (D.parcellation = 1).
     """
+    if not os.path.isdir(atlas_dir):
+        raise FileNotFoundError(
+            f"Lobe atlas not found in {atlas_dir}: run neurogamlss.py from the repository, "
+            "install it with 'pip install -e .' or set NEUROGAMLSS_ATLAS_DIR.")
     names = _region_names(atlas_dir)
     if d.is_surf:
         import nibabel.freesurfer as fs
@@ -903,13 +965,17 @@ class NormativeModel:
                           "and not used there.")
         return site
 
-    def fit(self, Y, age, male, site=None, verbose=False, C=None):
+    def fit(self, Y, age, male, site=None, verbose=False, C=None, mask=None):
+        """Fit to the features of Y (n, n_features) that are finite, not constant
+        and, if given, in mask (n_features,) (e.g. feature_mask)."""
         site = self._setup(age, male, site, C)
 
         finite = np.all(np.isfinite(Y), axis=0)
         sd = np.zeros(Y.shape[1])
         sd[finite] = np.std(Y[:, finite], axis=0)
         ok = finite & (sd > 0)
+        if mask is not None:
+            ok &= np.asarray(mask, dtype=bool)
         if self.family == 'gg':
             pos = np.zeros(Y.shape[1], dtype=bool)
             pos[ok] = np.min(Y[:, ok], axis=0) > 0
@@ -1231,11 +1297,14 @@ class Warp:
         self.warp_iter, self.rs_iter, self.chunk = warp_iter, rs_iter, chunk
         self.cov = cov or Covariates()
 
-    def fit(self, Y, age, male, site=None, verbose=False, C=None):
+    def fit(self, Y, age, male, site=None, verbose=False, C=None, mask=None):
         finite = np.all(np.isfinite(Y), axis=0)
         sd = np.zeros(Y.shape[1])
         sd[finite] = np.std(Y[:, finite], axis=0)
-        self.valid = np.flatnonzero(finite & (sd > 0))
+        ok = finite & (sd > 0)
+        if mask is not None:
+            ok &= np.asarray(mask, dtype=bool)
+        self.valid = np.flatnonzero(ok)
         self.center = np.mean(Y[:, self.valid], axis=0, dtype=np.float64)
         self.sd = sd[self.valid]
         self.eps = np.zeros(self.valid.size)
@@ -1526,27 +1595,29 @@ class NDMBrainAge:
 
     def __init__(self, df_mu=5, df_sigma=3, pca=100, rank=20, psi_min=0.01,
                  grid_step=0.25, grid_margin=5.0, parcellation=False,
-                 atlas_dir=ATLAS_DIR, warp=False, cov=None, verbose=False):
+                 atlas_dir=ATLAS_DIR, warp=False, cov=None, verbose=False,
+                 mask_threshold=None):
         self.df_mu, self.df_sigma = df_mu, df_sigma
         self.pca, self.rank, self.psi_min = pca, rank, psi_min
         self.grid_step, self.grid_margin = grid_step, grid_margin
         self.parcellation, self.atlas_dir = parcellation, atlas_dir
         self.warp, self.cov, self.verbose = warp, cov or Covariates(), verbose
+        self.mask_threshold, self.mask_info = mask_threshold, None
         self.warper = None
 
     def _prep(self, d: Data):
         """Data with the training warp applied (unchanged without warp)."""
         return d if self.warper is None else replace(d, Y=self.warper.transform(d.Y))
 
-    def _normative(self, Y, d):
+    def _normative(self, Y, d, mask=None):
         return NormativeModel(self.df_mu, self.df_sigma, self.cov).fit(
-            Y, d.age, d.male, d.site, self.verbose, C=d.C)
+            Y, d.age, d.male, d.site, self.verbose, C=d.C, mask=mask)
 
     def _fit_pca_part(self, d, name, cols):
         X = d.Y[:, cols]
         keep = np.all(np.isfinite(X), axis=0) & (np.std(X, axis=0) > 0)
         cols = cols[keep]
-        center, Vt = _pca(X[:, keep], self.pca)
+        center, Vt = _pca(X[:, keep], min(self.pca, cols.size - 1))
         part = _Part(name, cols, None, None, None, center, Vt)
         F = part.model_input(d.Y)
         part.model = self._normative(F, d)
@@ -1556,21 +1627,29 @@ class NDMBrainAge:
         return part
 
     def fit(self, d: Data):
+        """Fit to the training data d, using the voxels/vertices of feature_mask."""
+        mask, self.mask_info = feature_mask(d, self.mask_threshold)
+        if mask.sum() < 2:
+            raise ValueError(f"{d.name}: fewer than 2 voxels/vertices pass the mask.")
         if self.warp:
             self.warper = Warp(self.df_mu, self.df_sigma, cov=self.cov).fit(
-                d.Y, d.age, d.male, d.site, self.verbose, C=d.C)
+                d.Y, d.age, d.male, d.site, self.verbose, C=d.C, mask=mask)
             d = self._prep(d)
-        groups = [('global', None, np.arange(d.Y.shape[1]))]
+        groups = [('global', None, np.flatnonzero(mask))]
         if self.parcellation:
             atlas, regions, names = lobe_atlas(d, self.atlas_dir)
-            groups += [(nm, r, np.flatnonzero(atlas == r)) for r, nm in zip(regions, names)]
+            groups += [(nm, r, np.flatnonzero((atlas == r) & mask))
+                       for r, nm in zip(regions, names)]
 
         self.parts, self.regions, self.region_names = [], [], []
         if not self.pca:
-            model = self._normative(d.Y, d)
+            model = self._normative(d.Y, d, mask)
             Z = model.zscores(d.Y, d.age, d.male, d.site, C=d.C)
         for nm, r, cols in groups:
             if self.pca:
+                if cols.size < 2:
+                    _note(f"Region {nm} has no voxels/vertices in the mask and is left out.")
+                    continue
                 part = self._fit_pca_part(d, nm, cols)
             else:
                 sel = np.flatnonzero(np.isin(model.valid, cols))
@@ -1713,6 +1792,7 @@ class NDMBrainAge:
             df_mu=self.df_mu, df_sigma=self.df_sigma, pca=self.pca, rank=self.rank,
             psi_min=self.psi_min, grid_step=self.grid_step, grid_margin=self.grid_margin,
             parcellation=bool(self.parcellation), warp=bool(self.warp), cov=asdict(self.cov),
+            mask_threshold=self.mask_threshold, mask_info=self.mask_info,
             grid=self.grid, regions=[int(r) for r in self.regions],
             region_names=list(self.region_names),
             warper=None if self.warper is None else self.warper.get_state(),
@@ -1724,6 +1804,7 @@ class NDMBrainAge:
         self = cls(s['df_mu'], s['df_sigma'], s['pca'], s['rank'], s['psi_min'],
                    s['grid_step'], s['grid_margin'], s['parcellation'], atlas_dir, s['warp'],
                    Covariates.from_state(s['cov']))
+        self.mask_threshold, self.mask_info = s.get('mask_threshold'), s.get('mask_info')
         self.warper = None if s['warper'] is None else Warp.from_state(s['warper'])
         models = [NormativeModel.from_state(m) for m in s['normative']]
         self.parts = [_Part.from_state(p, models) for p in s['parts']]
@@ -1742,19 +1823,21 @@ class VoxelModel:
     """
 
     def __init__(self, df_mu=5, df_sigma=3, cov=None, family='shash', shape_df=0,
-                 tau_max=2.0, shape_prior=1.0, verbose=False):
+                 tau_max=2.0, shape_prior=1.0, verbose=False, mask_threshold=None):
         self.df_mu, self.df_sigma, self.cov = df_mu, df_sigma, cov or Covariates()
         self.family, self.shape_df = family, shape_df
         self.tau_max, self.shape_prior, self.verbose = tau_max, shape_prior, verbose
+        self.mask_threshold, self.mask_info = mask_threshold, None
         self.model = self.warper = None
         self.shared = False          # model and warp belong to an NDMBrainAge
 
     def fit(self, d: Data):
-        """Fit to the training data d."""
+        """Fit to the training data d, using the voxels/vertices of feature_mask."""
+        mask, self.mask_info = feature_mask(d, self.mask_threshold)
         self.model = NormativeModel(self.df_mu, self.df_sigma, self.cov, family=self.family,
                                     shape_df=self.shape_df, tau_max=self.tau_max,
                                     shape_prior=self.shape_prior).fit(
-            d.Y, d.age, d.male, d.site, self.verbose, C=d.C)
+            d.Y, d.age, d.male, d.site, self.verbose, C=d.C, mask=mask)
         return self
 
     @classmethod
@@ -1762,7 +1845,9 @@ class VoxelModel:
         """The voxel/vertex-wise normal model of an NDMBrainAge with pca=0."""
         if est.pca:
             raise ValueError("Only an NDMBrainAge with pca=0 has a voxel/vertex-wise model.")
-        self = cls(est.df_mu, est.df_sigma, est.cov, family='normal', verbose=est.verbose)
+        self = cls(est.df_mu, est.df_sigma, est.cov, family='normal', verbose=est.verbose,
+                   mask_threshold=est.mask_threshold)
+        self.mask_info = est.mask_info
         self.model, self.warper, self.shared = est.parts[0].model, est.warper, True
         return self
 
@@ -1805,6 +1890,7 @@ class VoxelModel:
         return dict(df_mu=self.df_mu, df_sigma=self.df_sigma, cov=asdict(self.cov),
                     family=self.family, shape_df=self.shape_df, tau_max=self.tau_max,
                     shape_prior=self.shape_prior, shared=bool(self.shared),
+                    mask_threshold=self.mask_threshold, mask_info=self.mask_info,
                     model=None if self.shared else self.model.get_state(),
                     warper=None if self.shared or self.warper is None else self.warper.get_state())
 
@@ -1812,7 +1898,9 @@ class VoxelModel:
     def from_state(cls, s, ndm=None):
         self = cls(s['df_mu'], s['df_sigma'], Covariates.from_state(s['cov']),
                    family=s.get('family', 'normal'), shape_df=s.get('shape_df', 0),
-                   tau_max=s.get('tau_max', 2.0), shape_prior=s.get('shape_prior', 1.0))
+                   tau_max=s.get('tau_max', 2.0), shape_prior=s.get('shape_prior', 1.0),
+                   mask_threshold=s.get('mask_threshold'))
+        self.mask_info = s.get('mask_info')
         if s['shared']:
             if ndm is None:
                 raise ValueError("The voxel-wise model refers to a missing brain age model.")
@@ -1862,7 +1950,7 @@ def _search_df(criteria, df_mu, df_sigma, grid):
 
 
 def select_df_normative(d, cov=None, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS,
-                        max_features=DF_MAX_FEATURES, seed=0):
+                        max_features=DF_MAX_FEATURES, seed=0, mask_threshold=None):
     """Spline df of age of mu and sigma of the voxel/vertex-wise normative models,
     the same for all features of the training data d, by k-fold cross-validation.
 
@@ -1871,9 +1959,10 @@ def select_df_normative(d, cov=None, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS
     is scored by the median over features of its held-out log-likelihood per
     subject, relative to the mean of the settings compared: the median is robust to
     the few degenerate features, such as near-empty voxels, in which flexible curves
-    fail out of sample.  df_mu is searched first (_search_df).  Returns df_mu,
-    df_sigma and a record of the search."""
-    ok = np.flatnonzero(np.all(np.isfinite(d.Y), axis=0) & (np.std(d.Y, axis=0) > 0))
+    fail out of sample.  The features are drawn from feature_mask(d, mask_threshold).
+    df_mu is searched first (_search_df).  Returns df_mu, df_sigma and a record of
+    the search."""
+    ok = np.flatnonzero(feature_mask(d, mask_threshold)[0])
     rng = np.random.default_rng(seed)
     cols = np.sort(rng.choice(ok, min(max_features, ok.size), replace=False))
     Y = np.asarray(d.Y[:, cols], np.float64)
@@ -1928,7 +2017,8 @@ def select_df_brainage(d, kw, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS, seed=
     chosen as for them (select_df_normative).  Returns df_mu, df_sigma and a record.
     """
     if not kw.get('pca', 100):
-        return select_df_normative(d, kw.get('cov'), df_mu, df_sigma, k, seed=seed)
+        return select_df_normative(d, kw.get('cov'), df_mu, df_sigma, k, seed=seed,
+                                   mask_threshold=kw.get('mask_threshold'))
     if DF_AUTO not in (df_mu, df_sigma):
         return int(df_mu), int(df_sigma), dict(df_mu=int(df_mu), df_sigma=int(df_sigma),
                                                 selected=False)
@@ -1978,7 +2068,8 @@ def _resolve_df(d, kw, which):
     if which == 'brainage':
         dm, ds, rec = select_df_brainage(d, kw, dm, ds)
     else:
-        dm, ds, rec = select_df_normative(d, kw.get('cov'), dm, ds)
+        dm, ds, rec = select_df_normative(d, kw.get('cov'), dm, ds,
+                                          mask_threshold=kw.get('mask_threshold'))
     rec['seconds'] = round(time.time() - t0, 1)
     return dm, ds, rec
 
@@ -2100,7 +2191,8 @@ def run_diagnostics(sets, train, prefix, n_groups=10):
         savemat(f'{prefix}_diagnostics_{name}.mat', {'NDMdiag': dict(
             Q=_full_map(q['Q'], m), p_Q=_full_map(q['p'], m), df_Q=_full_map(q['df'], m),
             age_groups=q['groups'], converged=_full_map(m.converged[None].astype(float), m)[0],
-            family=m.family, model=d.name, df_mu=m.basis_mu.df, df_sigma=m.basis_sigma.df)},
+            family=m.family, model=d.name, df_mu=m.basis_mu.df, df_sigma=m.basis_sigma.df,
+            mask_threshold=(s.voxel.mask_info or {}).get('threshold', np.nan))},
             do_compression=True)
         try:
             worm_plot(Z, d.age, f'{prefix}_wormplot_{name}.png',
@@ -2607,7 +2699,8 @@ def fit_models(train, kw, brainage=True, voxel=False, vkw=None):
                 vm = VoxelModel.from_ndm(est)
                 info['df_voxel'] = info['df_brain_age']
             else:
-                dm, ds, info['df_voxel'] = _resolve_df(d, kw, 'voxel')
+                dm, ds, info['df_voxel'] = _resolve_df(
+                    d, dict(kw, mask_threshold=vkw['mask_threshold']), 'voxel')
                 vm = VoxelModel(dm, ds, kw.get('cov'), **vkw).fit(d)
                 dfs.append(f"z-maps {dm}/{ds}")
             m = vm.model
@@ -2616,9 +2709,13 @@ def fit_models(train, kw, brainage=True, voxel=False, vkw=None):
                        "not converged")
                 if m.basis_shape is not None:
                     msg += f", age-dependent shape in {int(np.sum(m.shape_age))}"
+        info['mask'] = (vm if vm is not None else est).mask_info
         chosen = any(r.get('selected') for key, r in info.items() if key.startswith('df_'))
+        mk = info['mask']
         print(f"  {d.name}: fitted in {time.time() - t0:.1f}s; df mu/sigma {', '.join(dfs)}"
-              f"{' (chosen by cross-validation)' if chosen else ''}{msg}", flush=True)
+              f"{' (chosen by cross-validation)' if chosen else ''}; {mk['n_used']} of "
+              f"{mk['n_features']} voxels/vertices used (mean >= {mk['threshold']:.3g}){msg}",
+              flush=True)
         sets.append(ModelSet(info, est, vm))
     return sets
 
@@ -2674,7 +2771,8 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
             z = s.voxel.zmaps(d, zc, parcellation=parcellation)
             zm.append(dict(z, model=d.name, family=s.voxel.model.family, ind=d.ind,
                            age=age, male=d.male, df_mu=s.voxel.model.df_mu,
-                           df_sigma=s.voxel.model.df_sigma))
+                           df_sigma=s.voxel.model.df_sigma,
+                           mask_threshold=(s.voxel.mask_info or {}).get('threshold', np.nan)))
             print(f"  {d.name}: {time.time() - t0:.1f}s", flush=True)
         if zc is None:
             print("No adaptation to the test site: z-maps at the reference site of the "
@@ -2703,6 +2801,7 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         out = est.predict(dte)
         r = dict(name=dte.name, age=correct_age(out['age'], age, ctrl, post),
                  sd=out['sd'], at_bound=out['at_bound'], df_mu=est.df_mu, df_sigma=est.df_sigma,
+                 mask_threshold=(est.mask_info or {}).get('threshold', np.nan),
                  regional=correct_age(out['regional'], age, ctrl, post), regions=est.regions,
                  region_names=est.region_names, gpr=np.full(n, np.nan),
                  offset=np.nanmedian(out['age'][ctrl] - age[ctrl]))
@@ -2730,7 +2829,8 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
     if zmaps_out:
         out['zmaps'] = [dict(r['zmaps'], model=r['name'], family=s.voxel.model.family,
                              ind=d.ind, age=age, male=d.male, df_mu=s.voxel.model.df_mu,
-                             df_sigma=s.voxel.model.df_sigma)
+                             df_sigma=s.voxel.model.df_sigma,
+                             mask_threshold=(s.voxel.mask_info or {}).get('threshold', np.nan))
                         for r, d, s in zip(res, test, sets)]
     return out
 
@@ -2832,7 +2932,8 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
         BrainAGE_regional_ensemble=e['regional'] - age[:, None] if e['regions'] else np.zeros((len(age), 0)),
         ind_control=ctrl + 1,
         df_mu=np.array([r.get('df_mu', np.nan) for r in res], dtype=np.float64),
-        df_sigma=np.array([r.get('df_sigma', np.nan) for r in res], dtype=np.float64))
+        df_sigma=np.array([r.get('df_sigma', np.nan) for r in res], dtype=np.float64),
+        mask_threshold=np.array([r.get('mask_threshold', np.nan) for r in res], dtype=np.float64))
     out['BrainAGE'] = out['PredictedAge'] - age[:, None]
     
     # non-aging deviation (at brain age) and total deviation (at chronological age),
@@ -2913,6 +3014,14 @@ def save_results(out, prefix):
     print(f"\nSaved {prefix}.mat and {prefix}.csv" + (f" and {zfiles}" if zm else ''))
 
 
+def _mask_arg(value):
+    """Mask threshold of the command line (parse_mask_threshold)."""
+    try:
+        return parse_mask_threshold(value)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(str(err))
+
+
 def _df_arg(value):
     """Spline df of the command line: 'auto' or a positive integer."""
     if value == DF_AUTO:
@@ -2973,6 +3082,12 @@ def main(argv=None):
     p.add_argument('--shape-prior', type=float, default=1.0,
                    help="SD of the normal priors that shrink the shape parameters toward "
                         "the normal distribution (default 1)")
+    p.add_argument('--mask-threshold', type=_mask_arg, default=None,
+                   help="voxels/vertices that are modelled: their mean over the training "
+                        "subjects must reach this value (a number, e.g. 0.05) or this "
+                        "percentage of the median of all means (e.g. 5%%); 0 = all.  "
+                        "Default: 0.05 for volume data (tissue densities), 5%% for surface "
+                        "data.  Used for z-maps and brain age")
     p.add_argument('--diagnostics', action='store_true',
                    help="Q statistics and worm plots by age group of the voxel/vertex-wise "
                         "models on the training data")
@@ -3042,7 +3157,7 @@ def main(argv=None):
         p.error("--diagnostics needs --train and voxel/vertex-wise models "
                 "(--normative-only or --zmaps).")
     vkw = dict(family=a.family, shape_df=a.shape_df, tau_max=a.tau_max,
-               shape_prior=a.shape_prior)
+               shape_prior=a.shape_prior, mask_threshold=a.mask_threshold)
     t0 = time.time()
 
     test = None
@@ -3076,7 +3191,8 @@ def main(argv=None):
             print(f"Covariates ({'linear' if cov.df == 1 else f'natural splines, df {cov.df}'}"
                   f") in the mean: {', '.join(cov.mean) or '-'}; in the log SD: "
                   f"{', '.join(cov.sd) or '-'}")
-        kw = dict(df_mu=a.df_mu, df_sigma=a.df_sigma, pca=a.pca, rank=a.rank,
+        kw = dict(df_mu=a.df_mu, df_sigma=a.df_sigma, mask_threshold=a.mask_threshold,
+                  pca=a.pca, rank=a.rank,
                   psi_min=a.psi_min, grid_step=a.grid_step, grid_margin=a.grid_margin,
                   parcellation=a.parcellation, warp=a.warp, cov=cov)
         if test is not None or a.save_model:
@@ -3111,7 +3227,10 @@ def main(argv=None):
             dfs = [f"{label} {m.df_mu}/{m.df_sigma}" for label, m in
                    (('brain age', s.brainage), ('z-maps', None if s.voxel is None else s.voxel.model))
                    if m is not None]
-            print(f"  {s.info['name']}: df mu/sigma {', '.join(dfs)}")
+            mk = s.info.get('mask')
+            print(f"  {s.info['name']}: df mu/sigma {', '.join(dfs)}"
+                  + (f"; {mk['n_used']} of {mk['n_features']} voxels/vertices modelled "
+                     f"(mean >= {mk['threshold']:.3g})" if mk else ''))
         cov = Covariates.from_state(desc['covariates']) if desc.get('covariates') else None
         if len(sets) != len(test):
             p.error(f"--test needs one file per saved model ({len(sets)}).")
