@@ -9,7 +9,7 @@ NeuroGAMLSS fits a generalized additive model for location, scale and shape (GAM
 
 - **Distribution families:** sinh-arcsinh (SHASH, the default) for skewed or heavy-tailed voxel data, normal for near-Gaussian data, and generalized gamma (GG) as in Brain Charts for positive data.
 - **Age curves:** natural cubic splines for location and scale, whose flexibility is chosen for each training sample by cross-validation. The shape is constant or, where BIC prefers it, also a function of age.
-- **Speed:** all voxels are fitted together. SHASH models for 30,000 voxels and 2,241 subjects take four to seven minutes on a laptop.
+- **Speed:** all voxels are fitted together, in parallel threads. SHASH models for 30,000 voxels and 2,241 subjects take one to two minutes on a laptop.
 - **Sites and covariates:** sites enter as fixed effects, and new sites are adapted with their control subjects. Covariates such as image quality measures can enter the mean and the standard deviation.
 - **Diagnostics:** Q statistics and worm plots by age group show how well the models fit.
 - **Saved models:** fitted models are stored as `.mat` or `.npz` files with a JSON description, so new data can be scored without the training data.
@@ -59,7 +59,12 @@ The inputs are mat-files written by `BA_data2mat.m` of the [BrainAGE toolbox](ht
 | `ind` | 1-based vertex indices of surface data |
 | `dim` | volume dimensions (optional) |
 
-File names follow the BrainAGE convention, for example `s4rp1_8mm_IXI547_CAT12.9.mat`. The part up to the resolution, here `s4rp1_8mm`, names the model. Files joined with `+` are concatenated, and each file becomes one site. Surface data are recognized by `mesh` in the file name.
+File names follow the BrainAGE convention, for example `s4rp1_8mm_IXI547_CAT12.9.mat`. The part up to the resolution, here `s4rp1_8mm`, names the model. Surface data are recognized by `mesh` in the file name.
+
+Files are combined in two ways:
+
+- **`+` joins sites.** Files joined with `+` are concatenated into one sample, and each file becomes one site, for example `--train A.mat+B.mat+C.mat`.
+- **Spaces separate models.** Several files after `--train` or `--test`, separated by spaces, are different models of the same subjects, for example gray and white matter. NeuroGAMLSS stops with a hint if their subjects differ.
 
 ### Voxels and vertices that are modelled
 
@@ -103,7 +108,7 @@ This writes the z-maps to `adni_gm4_zmaps_s4rp1_4mm_ADNI_CAT12.9.mat` and the me
 
 ### NormBrainAGE
 
-Estimate brain age with 10-fold cross-validation from gray and white matter at 8 mm:
+Estimate brain age with 10-fold cross-validation from two models of the same subjects, gray and white matter at 8 mm:
 
 ```bash
 python neurogamlss.py --train s4rp1_8mm_NKIe1239_CAT12.9.mat s4rp2_8mm_NKIe1239_CAT12.9.mat \
@@ -138,7 +143,7 @@ python neurogamlss.py --train s4rp1_8mm_A_CAT12.9.mat s4rp2_8mm_A_CAT12.9.mat \
 - **z-maps:** normal models of 1,000 random voxels are compared by their held-out likelihood, using the median over voxels. The df of location are chosen first, from 2 to 12, and then those of scale, from 1 to 5.
 - **NormBrainAGE:** the models of the component scores are compared by the mean absolute error of the held-out brain age. The df of location range from 1 to 8 and those of scale from 1 to 4.
 
-In the example data, the choice took 40 to 80 s for each kind of model and picked 2 or 3 df for location and 1 or 2 for scale, stiffer than the former fixed 5 and 3. On an independent sample, this made brain age more accurate and its standard errors better calibrated. `--df-mu` and `--df-sigma` set fixed df instead. The chosen df are stored in the model file, its JSON description and all output files. With `--kfold`, the df are chosen once on all subjects before the folds, so the cross-validated errors are slightly optimistic.
+In the example data, the choice took 20 to 80 s for each kind of model and picked 2 or 3 df for location and 1 or 2 for scale, stiffer than the former fixed 5 and 3. On an independent sample, this made brain age more accurate and its standard errors better calibrated. `--df-mu` and `--df-sigma` set fixed df instead. The chosen df are stored in the model file, its JSON description and all output files. With `--kfold`, the df are chosen once on all subjects before the folds, so the cross-validated errors are slightly optimistic.
 
 **Age-dependent shape.** By default, the shape parameters are constant for each voxel. `--shape-df 3` also fits ν and τ as natural splines of age and keeps them for a voxel only where the Bayesian information criterion (BIC) prefers them. In the example data, BIC chose age-dependent shape for about 7% of the voxels, and fitting took about twice as long. Use it where the diagnostics show that the shape misfit depends on age.
 
@@ -227,8 +232,8 @@ When the training data are given, a Python replica of the GPR BrainAGE of the Br
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--train FILE ...` | | training mat-file per model, `+` joins sites |
-| `--test FILE ...` | | test mat-file per model, in the order of `--train` or of the saved models |
+| `--train FILE ...` | | training mat-files, one per model with the same subjects; `+` joins the files of several sites |
+| `--test FILE ...` | | test mat-files, one per model with the same subjects, in the order of `--train` or of the saved models |
 | `--model FILE` | | apply saved models instead of `--train` |
 | `--save-model FILE` | | save the fitted models as `.npz` or `.mat` |
 | `--normative-only` | off | only voxel- or vertex-wise normative models and z-maps, no brain age |
@@ -252,6 +257,7 @@ When the training data are given, a Python replica of the GPR BrainAGE of the Br
 | `--age-range MIN MAX` | all | age range of the training subjects |
 | `--ensemble` | `gls` | weights of the brain age ensemble: `gls`, `mae` or `mean` |
 | `--no-gpr` | off | skip the GPR comparison |
+| `--jobs` | half the CPU count | threads for fitting the voxel- and vertex-wise models; the results do not depend on it |
 | `--out` | `neurogamlss_results` | prefix of the output files |
 
 ## Python interface
@@ -273,21 +279,23 @@ z = m.zscores(Y_new, age_new, male_new)          # columns m.valid of Y_new
 
 ## Speed
 
-Times for fitting with fixed df to 2,241 training subjects on an Apple M2 laptop, in one process:
+NeuroGAMLSS fits chunks of voxels in parallel threads, by default as many as half the CPU count, which on most machines are the physical or performance cores. `--jobs` sets another number, and the results do not depend on it. On an Apple M2, four threads were 2.4 times faster than one core. More threads did not help there, because the other four cores are slower efficiency cores and the computation is limited by memory speed.
 
-| Data | Features | normal | shash, gray matter | shash, white matter |
-|---|---|---|---|---|
-| 8 mm volume | 3,747 | 5 s | 34 s | 53 s |
-| 4 mm volume | 29,852 | 26 s | 4.4 min | 7.3 min |
+Times for fitting with fixed df to 2,241 training subjects on an Apple M2 laptop, with four threads and the default mask:
 
-The normal times are for gray matter, and white matter took the same time at 8 mm. White matter is more skewed than gray matter, and its SHASH fits take longer. Memory is bounded by processing the features in chunks.
+| Data | Voxels | normal, gray matter | normal, white matter | shash, gray matter | shash, white matter |
+|---|---|---|---|---|---|
+| 8 mm volume | 3,747 | 1 s | 1 s | 7 s | 13 s |
+| 4 mm volume | 29,852 | 8 s | 11 s | 56 s | 97 s |
+
+White matter is more skewed than gray matter, and its SHASH fits take longer. Memory is bounded by processing the voxels in chunks.
 
 The automatic choice of the df adds the following times for gray matter. Fixed df given with `--df-mu` and `--df-sigma` skip it.
 
 | Choice of the df | 8 mm | 4 mm |
 |---|---|---|
-| z-map models | 40 s | 41 s |
-| brain age models | 40 s | 77 s |
+| z-map models | 20 s | 20 s |
+| brain age models | 40 s | 79 s |
 
 ## Tests
 

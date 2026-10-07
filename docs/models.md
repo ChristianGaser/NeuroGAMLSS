@@ -103,7 +103,7 @@ The normal model is fitted by the RS algorithm of GAMLSS, ported from ComBatLS (
 1. a weighted least-squares update of the location coefficients with weights $\sigma^{-2}$;
 2. a Fisher scoring step for the coefficients of $\log\sigma$, the least-squares regression of $(z^2 - 1)/2$ on the design of $\log\sigma$. The step is halved, up to 20 times, while the deviance increases.
 
-Iterations stop when the location changes by less than $10^{-6}\sigma$ and the coefficients of $\log\sigma$ by less than $10^{-6}$, or after 2,000 iterations. All voxels are updated together with batched linear algebra.
+Iterations stop when the location changes by less than $10^{-6}\sigma$ and the coefficients of $\log\sigma$ by less than $10^{-6}$, or after 2,000 iterations. All voxels are updated together with batched linear algebra, in chunks of voxels that run in parallel threads.
 
 ### SHASH and GG: penalized Newton steps
 
@@ -123,6 +123,8 @@ The coefficients are updated by Newton steps for all voxels at once:
 - **Squared scores.** Where the negative Hessian plus the prior is not positive definite, the outer product of the scores replaces it (the BHHH approximation). This always gives an ascent direction. gamlss.dist uses the same squared-score approximation for the expected second derivatives of SHASH.
 - **Step halving.** A step is halved, up to 30 times, until the penalized log-likelihood does not decrease, as in the autostep of gamlss.
 - **Convergence.** A voxel stops when half its Newton decrement falls below $10^{-9}$ per subject. Voxels that reach 500 iterations, or whose step cannot be improved by halving, keep their best fit and are flagged as not converged.
+- **Parallel chunks.** The voxels are processed in chunks of about 500,000 values, which run in parallel threads (`--jobs`, by default half the CPU count). NumPy releases Python's global lock in its array operations, so the threads use several cores. The chunks do not depend on the number of threads, so neither do the results.
+- **Arithmetic.** One exponential of $t$ gives $\sinh t$, $\cosh t$, $\tanh t$ and $\cosh 2t$, and $\operatorname{asinh} z$ is computed as $\operatorname{log1p}\bigl(|z| + z^2/(1 + \sqrt{1 + z^2})\bigr)$ with the sign of $z$, which is accurate also for small $|z|$.
 - **Mixed algorithm.** The optimizer can start with iterations that ignore the cross-derivatives between predictors, as the RS phase of the mixed algorithm of gamlss (`rs_iter` of `fit_distribution`). This was slower without better fits for SHASH and is off by default.
 
 In 8 mm gray and white matter of 2,241 subjects without a mask, 0.7% and 0.9% of the voxels did not converge. These voxels contain almost no tissue, with a median density of 0.001, and only a few subjects have nonzero values. Their raw skewness is about 10, and most of them have $\tau$ between 0.2 and 0.4. With the default mask, none of 3,546 gray matter voxels and 1 of 3,242 white matter voxels did not converge.
