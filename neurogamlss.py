@@ -150,6 +150,11 @@ VOXEL_DEFAULTS = dict(family='shash', shape_df=0, tau_max=2.0, shape_prior=1.0,
 MASK_DEFAULT = dict(volume='0.05', surface='5%')
 TAU_MIN = 0.2                  # lower bound of the shash tail parameter
 
+# boundary knots of all natural splines (age, shape, covariates) at these quantiles of
+# the training values; the splines are linear outside them, so that single extreme
+# subjects do not bend the curves (as restricted cubic splines)
+SPLINE_BOUNDARY = (0.05, 0.95)
+
 # choice of the spline df of age per training sample (--df-mu/--df-sigma auto): grids
 # searched, df of sigma while the df of mu is searched (z-maps), folds and the number
 # of random features used for the z-map models
@@ -512,13 +517,18 @@ class NaturalSpline:
     """Natural cubic spline basis (of age or a covariate) without intercept (The Elements of 
     Statistical Learning eq. 5.4-5.5).
 
-    Knots at quantiles of the training ages; the basis is linear beyond the
-    boundary knots, so the model extrapolates linearly.  df=1 is linear.
+    Boundary knots at the quantiles SPLINE_BOUNDARY (5% and 95%) of the training
+    values and inner knots at equally spaced quantiles between them, which are the
+    default knots of restricted cubic splines (Harrell) for 4 to 6 knots.  The basis
+    is linear outside the boundary knots, so that single extreme subjects do not bend
+    the curves, and the model extrapolates linearly.  df=1 is linear.
     """
 
     def __init__(self, x, df):
         x = np.asarray(x, dtype=np.float64)
-        knots = np.unique(np.quantile(x, np.linspace(0, 1, max(df, 1) + 1)))
+        knots = np.unique(np.quantile(x, np.linspace(*SPLINE_BOUNDARY, max(df, 1) + 1)))
+        if knots.size < 2:          # nearly constant values, e.g. a rare binary covariate
+            knots = np.array([x.min(), x.max()])
         self.lo, self.hi = knots[0], knots[-1]
         self.knots = (knots - self.lo) / (self.hi - self.lo)
         self.df = len(self.knots) - 1
@@ -2393,7 +2403,8 @@ def model_description(train, kw, contents, vkw=None, age_range=(0, np.inf),
     sites = d0.name.split('+')
     settings = {k: v for k, v in kw.items() if k not in ('cov', 'atlas_dir', 'verbose')}
     settings.update(voxel_model={**VOXEL_DEFAULTS, **(vkw or {})},
-                    age_range=[float(x) if np.isfinite(x) else None for x in age_range])
+                    age_range=[float(x) if np.isfinite(x) else None for x in age_range],
+                    spline_boundary=list(SPLINE_BOUNDARY))
     desc = dict(format=MODEL_FORMAT, version=MODEL_VERSION,
                 created=time.strftime('%Y-%m-%d %H:%M:%S'), neurogamlss=_git_version(),
                 contents=contents, settings=settings,
