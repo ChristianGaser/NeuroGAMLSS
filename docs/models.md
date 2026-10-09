@@ -20,10 +20,10 @@ g(\mu_i) &= \beta_0 + \mathbf{b}_\mu(a_i)^\top \boldsymbol\beta + \beta_s s_i + 
 ```
 
 - **Link of the location.** $`g`$ is the identity for the normal and SHASH families and the logarithm for GG.
-- **Age.** $`\mathbf{b}_\mu`$, $`\mathbf{b}_\sigma`$ and $`\mathbf{b}_\nu`$ are natural cubic spline bases without intercept (Hastie et al., 2009). The degrees of freedom of $`\mathbf{b}_\mu`$ and $`\mathbf{b}_\sigma`$ are chosen for every training sample, see [Flexibility of the age curves](#flexibility-of-the-age-curves), and those of $`\mathbf{b}_\nu`$ are given by `--shape-df`. Their knots lie at equally spaced quantiles of the training ages. The splines are linear beyond the youngest and the oldest training age, so the models extrapolate linearly.
+- **Age.** $`\mathbf{b}_\mu`$, $`\mathbf{b}_\sigma`$ and $`\mathbf{b}_\nu`$ are natural cubic spline bases without intercept (Hastie et al., 2009). The degrees of freedom of $`\mathbf{b}_\mu`$ and $`\mathbf{b}_\sigma`$ are chosen for every training sample, see [Flexibility of the age curves](#flexibility-of-the-age-curves), and those of $`\mathbf{b}_\nu`$ are given by `--shape-df`. Their boundary knots lie at the 5th and 95th percentiles of the training ages and their inner knots at equally spaced quantiles between them, see [Boundary knots](#boundary-knots). The splines are linear below and above the boundary knots, so the models extrapolate linearly.
 - **Sex** enters location and log scale as a main effect. It is left out when the training sample has only one sex or the test data contain no sex.
 - **Site** enters the location as a fixed effect, with $`\gamma_1 = 0`$. Predictions for new data use the size-weighted mean of the site effects, as the standardized mean of ComBat.
-- **Covariates** $`\mathbf{h}(\mathbf{x})`$ are natural splines with `--cov-df` degrees of freedom, linear by default, centred at their training median. A covariate is dropped from a predictor when it is constant or collinear with the other columns of that predictor.
+- **Covariates** $`\mathbf{h}(\mathbf{x})`$ are natural splines with `--cov-df` degrees of freedom and knots placed as for age, linear by default, centred at their training median. A covariate is dropped from a predictor when it is constant or collinear with the other columns of that predictor.
 - **Shape.** The shape parameters $`\nu`$ and $`\tau`$ are constant by default. The terms in square brackets are added with `--shape-df` where BIC prefers them, see [Age-dependent shape](#age-dependent-shape).
 
 ## Voxels and vertices that are modelled
@@ -127,7 +127,7 @@ The coefficients are updated by Newton steps for all voxels at once:
 - **Arithmetic.** One exponential of $`t`$ gives $`\sinh\, t`$, $`\cosh\, t`$, $`\tanh\, t`$ and $`\cosh\, 2t`$, and $`\mathrm{asinh}\, z`$ is computed as $`\mathrm{log1p}(|z| + z^2/(1 + \sqrt{1 + z^2}))`$ with the sign of $`z`$, which is accurate also for small $`|z|`$.
 - **Mixed algorithm.** The optimizer can start with iterations that ignore the cross-derivatives between predictors, as the RS phase of the mixed algorithm of gamlss (`rs_iter` of `fit_distribution`). This was slower without better fits for SHASH and is off by default.
 
-In 8 mm gray and white matter of 2,241 subjects without a mask, 0.7% and 0.9% of the voxels did not converge. These voxels contain almost no tissue, with a median density of 0.001, and only a few subjects have nonzero values. Their raw skewness is about 10, and most of them have $`\tau`$ between 0.2 and 0.4. With the default mask, none of 3,546 gray matter voxels and 1 of 3,242 white matter voxels did not converge.
+In 8 mm gray and white matter of 2,241 subjects without a mask, 0.7% and 0.9% of the voxels did not converge. These voxels contain almost no tissue, with a median density of 0.001, and only a few subjects have nonzero values. Their raw skewness is about 10, and most of them have $`\tau`$ between 0.2 and 0.4. With the default mask, 1 of 3,546 gray matter voxels and 1 of 3,242 white matter voxels did not converge.
 
 ### Age-dependent shape
 
@@ -137,7 +137,7 @@ With `--shape-df k`, every voxel is first fitted with constant shape and then wi
 2(\ell_2 - \ell_1) > m k \log\, n,
 ```
 
-where $`\ell_1`$ and $`\ell_2`$ are the unpenalized log-likelihoods of the two fits, $`m`$ is the number of shape parameters (2 for SHASH, 1 for GG) and $`n`$ is the number of subjects. In gray and white matter at 8 mm with $`k = 3`$, BIC chose age-dependent shape for 7% of the voxels.
+where $`\ell_1`$ and $`\ell_2`$ are the unpenalized log-likelihoods of the two fits, $`m`$ is the number of shape parameters (2 for SHASH, 1 for GG) and $`n`$ is the number of subjects. In gray and white matter at 8 mm with $`k = 3`$, BIC chose age-dependent shape for 8% of the voxels.
 
 ## Flexibility of the age curves
 
@@ -182,6 +182,27 @@ Choosing the df per component did not beat one setting for all components. The t
 | Error ratio, former 5 and 3 df | 1.45 | 1.49 |
 | Error ratio, chosen df | 1.23 | 1.23 |
 
+### Boundary knots
+
+The boundary knots of all splines lie at the 5th and 95th percentiles of the training values, and the inner knots at equally spaced quantiles between them. For 3 to 5 df, these are the default knots of restricted cubic splines (Harrell, 2015). The splines are linear below and above the boundary knots. Earlier versions placed the boundary knots at the youngest and the oldest age. Such knots depend on single subjects, and the curves are least certain near them. In the lifespan sample, whose oldest subject is 97 years old, the standard error of $`\mu`$ at the oldest age was 3.9, 5.9 and 6.3 times that at the median age with 2, 3 and 12 df. Boundary knots at the percentiles reduced it by 11%, 19% and 41%.
+
+A smaller standard error alone does not show a better fit, because a stiffer curve can be biased. The held-out log-likelihood was therefore compared by age group with 5-fold cross-validation, as in the choice of the df: normal models of 1,000 random voxels of gray matter at 8 mm, 2 df for $`\sigma`$, and the median over voxels. Both knot placements had the best overall likelihood with the same df of $`\mu`$. The differences to boundary knots at the youngest and the oldest age, in thousandths of a nat per subject, were:
+
+| Training sample | df of $`\mu`$ | All | Youngest 5% | Oldest 5% |
+|---|---|---|---|---|
+| Lifespan, 2,241 subjects aged 18–97 | 2 | 0.01 | 0.03 | 0.49 |
+| Lifespan, white matter | 2 | 0.04 | 0.04 | 0.75 |
+| UK Biobank, 14,735 subjects aged 46–82 | 2 | 0.00 | 0.05 | 0.06 |
+| NKI-Rockland, 1,238 subjects aged 6–85 | 3 | −0.09 | −0.21 | 1.27 |
+| NIH (879 subjects aged 5–22) and lifespan | 4 | 0.01 | 0.15 | 0.77 |
+
+- **Oldest subjects.** The fit of the oldest 5% improved in every sample, least in UK Biobank, whose ages end at 82 years. With 8 df, the loss of the oldest 5% relative to the best setting fell from 4.15 to 2.26 thousandths of a nat in gray matter of the lifespan sample and from 4.90 to 2.18 in NKI-Rockland.
+- **Children.** In NKI-Rockland, the youngest 5% are children aged 6 to 9 years, whose brains change fast. There, the linear segment cost a little: −0.21 for the youngest 5% and −0.16 for all 257 subjects younger than 18.
+- **Size.** At equal df, 2 or 3 for $`\mu`$, the SHASH z-scores of the lifespan sample changed by a median of 0.002 to 0.003. In the oldest 5%, they changed by 0.004 to 0.005, and for the 6 subjects older than 90 years by 0.02 to 0.03.
+- **Brain age.** NormBrainAGE chose the same df with both knot placements. In 10-fold cross-validation, the mean absolute error rose by 0.01 to 0.03 years: from 5.18 to 5.19 years in gray matter and from 5.91 to 5.93 in white matter of the lifespan sample, and from 4.25 to 4.28 in NKI-Rockland. In the youngest and the oldest 5%, the bias decreased in four of six comparisons, by up to 0.43 years, but the mean absolute error rose by 0.10 to 0.27 years. The coverage of the 95% intervals changed by at most one percentage point.
+
+The z-maps and brain age use the same knots, so that both rest on the same age curves. The comparisons in [Evidence](#evidence), the analysis of the [mask](#voxels-and-vertices-that-are-modelled) and the test of the tails in the [diagnostics example](#example) were made with boundary knots at the youngest and the oldest age.
+
 ## Normal scores and new sites
 
 The z-map of a test subject is its normal score $`\Phi^{-1}(F(y))`$ under the model at its chronological age, sex and covariates, at the reference site. For the normal family, this is the usual z-score.
@@ -217,18 +238,18 @@ Worm plots (van Buuren and Fredriks, 2001) show, for six age groups, the differe
 
 ### Example
 
-Gray and white matter at 8 mm from 2,241 subjects of CamCAN, IXI, OASIS-3 and SALD gave the following shares of voxels with $`p \lt 0.05`$, which would be 5% for a perfect model. The models used the default mask and the df chosen by cross-validation, 3 for $`\mu`$ and 2 for $`\sigma`$ in both tissues:
+Gray and white matter at 8 mm from 2,241 subjects of CamCAN, IXI, OASIS-3 and SALD gave the following shares of voxels with $`p \lt 0.05`$, which would be 5% for a perfect model. The models used the default mask and the df chosen by cross-validation, 2 for $`\mu`$ and 2 for $`\sigma`$ in both tissues:
 
 | Tissue | Family | Mean | Variance | Skewness | Kurtosis | Median \|skewness\| |
 |---|---|---|---|---|---|---|
-| GM | normal | 12% | 25% | 87% | 84% | 0.51 |
-| GM | shash | 20% | 13% | 38% | 34% | 0.02 |
-| GM | shash, `--shape-df 3` | 18% | 12% | 33% | 33% | 0.02 |
-| WM | normal | 11% | 29% | 88% | 86% | 0.65 |
-| WM | shash | 22% | 15% | 31% | 31% | 0.02 |
-| WM | shash, `--shape-df 3` | 21% | 13% | 29% | 30% | 0.02 |
+| GM | normal | 16% | 25% | 87% | 84% | 0.51 |
+| GM | shash | 23% | 13% | 38% | 34% | 0.02 |
+| GM | shash, `--shape-df 3` | 21% | 12% | 32% | 33% | 0.02 |
+| WM | normal | 17% | 29% | 88% | 86% | 0.65 |
+| WM | shash | 24% | 16% | 31% | 32% | 0.02 |
+| WM | shash, `--shape-df 3` | 22% | 14% | 28% | 30% | 0.02 |
 
-SHASH removed most of the skewness and kurtosis misfit of the normal model. Age-dependent shape improved the fit only slightly. The mean is flagged more often with SHASH than with the normal model. Two effects probably contribute: least squares keeps the residual mean of the normal model close to zero in every age range by construction, while the location of SHASH also absorbs part of any change of shape with age. With 224 subjects per age group, the tests detect small misfit, so the worm plots and the median skewness are better guides to its size.
+SHASH removed most of the skewness and kurtosis misfit of the normal model. Age-dependent shape improved the fit only slightly. The mean is flagged more often with SHASH than with the normal model. Two effects probably contribute: least squares keeps the residual mean of the normal model close to zero in every age range by construction, while the location of SHASH also absorbs part of any change of shape with age. With 3 instead of 2 df for $`\mu`$, which cross-validation rated almost equally, the mean was flagged for 11% (normal) and 19% (SHASH) of the gray matter voxels. With 224 subjects per age group, the tests detect small misfit, so the worm plots and the median skewness are better guides to its size.
 
 An independent sample tested the tails. The adults of NKI-Rockland were split into two halves of 258 subjects. One half adapted the models to the site, and the other half was scored. In 500 gray matter voxels with positive values, the shares of normal scores beyond two thresholds were:
 
@@ -263,7 +284,7 @@ As in warped Bayesian linear regression (Fraza et al., 2021), $`\varepsilon`$ an
 NeuroGAMLSS takes from gamlss and gamlss.dist the SHASHo2 and GG families, the RS algorithm, step halving, the squared-score approximation and the Q statistics and worm plots. It differs in four ways:
 
 - **Vectorized fitting.** All voxels are fitted at once by batched linear algebra rather than one model at a time.
-- **Fixed smoothness.** Age enters through natural splines with fixed degrees of freedom instead of penalized splines with automatic smoothing, such as `pb()` in gamlss.
+- **Fixed smoothness.** Age enters through natural splines with fixed degrees of freedom and boundary knots at the 5th and 95th percentiles instead of penalized splines with automatic smoothing, such as `pb()` in gamlss.
 - **Newton steps.** The shape models use Newton steps on all coefficients with exact SHASH derivatives, rather than the RS or CG algorithms of gamlss.
 - **Fewer features.** Random effects, other families such as BCT or BCPE, and model selection by generalized AIC beyond the BIC choice of age-dependent shape are not implemented.
 
@@ -276,6 +297,7 @@ PCNtoolkit offers warped Bayesian linear regression (Fraza et al., 2021) and hie
 - Fortin, J.-P., Cullen, N., Sheline, Y.I., et al., 2018. Harmonization of cortical thickness measurements across scanners and sites. NeuroImage 167, 104–120.
 - Fraza, C.J., Dinga, R., Beckmann, C.F., Marquand, A.F., 2021. Warped Bayesian linear regression for normative modelling of big data. NeuroImage 245, 118715.
 - Gardner, M., Shinohara, R.T., Bethlehem, R.A.I., et al., 2024. ComBatLS: a location- and scale-preserving method for multi-site image harmonization. bioRxiv.
+- Harrell, F.E., 2015. Regression Modeling Strategies, 2nd ed. Springer, Cham.
 - Hastie, T., Tibshirani, R., Friedman, J., 2009. The Elements of Statistical Learning, 2nd ed. Springer, New York.
 - Johnson, W.E., Li, C., Rabinovic, A., 2007. Adjusting batch effects in microarray expression data using empirical Bayes methods. Biostatistics 8, 118–127.
 - Jones, M.C., Pewsey, A., 2009. Sinh-arcsinh distributions. Biometrika 96, 761–780.

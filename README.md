@@ -147,7 +147,9 @@ python neurogamlss.py --train s4rp1_8mm_A_CAT12.9.mat s4rp2_8mm_A_CAT12.9.mat \
 
 In the example data, the choice took 20 to 80 s for each kind of model and picked 2 or 3 df for location and 1 or 2 for scale, stiffer than the former fixed 5 and 3. On an independent sample, this made brain age more accurate and its standard errors better calibrated. `--df-mu` and `--df-sigma` set fixed df instead. The chosen df are stored in the model file, its JSON description and all output files. With `--kfold`, the df are chosen once on all subjects before the folds, so the cross-validated errors are slightly optimistic.
 
-**Age-dependent shape.** By default, the shape parameters are constant for each voxel. `--shape-df 3` also fits ν and τ as natural splines of age and keeps them for a voxel only where the Bayesian information criterion (BIC) prefers them. In the example data, BIC chose age-dependent shape for about 7% of the voxels, and fitting took about twice as long. Use it where the diagnostics show that the shape misfit depends on age.
+**Boundary knots.** The splines of age and of the covariates are linear below the 5th and above the 95th percentile of the training values, as restricted cubic splines. Single very young or very old subjects therefore do not bend the curves. In the example data, this improved the fit of the oldest 5% of the subjects and reduced the standard error of the location curve at the oldest age by 11% to 41%, depending on the df. The mean absolute error of brain age rose by 0.01 to 0.03 years. Details are in [docs/models.md](docs/models.md#boundary-knots).
+
+**Age-dependent shape.** By default, the shape parameters are constant for each voxel. `--shape-df 3` also fits ν and τ as natural splines of age and keeps them for a voxel only where the Bayesian information criterion (BIC) prefers them. In the example data, BIC chose age-dependent shape for about 8% of the voxels, and fitting took about twice as long. Use it where the diagnostics show that the shape misfit depends on age.
 
 ## Checking the fit
 
@@ -157,8 +159,8 @@ Gray matter at 8 mm from 2,241 subjects of CamCAN, IXI, OASIS-3 and SALD gave th
 
 | Family | Mean | Variance | Skewness | Kurtosis | Median absolute skewness |
 |---|---|---|---|---|---|
-| normal | 12% | 25% | 87% | 84% | 0.51 |
-| shash | 20% | 13% | 38% | 34% | 0.02 |
+| normal | 16% | 25% | 87% | 84% | 0.51 |
+| shash | 23% | 13% | 38% | 34% | 0.02 |
 
 Worm plots (van Buuren and Fredriks, 2001) show the same in more detail. Each panel is a detrended normal QQ plot of the z-scores in one of six age groups, summarized over voxels. A well-fitting model has a flat worm inside the dashed band.
 
@@ -306,13 +308,13 @@ pip install -e ".[all,test]"
 python -m pytest
 ```
 
-The tests use simulated data. They check the SHASH derivatives, the GG density and normal scores, parameter recovery, the τ bound, the BIC choice of age-dependent shape, the calibration of the Q statistics, the choice of the df, the mask, saving and loading of all families in both formats, and the command line.
+The tests use simulated data. They check the SHASH derivatives, the GG density and normal scores, parameter recovery, the τ bound, the BIC choice of age-dependent shape, the calibration of the Q statistics, the boundary knots of the splines, the choice of the df, the mask, saving and loading of all families in both formats, and the command line.
 
 ## Limitations
 
 - **Independent voxels.** Every voxel is fitted on its own, without spatial smoothing of the parameters.
 - **Fixed site effects.** Sites are fixed effects of the location. Many small sites would be better served by random effects, which are not implemented.
-- **Non-converged fits.** Without the mask, about 1% of the SHASH fits did not converge, almost all in near-empty voxels. With the default mask, none of 3,546 gray matter voxels and 1 of 3,242 white matter voxels at 8 mm failed to converge. Such fits keep the best parameters found and are flagged in `converged`.
+- **Non-converged fits.** Without the mask, about 1% of the SHASH fits did not converge, almost all in near-empty voxels. With the default mask, 1 of 3,546 gray matter voxels and 1 of 3,242 white matter voxels at 8 mm failed to converge. Such fits keep the best parameters found and are flagged in `converged`.
 - **Bounded data.** Gray and white matter densities are bounded by 0 and 1. SHASH describes the resulting skewness well but is not bounded itself.
 
 ## References
