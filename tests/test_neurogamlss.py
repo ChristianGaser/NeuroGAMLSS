@@ -87,6 +87,21 @@ def test_gg_smooth_through_lognormal():
     assert abs((v[3] - v[1]) / 2e-6 - (v[4] - v[0]) / 2e-3) < 1e-3              # same slope
 
 
+def test_spline_boundary_knots():
+    rng = np.random.default_rng(8)
+    age = rng.uniform(20, 80, 500)
+    b = NG.NaturalSpline(age, 4)
+    lo, hi = np.quantile(age, NG.SPLINE_BOUNDARY)
+    assert b.df == 4 and np.isclose(b.lo, lo) and np.isclose(b.hi, hi)
+    for x in (np.linspace(0, lo, 5), np.linspace(hi, 120, 5)):      # linear outside
+        assert np.allclose(np.diff(b(x), 2, axis=0), 0, atol=1e-9)
+    old = NG.NaturalSpline(np.append(age, 110), 4)                  # one very old subject
+    assert abs(old.hi - b.hi) < 0.5 and np.allclose(old.knots, b.knots, atol=0.01)
+    x = np.r_[np.zeros(97), np.ones(3)]                             # rare binary covariate
+    c = NG.NaturalSpline(x, 3)
+    assert c.df == 1 and np.allclose(c(x)[:, 0], x)
+
+
 def test_shash_fit_recovers_parameters():
     Y, age, male, site, nu, tau = simulate_shash()
     m = NG.NormativeModel(5, 3, family='shash', shape_prior=3.0).fit(Y, age, male, site)
@@ -352,6 +367,7 @@ def test_command_line_mask(tmp_path):
     with open(str(tmp_path / 'norm.json')) as fh:
         desc = json.load(fh)
     assert desc['settings']['mask_threshold'] == '50%'
+    assert desc['settings']['spline_boundary'] == list(NG.SPLINE_BOUNDARY)
     assert desc['models'][0]['mask']['spec'] == '50%' and desc['models'][0]['mask']['n_used'] == 33
     with pytest.raises(SystemExit):
         NG.main(['--normative-only', '--mask-threshold', 'abc', '--train', f, '--save-model', model])
