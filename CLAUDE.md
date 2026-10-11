@@ -1,0 +1,62 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project
+
+NeuroGAMLSS is a single Python module, `neurogamlss.py`, with two parts. It fits vectorized GAMLSS normative models to every voxel or vertex of brain MRI data and writes z-maps. Its brain-age part, NormBrainAGE, estimates brain age as the maximum-likelihood age under normative models of principal component scores. The inputs are mat-files written by `BA_data2mat.m` of the BrainAGE toolbox, for example from CAT12. The repository contains no real MRI data.
+
+- `README.md` is the user guide, with options and outputs.
+- `docs/models.md` describes the statistics and holds the evidence for the defaults.
+- `NDM_methods.md` is a draft methods section for NormBrainAGE.
+
+## Commands
+
+```bash
+pip install -e ".[all,test]"                  # h5py, nibabel, matplotlib and pytest
+python3 -m pytest                             # all tests, about 15 s
+python3 -m pytest tests/test_neurogamlss.py::test_spline_boundary_knots   # one test
+python3 -m pytest -k brainage                 # tests whose name matches
+python3 neurogamlss.py --help                 # command line; installed as `neurogamlss`
+```
+
+No linter or formatter is configured. The code keeps lines to about 100 characters and must stay compatible with Python 3.9.
+
+The tests use simulated data only. The simulators are `simulate_shash`, `simulate_gg`, `simulate_trajectories`, `simulate_brain` and `masked_data` in `tests/test_neurogamlss.py`. Command-line tests write mat-files with `scipy.io.savemat` to `tmp_path` and call `NG.main([...])`.
+
+## Architecture
+
+The module is organized in sections, in this order.
+
+1. **Data.** `Data` holds `Y` (subjects × features, float32), age, sex and site.
+   - **Sites and models.** `load_data` joins files given with `+` as sites. Files separated by spaces on the command line are separate *models* of the same subjects, such as tissues, resolutions or surface measures.
+   - **Names.** The file name up to the resolution names a model (`_model_key`). `mesh` in the name marks surface data.
+   - **Ages and mask.** An age of 0 or NaN means unknown. `feature_mask` keeps only voxels or vertices whose training mean reaches a threshold.
+2. **Normative model.** `NormativeModel` is one GAMLSS per feature, fitted for all features at once.
+   - **Designs.** μ uses intercept, natural spline of age, sex, site dummies and covariates. log σ uses the same terms except the site dummies.
+   - **Splines.** `NaturalSpline` places its boundary knots at the quantiles `SPLINE_BOUNDARY` and is linear outside them.
+   - **Normal family.** `fit_location_scale` fits it with the RS algorithm, ported from ComBatLS.
+   - **SHASH and GG.** They start from the normal fit and are refined by `fit_distribution`: penalized Newton steps with exact SHASH or numerical GG derivatives, shape priors and a bound on τ.
+3. **NormBrainAGE.** `NDMBrainAge` works on parts: the whole brain and, with `--parcellation`, each lobe of the atlas in `atlases/`.
+   - **Pipeline per part.** Standardized voxels → PCA (`_pca`, via the Gram matrix) → normal `NormativeModel` of the scores → `ResidualCorrelation` R → log-likelihood on an age grid (`_loglik_grid`) → maximum with Laplace SE (`_argmax_refine`).
+   - **`pca=0`.** It fits every voxel with a low-rank R. With the normal family, `VoxelModel.from_ndm` shares this model with the z-maps.
+   - **`Warp`.** An optional sinh-arcsinh transform applied before the PCA.
+4. **`VoxelModel`.** The z-maps: normal scores of voxel-wise models, SHASH by default.
+5. **Choice of the df.** Spline df of μ and σ are chosen once per training sample by cross-validation and stored with the models. `select_df_normative` uses the held-out likelihood of normal models on 1,000 random voxels. `select_df_brainage` uses the MAE of the held-out brain age. Both search `DF_GRID_*` with `_search_df`.
+6. **Diagnostics.** Q statistics and worm plots by age group (`run_diagnostics`).
+7. **Persistence.** `ModelSet` holds `info`, `brainage` and `voxel` for one input. Every model class has `get_state()` and `from_state()`. `save_models` writes `.npz`, or `.mat` with struct `NDMmodel`, plus a JSON description. `load_models` checks `MODEL_FORMAT` and `MODEL_VERSION`.
+8. **Drivers.** `fit_models`, `apply_models` (test data, `--adjust` controls, `--correction`), `cross_validate` (`--kfold`), `train_test` and `main`. `gpr_baseline` is a replica of the GPR BrainAGE of the BrainAGE toolbox, run for comparison.
+
+## Conventions
+
+- **Vectorized fitting.** Features are fitted together with batched linear algebra, in chunks that run in threads (`_map`, `--jobs`). The chunks must not depend on the number of threads; tests assert identical results with 1 and 4 threads.
+- **Defaults.** Defaults are module constants at the top of the file, such as `VOXEL_DEFAULTS`, `MASK_DEFAULT`, `TAU_MIN`, `SPLINE_BOUNDARY` and `DF_GRID_*`.
+- **Saved models.** They must load and predict exactly as when they were fitted.
+  - Everything decided at fit time is stored in the state: knots, PCA axes and centers, mask, df.
+  - A new state key needs a default in `from_state` that reproduces the older behavior, for example `s.get('standardize', False)`.
+  - Change `MODEL_VERSION` only for incompatible formats.
+- **Brain-age options.** They flow from `main` through the `kw` dict into `NDMBrainAge(**kw)`, `select_df_brainage` and the JSON settings (`model_description`).
+- **Evidence in the docs.** Defaults are justified by comparisons on real data in `docs/models.md`, as held-out log-likelihood in thousandths of a nat or MAE in years. When a default changes, rerun the affected numbers in `README.md`, `docs/models.md` and `NDM_methods.md`, or state which setting a table used.
+- **Math in Markdown.** Use GitHub math: inline `` $`\mu`$ ``, display blocks in ` ```math ` fences, and `\lt`/`\gt` instead of `<`/`>` inside math.
+- **`NDM_methods.md`.** It is manuscript text. Values in [brackets] are placeholders, and the HTML comment at the end holds author notes that are not part of the text.
+- **`figures/NDMScheme.py`.** It draws `figures/NDMScheme.png` and does not import `neurogamlss`.
