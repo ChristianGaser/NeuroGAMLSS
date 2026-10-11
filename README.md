@@ -196,7 +196,7 @@ Covariates are centred at their training median, and z-scores condition on every
 
 ## NormBrainAGE
 
-NormBrainAGE reduces the training data of each model by principal component analysis (PCA), by default to 100 components for the whole brain and, with `--parcellation`, for each lobe. Normal location-scale models describe the component scores as functions of age, and their residual correlation is estimated from the training sample. The brain age of a subject is the age that maximizes the likelihood of its scores. The method yields:
+NormBrainAGE standardizes every voxel or vertex of the training data to unit variance and reduces the data of each model by principal component analysis (PCA), by default to 100 components for the whole brain and, with `--parcellation`, for each lobe. Normal location-scale models describe the component scores as functions of age, and their residual correlation is estimated from the training sample. The brain age of a subject is the age that maximizes the likelihood of its scores. The method yields:
 
 - **BrainAGE,** the difference between brain age and chronological age, with a standard error from the curvature of the likelihood.
 - **Regional BrainAGE** for the lobes with `--parcellation`.
@@ -205,7 +205,9 @@ NormBrainAGE reduces the training data of each model by principal component anal
 
 PCA is used only for brain age. The voxel-wise normative models of the z-maps never use it. `--pca 0` fits brain age to every voxel with a low-rank residual correlation instead. This is less accurate and gives standard errors that are too small.
 
-`--warp` transforms every voxel with a sinh-arcsinh function before PCA. Unlike SHASH, the warp does not depend on age, so it can be applied before PCA. In our tests, it did not change the accuracy of brain age, so it is off by default.
+**Standardization.** Without it, the voxels with the largest variance, for example at tissue borders, dominate the principal components, whether or not their variance relates to age. Standardization lowered the mean absolute error of brain age in all 12 comparisons of gray and white matter at 4 and 8 mm, by 0.07 to 0.65 years, in cross-validation and on an independent sample. For surface measures, the results were mixed: it helped for sulc, fractal dimension and area, but made thickness and gyrification slightly worse. `--no-standardize` uses the raw values, as earlier versions did. Details are in [docs/models.md](docs/models.md#principal-components-for-normbrainage).
+
+`--warp` transforms every voxel with a sinh-arcsinh function before PCA. Unlike SHASH, the warp does not depend on age, so it can be applied before PCA. In our tests, it made brain age less accurate than standardization alone, so it is off by default.
 
 When the training data are given, a Python replica of the GPR BrainAGE of the BrainAGE toolbox runs for comparison, unless `--no-gpr` is set.
 
@@ -257,6 +259,7 @@ When the training data are given, a Python replica of the GPR BrainAGE of the Br
 | `--parcellation` | off | lobe-wise brain age and lobe-wise mean z |
 | `--pca` | 100 | NormBrainAGE only: principal components per model and region, 0 for every voxel |
 | `--warp` | off | NormBrainAGE only: sinh-arcsinh warp of every voxel before PCA |
+| `--no-standardize` | off | NormBrainAGE only: PCA of the raw values instead of voxels or vertices standardized to unit variance |
 | `--kfold` | 10 | folds of the cross-validation without `--test`, 0 with `--save-model` |
 | `--age-range MIN MAX` | all | age range of the training subjects |
 | `--ensemble` | `gls` | weights of the brain age ensemble: `gls`, `mae` or `mean` |

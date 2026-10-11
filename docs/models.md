@@ -199,7 +199,7 @@ A smaller standard error alone does not show a better fit, because a stiffer cur
 - **Oldest subjects.** The fit of the oldest 5% improved in every sample, least in UK Biobank, whose ages end at 82 years. With 8 df, the loss of the oldest 5% relative to the best setting fell from 4.15 to 2.26 thousandths of a nat in gray matter of the lifespan sample and from 4.90 to 2.18 in NKI-Rockland.
 - **Children.** In NKI-Rockland, the youngest 5% are children aged 6 to 9 years, whose brains change fast. There, the linear segment cost a little: −0.21 for the youngest 5% and −0.16 for all 257 subjects younger than 18.
 - **Size.** At equal df, 2 or 3 for $`\mu`$, the SHASH z-scores of the lifespan sample changed by a median of 0.002 to 0.003. In the oldest 5%, they changed by 0.004 to 0.005, and for the 6 subjects older than 90 years by 0.02 to 0.03.
-- **Brain age.** NormBrainAGE chose the same df with both knot placements. In 10-fold cross-validation, the mean absolute error rose by 0.01 to 0.03 years: from 5.18 to 5.19 years in gray matter and from 5.91 to 5.93 in white matter of the lifespan sample, and from 4.25 to 4.28 in NKI-Rockland. In the youngest and the oldest 5%, the bias decreased in four of six comparisons, by up to 0.43 years, but the mean absolute error rose by 0.10 to 0.27 years. The coverage of the 95% intervals changed by at most one percentage point.
+- **Brain age.** NormBrainAGE, with the PCA of the raw values used at the time, chose the same df with both knot placements. In 10-fold cross-validation, the mean absolute error rose by 0.01 to 0.03 years: from 5.18 to 5.19 years in gray matter and from 5.91 to 5.93 in white matter of the lifespan sample, and from 4.25 to 4.28 in NKI-Rockland. In the youngest and the oldest 5%, the bias decreased in four of six comparisons, by up to 0.43 years, but the mean absolute error rose by 0.10 to 0.27 years. The coverage of the 95% intervals changed by at most one percentage point.
 
 The z-maps and brain age use the same knots, so that both rest on the same age curves. The comparisons in [Evidence](#evidence), the analysis of the [mask](#voxels-and-vertices-that-are-modelled) and the test of the tails in the [diagnostics example](#example) were made with boundary knots at the youngest and the oldest age.
 
@@ -269,6 +269,44 @@ SHASH and GG came close to the expected tails, while the normal model gave five 
 - **GG for Brain Charts compatibility.** GG suits positive measures such as global volumes and matches the distribution of Brain Charts. Brain Charts also used fractional polynomials of age and random effects of study (Bethlehem et al., 2022), which NeuroGAMLSS replaces by natural splines and fixed site effects.
 - **Constant shape unless the diagnostics call for more.** Age-dependent shape adds parameters that are hard to estimate in sparse age ranges. Use `--shape-df` when Q statistics for skewness or kurtosis remain high, or when worm plots change shape across age groups.
 
+## Principal components for NormBrainAGE
+
+NormBrainAGE models the scores of the leading principal components of every model and region, 100 by default, instead of single voxels or vertices. Before the principal component analysis, every voxel or vertex is centered and divided by its standard deviation in the training sample, so that all of them enter with unit variance. Test data are standardized with the training means and standard deviations. `--no-standardize` uses the raw values, as earlier versions did.
+
+- **Why.** The likelihood of brain age already weights the component scores by their uncertainty, through $`\sigma_j(a)`$ and the residual correlation $`\mathbf{R}`$. The voxels themselves, however, enter the analysis with their raw variance. Without standardization, the components follow the voxels with the largest variance, for example at tissue borders, whether or not this variance relates to age. Standardization changes which information the components keep, not how the likelihood weights it.
+- **Scale.** With standardization, brain age does not depend on the scale of single voxels or vertices.
+- **Mask.** Standardization gives near-empty voxels the same weight as all others, so it relies on the [mask](#voxels-and-vertices-that-are-modelled).
+
+Brain age was compared with 10-fold cross-validation, with folds stratified by site and age, and on an independent sample: models trained on the lifespan sample were tested on 258 adults of NKI-Rockland, with 258 other adults as controls for the offset. The df were chosen for every setting by cross-validation. Mean absolute errors in years:
+
+| Data | Test | Raw values | Standardized |
+|---|---|---|---|
+| GM 8 mm | lifespan, cross-validation | 5.19 | 5.07 |
+| WM 8 mm | lifespan, cross-validation | 5.93 | 5.76 |
+| GM 8 mm | NKI-Rockland, cross-validation | 4.28 | 3.96 |
+| WM 8 mm | NKI-Rockland, cross-validation | 4.95 | 4.53 |
+| GM 8 mm | NKI adults, independent | 5.17 | 5.00 |
+| WM 8 mm | NKI adults, independent | 5.98 | 5.49 |
+| GM 4 mm | lifespan, cross-validation | 5.10 | 5.03 |
+| WM 4 mm | lifespan, cross-validation | 5.77 | 5.64 |
+| GM 4 mm | NKI-Rockland, cross-validation | 4.16 | 3.92 |
+| WM 4 mm | NKI-Rockland, cross-validation | 4.88 | 4.46 |
+| GM 4 mm | NKI adults, independent | 5.10 | 4.82 |
+| WM 4 mm | NKI adults, independent | 5.87 | 5.22 |
+
+- **Volumes.** Standardization lowered the error in all 12 comparisons, by 0.07 to 0.65 years, most in white matter and in the data of NKI-Rockland. The coverage of the 95% intervals changed by at most one percentage point in cross-validation. On the independent sample, the error ratio, the standard deviation of the error divided by its standard error, changed from 1.17 to 1.23 in gray matter and from 1.23 to 1.18 in white matter at 8 mm. The correlation of BrainAGE with age changed by −0.10 to +0.06.
+- **Surfaces.** In 10-fold cross-validation of NKI-Rockland, the results were mixed: standardization helped for sulc (8.67 to 7.81 years), fractal dimension (9.70 to 9.15) and area (11.04 to 10.92), hardly changed depth (10.71 to 10.68) and made thickness (5.49 to 5.68) and gyrification (9.08 to 9.23) worse.
+- **Number of components.** In gray matter at 8 mm, 100 components were best or nearly best in cross-validation with both kinds of values. On the independent sample, 200 components were more accurate than 100, with raw values (4.86 instead of 5.17 years) and with standardization (4.79 instead of 5.00). The default stays at 100.
+
+| Components | Lifespan, raw | Lifespan, standardized | NKI-Rockland, raw | NKI-Rockland, standardized | NKI adults, raw | NKI adults, standardized |
+|---|---|---|---|---|---|---|
+| 50 | 5.38 | 5.33 | 4.52 | 4.29 | 5.39 | 5.31 |
+| 100 | 5.19 | 5.07 | 4.28 | 3.96 | 5.17 | 5.00 |
+| 150 | 5.22 | 5.02 | 4.39 | 4.16 | 4.97 | 5.01 |
+| 200 | 5.25 | 5.10 | 4.42 | 4.25 | 4.86 | 4.79 |
+
+Other weights of the voxels were less useful in gray and white matter at 8 mm. Dividing by the residual standard deviation after removing age, sex and site gave errors similar to standardization. Weighting voxels by the strength of their age effect made brain age less accurate, for example 5.39 instead of 5.19 years in gray matter of the lifespan sample. In simulated data, in which the features with the largest variance carry the age signal, the raw values were better, so the advantage of standardization is a property of the image data. The other comparisons of brain age on this page, in [Evidence](#evidence) and [Boundary knots](#boundary-knots), used the raw values.
+
 ## Warp for NormBrainAGE
 
 NormBrainAGE models principal component scores with normal distributions. `--warp` can first transform every voxel $`x`$, standardized by its training mean and standard deviation, with a sinh-arcsinh warp (Jones and Pewsey, 2009),
@@ -277,7 +315,7 @@ NormBrainAGE models principal component scores with normal distributions. `--war
 w = \sinh(\delta\, \mathrm{asinh}(x) - \varepsilon).
 ```
 
-As in warped Bayesian linear regression (Fraza et al., 2021), $`\varepsilon`$ and $`\delta`$ are estimated jointly with a normal location-scale model of $`w`$, by maximizing the likelihood of $`x`$ including the Jacobian of the warp. Unlike SHASH, the warp does not depend on age. The same transformation therefore applies to all subjects before PCA, which SHASH cannot provide. In our tests, the warp did not change the accuracy of brain age, so it is off by default. The z-maps use the warp only in one case: with `--pca 0 --family normal`, the voxel-wise normal model of brain age, including the warp, is shared with the z-maps.
+As in warped Bayesian linear regression (Fraza et al., 2021), $`\varepsilon`$ and $`\delta`$ are estimated jointly with a normal location-scale model of $`w`$, by maximizing the likelihood of $`x`$ including the Jacobian of the warp. Unlike SHASH, the warp does not depend on age. The same transformation therefore applies to all subjects before PCA, which SHASH cannot provide. The warped values are standardized like raw values before the PCA. In 10-fold cross-validation of gray matter at 8 mm, the warp made brain age less accurate than standardization alone: 5.17 instead of 5.07 years in the lifespan sample and 4.22 instead of 3.96 years in NKI-Rockland. It is therefore off by default. The z-maps use the warp only in one case: with `--pca 0 --family normal`, the voxel-wise normal model of brain age, including the warp, is shared with the z-maps.
 
 ## Relation to the gamlss R package
 
