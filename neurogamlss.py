@@ -41,7 +41,8 @@ NormBrainAGE
 ------------
 Brain age is the age at which a subject's data are most likely under normative
 models of the leading principal component scores of the training data (of the whole
-brain and of each lobe, --pca 100) with their full residual correlation R:
+brain and of each lobe, --pca 100; every voxel/vertex standardized to unit variance
+unless --no-standardize) with their full residual correlation R:
 
     age_hat = argmax_a  log N(z(a); 0, R) - sum_j log sigma_j(a)
 
@@ -1665,19 +1666,23 @@ class NDMBrainAge:
               can be shared with z-maps of the normal family (VoxelModel.from_ndm).
     warp    : warp every voxel/vertex with a sinh-arcsinh function fitted jointly
               with a voxel-wise normative model (Warp) before all other steps
+    standardize : divide every voxel/vertex by its training SD before the PCA, so
+              that all enter the components with unit variance (default); with
+              False, voxels with a large variance dominate the components
     cov     : covariates of all normative models (Covariates, columns of Data.C)
     """
 
     def __init__(self, df_mu=5, df_sigma=3, pca=100, rank=20, psi_min=0.01,
                  grid_step=0.25, grid_margin=5.0, parcellation=False,
                  atlas_dir=ATLAS_DIR, warp=False, cov=None, verbose=False,
-                 mask_threshold=None):
+                 mask_threshold=None, standardize=True):
         self.df_mu, self.df_sigma = df_mu, df_sigma
         self.pca, self.rank, self.psi_min = pca, rank, psi_min
         self.grid_step, self.grid_margin = grid_step, grid_margin
         self.parcellation, self.atlas_dir = parcellation, atlas_dir
         self.warp, self.cov, self.verbose = warp, cov or Covariates(), verbose
         self.mask_threshold, self.mask_info = mask_threshold, None
+        self.standardize = standardize
         self.warper = None
 
     def _prep(self, d: Data):
@@ -1690,9 +1695,15 @@ class NDMBrainAge:
 
     def _fit_pca_part(self, d, name, cols):
         X = d.Y[:, cols]
-        keep = np.all(np.isfinite(X), axis=0) & (np.std(X, axis=0) > 0)
-        cols = cols[keep]
-        center, Vt = _pca(X[:, keep], min(self.pca, cols.size - 1))
+        sd = np.std(X, axis=0, dtype=np.float64)
+        keep = np.all(np.isfinite(X), axis=0) & (sd > 0)
+        cols, X, sd = cols[keep], X[:, keep], sd[keep]
+        n_comp = min(self.pca, cols.size - 1)
+        if self.standardize:             # PCA of the standardized voxels/vertices,
+            center, Vt = _pca(X / sd.astype(X.dtype), n_comp)
+            center, Vt = center * sd, Vt / sd        # applied to the raw data
+        else:
+            center, Vt = _pca(X, n_comp)
         part = _Part(name, cols, None, None, None, center, Vt)
         F = part.model_input(d.Y)
         part.model = self._normative(F, d)
@@ -1867,6 +1878,7 @@ class NDMBrainAge:
             df_mu=self.df_mu, df_sigma=self.df_sigma, pca=self.pca, rank=self.rank,
             psi_min=self.psi_min, grid_step=self.grid_step, grid_margin=self.grid_margin,
             parcellation=bool(self.parcellation), warp=bool(self.warp), cov=asdict(self.cov),
+            standardize=bool(self.standardize),
             mask_threshold=self.mask_threshold, mask_info=self.mask_info,
             grid=self.grid, regions=[int(r) for r in self.regions],
             region_names=list(self.region_names),
@@ -1880,6 +1892,7 @@ class NDMBrainAge:
                    s['grid_step'], s['grid_margin'], s['parcellation'], atlas_dir, s['warp'],
                    Covariates.from_state(s['cov']))
         self.mask_threshold, self.mask_info = s.get('mask_threshold'), s.get('mask_info')
+        self.standardize = bool(s.get('standardize', False))     # older models: raw values
         self.warper = None if s['warper'] is None else Warp.from_state(s['warper'])
         models = [NormativeModel.from_state(m) for m in s['normative']]
         self.parts = [_Part.from_state(p, models) for p in s['parts']]
@@ -3176,6 +3189,9 @@ def main(argv=None):
     p.add_argument('--warp', action='store_true',
                    help="warp every voxel/vertex for the brain age models (sinh-arcsinh, "
                         "fitted jointly with a voxel-wise normative model)")
+    p.add_argument('--no-standardize', action='store_true',
+                   help="NDM brain age: PCA of the raw voxel/vertex values instead of "
+                        "values standardized to unit variance (the former default)")
     p.add_argument('--family', choices=FAMILIES, default='shash',
                    help="distribution of the voxel/vertex-wise normative models: shash "
                         "(sinh-arcsinh with skewness and tail weight; default), normal "
@@ -3315,7 +3331,8 @@ def main(argv=None):
         kw = dict(df_mu=a.df_mu, df_sigma=a.df_sigma, mask_threshold=a.mask_threshold,
                   pca=a.pca, rank=a.rank,
                   psi_min=a.psi_min, grid_step=a.grid_step, grid_margin=a.grid_margin,
-                  parcellation=a.parcellation, warp=a.warp, cov=cov)
+                  parcellation=a.parcellation, warp=a.warp, standardize=not a.no_standardize,
+                  cov=cov)
         ok = _valid_train(train[0], a.age_range)
         if ok.sum() < 10:
             p.error(f"Only {int(ok.sum())} training subject(s) have a valid age (not 0 or NaN) "
