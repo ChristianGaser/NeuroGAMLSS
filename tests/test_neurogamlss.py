@@ -287,6 +287,24 @@ def test_standardized_pca_ignores_the_scale_of_voxels():
     assert loaded.standardize and np.array_equal(loaded.predict(d)['age'], a)
 
 
+def test_brainloss_measures_loss_beyond_the_brain_age():
+    d = simulate_brain(n=600)
+    hit = np.zeros(d.n, dtype=bool)
+    hit[np.random.default_rng(14).choice(d.n, 120, replace=False)] = True
+    Y = d.Y.copy()
+    Y[hit] -= 0.3                                       # less tissue, unrelated to age
+    loss = NG.Data(Y, d.age, d.male, d.site, d.name, res='8')
+    tr, te = np.arange(400), np.arange(400, 600)
+    est = NG.NDMBrainAge(df_mu=3, df_sigma=1, pca=10, mask_threshold=0, brainloss=True)
+    out = est.fit(d.subset(tr)).predict(loss.subset(te))
+    h, bl = hit[te], out['brainloss']
+    assert bl[h].mean() > bl[~h].mean() + 3 and abs(bl[~h].mean()) < 0.5
+    ba = out['age'] - d.age[te]
+    assert abs(ba[h].mean() - ba[~h].mean()) < 1         # the brain age hardly changes
+    loaded = NG.NDMBrainAge.from_state(est.get_state())
+    assert loaded.brainloss and np.array_equal(loaded.predict(loss.subset(te))['brainloss'], bl)
+
+
 def test_select_df_brainage():
     d = simulate_brain()
     dm, ds, rec = NG.select_df_brainage(d, dict(pca=10, mask_threshold=0))
@@ -455,7 +473,7 @@ def test_ages_of_zero_or_nan(tmp_path):
     assert np.isnan(NG.load_data(tr).age[:3]).all()                 # 0 and NaN are unknown
     out = str(tmp_path / 'r')
     NG.main(['--train', tr, '--test', te, '--adjust', '1:80', '--zmaps', '--pca', '10',
-             '--df-mu', '3', '--df-sigma', '2', '--no-gpr', '--out', out])
+             '--df-mu', '3', '--df-sigma', '2', '--brainloss', '--no-gpr', '--out', out])
     r = loadmat(out + '.mat', squeeze_me=True, struct_as_record=False)['NDM']
     z = loadmat(out + '_zmaps_s4rp1_8mm_TE_CAT12.9.mat', squeeze_me=True,
                 struct_as_record=False)['NDMzmap']
@@ -463,6 +481,10 @@ def test_ages_of_zero_or_nan(tmp_path):
     assert np.isnan(r.BrainAGE[bad]).all() and np.isfinite(r.PredictedAge[bad]).all()
     assert np.isfinite(np.delete(r.BrainAGE, bad)).all() and np.isnan(z.Z[bad]).all()
     assert r.ind_control.size == 77 and not np.isin(bad, r.ind_control - 1).any()   # 3 of 1:80 unknown
+    assert np.isfinite(r.BrainLOSS).all()                # at the brain age: also without age
+    assert abs(np.mean(r.BrainLOSS[r.ind_control - 1])) < 1e-9   # standardized with controls
+    with pytest.raises(SystemExit):                      # BrainLOSS needs brain age models
+        NG.main(['--normative-only', '--brainloss', '--train', tr, '--save-model', out + '.npz'])
 
 
 def test_samples_without_valid_ages(tmp_path):
