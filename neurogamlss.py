@@ -55,9 +55,13 @@ accurate), and with --family normal the voxel-wise model is shared with the z-ma
 The estimate comes with a standard error (Laplace approximation), regional brain
 ages for the lobes (--parcellation) and a non-aging deviation, the Mahalanobis
 distance of the z-scores at the brain age (NDM.Deviation; at chronological age:
-NDM.Deviation_age).  Several models (tissue, resolution, smoothing, surface
-measure) are combined by a weighted average with weights that sum to one.  For a
-new site, its control subjects (--adjust) correct the estimates (--correction).
+NDM.Deviation_age).  --brainloss adds BrainLOSS (Loss Of Substance beyond
+Senescence), the tissue loss that the brain age does not explain: minus the
+z-score of the mean of the whole brain and of each lobe at the brain age, from a
+normal normative model of these means.  Several models (tissue, resolution,
+smoothing, surface measure) are combined by a weighted average with weights that
+sum to one.  For a new site, its control subjects (--adjust) correct the
+estimates (--correction).
 A Python replica of the GPR BrainAGE (BA_gpr.m) is run for comparison when the
 training data are given.
 
@@ -1669,20 +1673,24 @@ class NDMBrainAge:
     standardize : divide every voxel/vertex by its training SD before the PCA, so
               that all enter the components with unit variance (default); with
               False, voxels with a large variance dominate the components
+    brainloss : also fit a normal normative model of the mean of every part (whole
+              brain and regions, raw values) for BrainLOSS, the tissue loss beyond
+              the brain age (predict); its df are chosen as for the z-map models
     cov     : covariates of all normative models (Covariates, columns of Data.C)
     """
 
     def __init__(self, df_mu=5, df_sigma=3, pca=100, rank=20, psi_min=0.01,
                  grid_step=0.25, grid_margin=5.0, parcellation=False,
                  atlas_dir=ATLAS_DIR, warp=False, cov=None, verbose=False,
-                 mask_threshold=None, standardize=True):
+                 mask_threshold=None, standardize=True, brainloss=False):
         self.df_mu, self.df_sigma = df_mu, df_sigma
         self.pca, self.rank, self.psi_min = pca, rank, psi_min
         self.grid_step, self.grid_margin = grid_step, grid_margin
         self.parcellation, self.atlas_dir = parcellation, atlas_dir
         self.warp, self.cov, self.verbose = warp, cov or Covariates(), verbose
         self.mask_threshold, self.mask_info = mask_threshold, None
-        self.standardize = standardize
+        self.standardize, self.brainloss = standardize, brainloss
+        self.loss_model = self.loss_record = None
         self.warper = None
 
     def _prep(self, d: Data):
@@ -1717,6 +1725,7 @@ class NDMBrainAge:
         mask, self.mask_info = feature_mask(d, self.mask_threshold)
         if mask.sum() < 2:
             raise ValueError(f"{d.name}: fewer than 2 voxels/vertices pass the mask.")
+        raw = d                            # BrainLOSS uses the values before the warp
         if self.warp:
             self.warper = Warp(self.df_mu, self.df_sigma, cov=self.cov).fit(
                 d.Y, d.age, d.male, d.site, self.verbose, C=d.C, mask=mask)
@@ -1747,11 +1756,36 @@ class NDMBrainAge:
             if r is not None:
                 self.regions.append(r)
                 self.region_names.append(nm)
+        if self.brainloss:
+            self._fit_loss(raw)
 
         lo = max(d.age.min() - self.grid_margin, 0.0)
         self.grid = np.arange(lo, d.age.max() + self.grid_margin + self.grid_step / 2,
                               self.grid_step)
         return self
+
+    def _part_means(self, Y):
+        """Mean of the voxels/vertices of every part (n, n_parts)."""
+        return np.column_stack([np.mean(Y[:, part.cols], axis=1, dtype=np.float64)
+                                for part in self.parts])
+
+    def _fit_loss(self, d):
+        """Normal normative model of the part means of the training data d for
+        BrainLOSS, with df chosen by cross-validation as for the z-map models."""
+        M = self._part_means(d.Y)
+        dm, ds, self.loss_record = select_df_normative(replace(d, Y=M.astype(np.float32)),
+                                                       self.cov, mask_threshold=0)
+        self.loss_model = NormativeModel(dm, ds, self.cov).fit(M, d.age, d.male, d.site,
+                                                               C=d.C)
+
+    def _loss(self, d, age):
+        """BrainLOSS of every part (n, n_parts): minus the normal score of the part
+        mean at the given ages, the subjects' brain ages; positive values mean less
+        tissue than expected at that age."""
+        L = np.full((d.n, len(self.parts)), np.nan)
+        L[:, self.loss_model.valid] = -self.loss_model.zscores(self._part_means(d.Y), age,
+                                                               d.male, C=d.C)
+        return L
 
     def with_df(self, d, df_mu, df_sigma, inputs=None):
         """Copy with the normative models and residual correlations refitted to the
@@ -1844,7 +1878,11 @@ class NDMBrainAge:
                         of the subject's z-scores at its brain age, i.e. the
                         atypicality that an older or younger brain does not explain
         'deviation_age' the same at chronological age (total deviation)
+        'brainloss'     with a BrainLOSS model: tissue loss beyond the brain age, minus
+                        the normal score of the mean of every part at the global brain
+                        age (positive: less tissue than expected at that age)
         """
+        raw = d
         d = self._prep(d)
         n, n_parts = d.n, len(self.parts)
         res = {k: np.full((n, n_parts), np.nan) for k in ('age', 'sd', 'deviation', 'deviation_age')}
@@ -1869,6 +1907,9 @@ class NDMBrainAge:
         out = {key: v[:, 0] for key, v in res.items()}
         out['regional'] = res['age'][:, 1:]
         out.update({f'regional_{key}': res[key][:, 1:] for key in ('sd', 'deviation', 'deviation_age')})
+        if self.loss_model is not None:
+            L = self._loss(raw, out['age'])
+            out['brainloss'], out['regional_brainloss'] = L[:, 0], L[:, 1:]
         return out
 
     def get_state(self):
@@ -1878,7 +1919,8 @@ class NDMBrainAge:
             df_mu=self.df_mu, df_sigma=self.df_sigma, pca=self.pca, rank=self.rank,
             psi_min=self.psi_min, grid_step=self.grid_step, grid_margin=self.grid_margin,
             parcellation=bool(self.parcellation), warp=bool(self.warp), cov=asdict(self.cov),
-            standardize=bool(self.standardize),
+            standardize=bool(self.standardize), brainloss=bool(self.brainloss),
+            loss_model=None if self.loss_model is None else self.loss_model.get_state(),
             mask_threshold=self.mask_threshold, mask_info=self.mask_info,
             grid=self.grid, regions=[int(r) for r in self.regions],
             region_names=list(self.region_names),
@@ -1893,6 +1935,9 @@ class NDMBrainAge:
                    Covariates.from_state(s['cov']))
         self.mask_threshold, self.mask_info = s.get('mask_threshold'), s.get('mask_info')
         self.standardize = bool(s.get('standardize', False))     # older models: raw values
+        self.brainloss = bool(s.get('brainloss', False))
+        loss = s.get('loss_model')
+        self.loss_model = None if loss is None else NormativeModel.from_state(loss)
         self.warper = None if s['warper'] is None else Warp.from_state(s['warper'])
         models = [NormativeModel.from_state(m) for m in s['normative']]
         self.parts = [_Part.from_state(p, models) for p in s['parts']]
@@ -2111,7 +2156,7 @@ def select_df_brainage(d, kw, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS, seed=
         return int(df_mu), int(df_sigma), dict(df_mu=int(df_mu), df_sigma=int(df_sigma),
                                                 selected=False)
     base = {key: v for key, v in kw.items() if key not in ('df_mu', 'df_sigma', 'verbose')}
-    base.update(parcellation=False, warp=False)
+    base.update(parcellation=False, warp=False, brainloss=False)
     fold = _df_folds(d, k, seed)
     folds = []
     for f in range(k):
@@ -2764,14 +2809,16 @@ def cross_validate(datas, kfold=10, seed=0, age_range=(0, np.inf), gpr=True,
             t0 = time.time()
             est = NDMBrainAge(**kd).fit(d.subset(tr))
             out = est.predict(d.subset(te))
-            for key in ('age', 'sd', 'at_bound', 'deviation', 'deviation_age'):
-                r[key][te] = out[key]
-            if r['regional'] is None:
-                for key in ('regional', 'regional_deviation', 'regional_deviation_age'):
-                    r[key] = np.full((n, len(est.regions)), np.nan)
-                r['regions'], r['region_names'] = est.regions, est.region_names
-            for key in ('regional', 'regional_deviation', 'regional_deviation_age'):
-                r[key][te] = out[key]
+            for key in ('age', 'sd', 'at_bound', 'deviation', 'deviation_age', 'brainloss'):
+                if key in out:
+                    r.setdefault(key, np.full(n, np.nan))[te] = out[key]
+            for key in ('regional', 'regional_deviation', 'regional_deviation_age',
+                        'regional_brainloss'):
+                if key in out:
+                    if r.get(key) is None:
+                        r[key] = np.full((n, len(est.regions)), np.nan)
+                    r[key][te] = out[key]
+            r['regions'], r['region_names'] = est.regions, est.region_names
             if gpr:
                 r['gpr'][te] = gpr_baseline(d.Y[tr], d.age[tr], d.Y[te])
             print(f"  {d.name}: {time.time() - t0:.1f}s", flush=True)
@@ -2803,6 +2850,9 @@ def fit_models(train, kw, brainage=True, voxel=False, vkw=None):
             dm, ds, info['df_brain_age'] = _resolve_df(d, kw, 'brainage')
             est = NDMBrainAge(**dict(kw, df_mu=dm, df_sigma=ds)).fit(d)
             dfs.append(f"brain age {dm}/{ds}")
+            if est.loss_model is not None:
+                info['df_brainloss'] = est.loss_record
+                dfs.append(f"BrainLOSS {est.loss_model.df_mu}/{est.loss_model.df_sigma}")
         if voxel:
             if est is not None and not est.pca and vkw['family'] == 'normal':
                 vm = VoxelModel.from_ndm(est)
@@ -2918,6 +2968,11 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
                  offset=np.nanmedian(out['age'][ctrl] - age[ctrl]) if ctrl.size else np.nan)
         for key in ('deviation', 'deviation_age', 'regional_deviation', 'regional_deviation_age'):
             r[key] = out[key]
+        if 'brainloss' in out:
+            L = np.column_stack([out['brainloss'], out['regional_brainloss']])
+            if zc is not None:             # standardized with the controls of the test site
+                L = (L - np.nanmean(L[zc], axis=0)) / np.nanstd(L[zc], axis=0, ddof=1)
+            r['brainloss'], r['regional_brainloss'] = L[:, 0], L[:, 1:]
         if gpr:
             r['gpr'] = gpr_baseline(train[i].Y, train[i].age, dte.Y)
             r['gpr_ba'] = correct_age(r['gpr'], age, ctrl, gpr_post) - age
@@ -3062,11 +3117,17 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
     if known:
         print(f"\nNon-aging deviation (normal score, ensemble) in controls: "
               f"mean {np.mean(dev[ctrl]):+.2f}, SD {np.std(dev[ctrl]):.2f}")
+    # tissue loss beyond the brain age (normal scores); the ensemble is the mean over models
+    loss = all('brainloss' in r for r in res)
+    if loss:
+        out['BrainLOSS'] = np.column_stack([r['brainloss'] for r in res])
+        out['BrainLOSS_ensemble'] = np.mean(out['BrainLOSS'], axis=1)
     if e['regions']:
         n_reg, n_mod = len(e['regions']), len(res)
         R = np.full((len(age), n_reg, n_mod), np.nan)
         Dr = {key: np.full((len(age), n_reg, n_mod), np.nan)
-              for key in ('regional_deviation', 'regional_deviation_age')}
+              for key in ('regional_deviation', 'regional_deviation_age')
+              + (('regional_brainloss',) if loss else ())}
         for m, r in enumerate(res):
             for j, rid in enumerate(e['regions']):
                 if rid in r['regions']:
@@ -3079,6 +3140,9 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
         out['Deviation_age_regional'] = Dr['regional_deviation_age']
         with np.errstate(all='ignore'):
             out['Deviation_regional_ensemble'] = np.nanmean(Dr['regional_deviation'], axis=2)
+            if loss:
+                out['BrainLOSS_regional'] = Dr['regional_brainloss']
+                out['BrainLOSS_regional_ensemble'] = np.nanmean(Dr['regional_brainloss'], axis=2)
     if gpr:
         out['PredictedAge_GPR'] = np.column_stack([r['gpr'] for r in res])
         out['BrainAGE_GPR'] = np.column_stack([r['gpr_ba'] for r in res])
@@ -3120,14 +3184,19 @@ def save_results(out, prefix):
         return
     savemat(prefix + '.mat', {'NDM': out}, do_compression=True)
     cols = ['age', 'male', 'BrainAGE_ensemble', 'Deviation_ensemble', 'Deviation_age_ensemble']
+    loss = 'BrainLOSS' in out
+    if loss:
+        cols.append('BrainLOSS_ensemble')
     if 'BrainAGE_GPR_ensemble' in out:
         cols.append('BrainAGE_GPR_ensemble')
     with open(prefix + '.csv', 'w') as f:
         f.write(','.join(['subject'] + cols + [f'BrainAGE_{m}' for m in names]
-                         + [f'SD_{m}' for m in names] + [f'Deviation_{m}' for m in names]) + '\n')
+                         + [f'SD_{m}' for m in names] + [f'Deviation_{m}' for m in names]
+                         + ([f'BrainLOSS_{m}' for m in names] if loss else [])) + '\n')
         for i in range(len(out['age'])):
             vals = ([out[c][i] for c in cols] + list(out['BrainAGE'][i])
-                    + list(out['PredictedAge_sd'][i]) + list(out['Deviation'][i]))
+                    + list(out['PredictedAge_sd'][i]) + list(out['Deviation'][i])
+                    + (list(out['BrainLOSS'][i]) if loss else []))
             f.write(','.join([str(i + 1)] + [f'{v:.4f}' for v in vals]) + '\n')
     print(f"\nSaved {prefix}.mat and {prefix}.csv" + (f" and {zfiles}" if zm else ''))
 
@@ -3192,6 +3261,13 @@ def main(argv=None):
     p.add_argument('--no-standardize', action='store_true',
                    help="NDM brain age: PCA of the raw voxel/vertex values instead of "
                         "values standardized to unit variance (the former default)")
+    p.add_argument('--brainloss', action='store_true',
+                   help="NDM brain age: also estimate BrainLOSS (Loss Of Substance beyond "
+                        "Senescence), the tissue loss that the brain age does not explain: "
+                        "minus the normal score of the mean of the whole brain (and, with "
+                        "--parcellation, of each lobe) at the subject's brain age, "
+                        "standardized with the --adjust controls (positive: less tissue "
+                        "than expected)")
     p.add_argument('--family', choices=FAMILIES, default='shash',
                    help="distribution of the voxel/vertex-wise normative models: shash "
                         "(sinh-arcsinh with skewness and tail weight; default), normal "
@@ -3283,6 +3359,8 @@ def main(argv=None):
             p.error("--normative-only needs --test and/or --save-model.")
         if a.correction == 'agefree':
             p.error("--correction agefree needs brain age models (not with --normative-only).")
+        if a.brainloss:
+            p.error("--brainloss needs brain age models (not with --normative-only).")
     elif not (a.test or a.save_model or kfold):
         p.error("nothing to do: --kfold 0 without --test or --save-model.")
     if a.diagnostics and not (a.train and voxel):
@@ -3332,7 +3410,7 @@ def main(argv=None):
                   pca=a.pca, rank=a.rank,
                   psi_min=a.psi_min, grid_step=a.grid_step, grid_margin=a.grid_margin,
                   parcellation=a.parcellation, warp=a.warp, standardize=not a.no_standardize,
-                  cov=cov)
+                  brainloss=a.brainloss, cov=cov)
         ok = _valid_train(train[0], a.age_range)
         if ok.sum() < 10:
             p.error(f"Only {int(ok.sum())} training subject(s) have a valid age (not 0 or NaN) "
@@ -3377,6 +3455,8 @@ def main(argv=None):
             p.error(f"--test needs one file per saved model ({len(sets)}).")
         if brainage and any(s.brainage is None for s in sets):
             p.error(f"{a.model} contains no brain age models; use --normative-only.")
+        if a.brainloss and any(s.brainage.loss_model is None for s in sets):
+            p.error(f"{a.model} contains no BrainLOSS models: fit them with --brainloss.")
         if voxel and any(s.voxel is None for s in sets):
             p.error(f"{a.model} contains no voxel/vertex-wise normative models (they are "
                     "saved with --zmaps or --normative-only).")
