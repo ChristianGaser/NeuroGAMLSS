@@ -41,6 +41,7 @@ The module is organized in sections, in this order.
    - **Pipeline per part.** Standardized voxels → PCA (`_pca`, via the Gram matrix) → normal `NormativeModel` of the scores → `ResidualCorrelation` R → log-likelihood on an age grid (`_loglik_grid`) → maximum with Laplace SE (`_argmax_refine`).
    - **`pca=0`.** It fits every voxel with a low-rank R. With the normal family, `VoxelModel.from_ndm` shares this model with the z-maps.
    - **`Warp`.** An optional sinh-arcsinh transform applied before the PCA.
+   - **BrainLOSS.** With `brainloss=True` (`--brainloss`), `_fit_loss` fits a normal `NormativeModel` of the mean of every part. `_loss` evaluates it at the global brain age, and `apply_models` standardizes the result with the controls.
 4. **`VoxelModel`.** The z-maps: normal scores of voxel-wise models, SHASH by default.
 5. **Choice of the df.** Spline df of μ and σ are chosen once per training sample by cross-validation and stored with the models. `select_df_normative` uses the held-out likelihood of normal models on 1,000 random voxels. `select_df_brainage` uses the MAE of the held-out brain age. Both search `DF_GRID_*` with `_search_df`.
 6. **Diagnostics.** Q statistics and worm plots by age group (`run_diagnostics`).

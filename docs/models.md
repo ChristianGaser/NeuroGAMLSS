@@ -317,6 +317,41 @@ w = \sinh(\delta\, \mathrm{asinh}(x) - \varepsilon).
 
 As in warped Bayesian linear regression (Fraza et al., 2021), $`\varepsilon`$ and $`\delta`$ are estimated jointly with a normal location-scale model of $`w`$, by maximizing the likelihood of $`x`$ including the Jacobian of the warp. Unlike SHASH, the warp does not depend on age. The same transformation therefore applies to all subjects before PCA, which SHASH cannot provide. The warped values are standardized like raw values before the PCA. In 10-fold cross-validation of gray matter at 8 mm, the warp made brain age less accurate than standardization alone: 5.17 instead of 5.07 years in the lifespan sample and 4.22 instead of 3.96 years in NKI-Rockland. It is therefore off by default. The z-maps use the warp only in one case: with `--pca 0 --family normal`, the voxel-wise normal model of brain age, including the warp, is shared with the z-maps.
 
+## BrainLOSS
+
+BrainLOSS, for Loss Of Substance beyond Senescence, is the tissue loss that the brain age does not explain (`--brainloss`). For every part $`p`$ of NormBrainAGE, the whole brain and, with `--parcellation`, each lobe, the mean $`\bar y_p`$ of its voxels or vertices, in the units of the data, follows a normal normative model as in [Model](#model),
+
+```math
+\bar y_p \sim \mathcal{N}(\mu_p(a, s, c, \mathbf{x}),\ \sigma_p^2(a, s, \mathbf{x})).
+```
+
+Its df are chosen by cross-validation of the held-out likelihood, as for the z-maps. BrainLOSS is minus the normal score at the subject's brain age $`\hat a`$ of the whole brain, at the reference site,
+
+```math
+\mathrm{BrainLOSS}_p = -\frac{\bar y_p - \mu_p(\hat a)}{\sigma_p(\hat a)} .
+```
+
+With controls (`--adjust`), BrainLOSS is standardized to mean 0 and standard deviation 1 in the controls. Positive values mean less tissue than expected at the brain age.
+
+- **Why at the brain age.** At chronological age, a tissue deficit mixes an older-looking brain with loss of other kinds. At the brain age, the part that the aging pattern explains is removed, so BrainLOSS is nearly uncorrelated with BrainAGE.
+- **Why signed.** The non-aging deviation of NormBrainAGE is a Mahalanobis distance over all components. It counts atypicality in every direction, including more tissue than expected, so a loss that is specific to a disease is diluted. BrainLOSS measures one direction, less tissue.
+- **Weights of the voxels.** The mean weights all voxels equally in the units of the data. In a voxel-wise version of the measure, the mean of the residuals separated pMCI from sMCI in gray matter (see below) at least as well as the mean of the z-scores (AUC 0.63 against 0.62) and better than a mean weighted by the inverse variance (0.60).
+
+The evidence comes from ADNI, with CAT12 r1840 data of 835 subjects and models trained on the lifespan sample processed with the same version. 130 patients with mild cognitive impairment who converted to Alzheimer's disease within 36 months (pMCI) were compared with 128 who stayed stable (sMCI), and 128 patients with Alzheimer's disease with 112 stable controls, who also served as the controls of the test site. The groups follow the diagnoses at baseline and after 12, 24 and 36 months. Areas under the ROC curve at 8 mm, with 95% bootstrap intervals and the default correction:
+
+| Measure | pMCI vs sMCI, GM | pMCI vs sMCI, WM | AD vs controls, GM | AD vs controls, WM |
+|---|---|---|---|---|
+| BrainAGE | 0.72 [0.66, 0.78] | 0.66 [0.59, 0.72] | 0.83 [0.78, 0.88] | 0.74 [0.68, 0.80] |
+| Non-aging deviation | 0.50 [0.42, 0.57] | 0.49 [0.42, 0.57] | 0.58 [0.51, 0.66] | 0.61 [0.54, 0.68] |
+| BrainLOSS, whole brain | 0.60 [0.53, 0.67] | 0.48 [0.41, 0.55] | 0.70 [0.63, 0.76] | 0.55 [0.48, 0.62] |
+| BrainLOSS, temporal lobes | 0.66 [0.59, 0.72] | 0.52 [0.45, 0.59] | 0.81 [0.75, 0.86] | 0.64 [0.57, 0.71] |
+
+- **Gray matter.** BrainLOSS separated the groups, most in the temporal lobes (the mean of the left and right lobe). In the patients with MCI, it was almost uncorrelated with BrainAGE: the Spearman correlation was −0.01 for the whole brain and 0.14 for the temporal lobes.
+- **White matter.** BrainLOSS carried no information about conversion.
+- **Added to BrainAGE.** In cross-validated logistic regression, BrainAGE of gray matter reached 0.716. With BrainLOSS of the whole brain, it reached 0.729, and with that of the temporal lobes 0.742. The bootstrap intervals of the gains, −0.018 to +0.044 and −0.012 to +0.064, include zero, so a larger sample has to confirm them.
+- **Flexibility.** Cross-validation chose 3 df for $`\mu_p`$ in gray matter. With 2 df, which it rated almost equally, BrainLOSS of the whole brain reached 0.63.
+- **Non-aging deviation.** It hardly separated pMCI from sMCI, also with the models adapted to the site (`--correction adapt`, 0.53), with raw or noise-weighted values before the PCA, or with fewer components.
+
 ## Relation to the gamlss R package
 
 NeuroGAMLSS takes from gamlss and gamlss.dist the SHASHo2 and GG families, the RS algorithm, step halving, the squared-score approximation and the Q statistics and worm plots. It differs in four ways:
