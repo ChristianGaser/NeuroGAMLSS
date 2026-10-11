@@ -13,7 +13,7 @@ NeuroGAMLSS fits a generalized additive model for location, scale and shape (GAM
 - **Sites and covariates:** sites enter as fixed effects, and new sites are adapted with their control subjects. Covariates such as image quality measures can enter the mean and the standard deviation.
 - **Diagnostics:** Q statistics and worm plots by age group show how well the models fit.
 - **Saved models:** fitted models are stored as `.mat` or `.npz` files with a JSON description, so new data can be scored without the training data.
-- **NormBrainAGE:** maximum-likelihood brain age with a standard error, regional brain ages for the brain lobes and a deviation score that aging does not explain.
+- **NormBrainAGE:** maximum-likelihood brain age with a standard error, regional brain ages for the brain lobes and a deviation score that aging does not explain. With `--brainloss`, also BrainLOSS, the tissue loss that the brain age does not explain.
 
 The statistical details are in [docs/models.md](docs/models.md). A draft methods section for NormBrainAGE is in [NDM_methods.md](NDM_methods.md).
 
@@ -88,6 +88,14 @@ The surface files of `BA_data2mat.m` already leave out the medial wall through t
 The mask is fixed when the models are fitted and stored with them. Z-maps and brain age use the same mask. Masked voxels and vertices are NaN in the z-maps and left out of brain age. Low values of single test subjects are data and are not masked.
 
 ## Quick start
+
+NeuroGAMLSS computes three kinds of results:
+
+| Result | What it measures | Option |
+|---|---|---|
+| z-maps | deviation of every voxel or vertex from the normative models at chronological age | `--normative-only` (z-maps only) or `--zmaps` (together with brain age) |
+| BrainAGE | global, age-related: brain age minus chronological age | default |
+| BrainLOSS | global, not age-related: tissue loss that the brain age does not explain | `--brainloss` (together with brain age) |
 
 ### Normative models and z-maps
 
@@ -201,11 +209,14 @@ NormBrainAGE standardizes every voxel or vertex of the training data to unit var
 - **BrainAGE,** the difference between brain age and chronological age, with a standard error from the curvature of the likelihood.
 - **Regional BrainAGE** for the lobes with `--parcellation`.
 - **A non-aging deviation,** the normal score of the Mahalanobis distance of the subject's z-scores at its brain age. It measures the atypicality that an older or younger brain does not explain.
+- **BrainLOSS** with `--brainloss`, for Loss Of Substance beyond Senescence. It is the tissue loss that the brain age does not explain: the normal score of the mean of the whole brain, and with `--parcellation` of each lobe, below its normative value at the subject's brain age. Positive values mean less tissue than expected. With `--adjust`, it is standardized with the controls.
 - **An ensemble** of all models, weighted by generalized least squares (`--ensemble`).
 
 PCA is used only for brain age. The voxel-wise normative models of the z-maps never use it. `--pca 0` fits brain age to every voxel with a low-rank residual correlation instead. This is less accurate and gives standard errors that are too small.
 
 **Standardization.** Without it, the voxels with the largest variance, for example at tissue borders, dominate the principal components, whether or not their variance relates to age. Standardization lowered the mean absolute error of brain age in all 12 comparisons of gray and white matter at 4 and 8 mm, by 0.07 to 0.65 years, in cross-validation and on an independent sample. For surface measures, the results were mixed: it helped for sulc, fractal dimension and area, but made thickness and gyrification slightly worse. `--no-standardize` uses the raw values, as earlier versions did. Details are in [docs/models.md](docs/models.md#principal-components-for-normbrainage).
+
+**BrainLOSS.** BrainLOSS is signed and nearly uncorrelated with BrainAGE, so it adds information that an older-looking brain does not carry. In ADNI, it separated MCI patients who converted to Alzheimer's disease within three years from stable ones with an area under the curve of 0.60 for gray matter of the whole brain and 0.66 for the temporal lobes, against 0.50 for the non-aging deviation and 0.72 for BrainAGE. Together with BrainAGE, the temporal lobes raised it from 0.72 to 0.74, a gain that was not significant in 258 patients. White matter carried no such information. Details are in [docs/models.md](docs/models.md#brainloss).
 
 `--warp` transforms every voxel with a sinh-arcsinh function before PCA. Unlike SHASH, the warp does not depend on age, so it can be applied before PCA. In our tests, it made brain age less accurate than standardization alone, so it is off by default.
 
@@ -215,7 +226,7 @@ When the training data are given, a Python replica of the GPR BrainAGE of the Br
 
 `--save-model` writes the fitted models to a `.npz` file (NumPy) or a `.mat` file (MATLAB struct `NDMmodel`). Neither format runs code when it is loaded. A JSON file with the same name describes the models. It records the settings, the training sample with its age range and sites, and the covariates. For every model, it also records the feature space, the mask with its threshold and the number of voxels or vertices used, and the chosen df with the scores of the cross-validation.
 
-`--model` applies a saved file to `--test` data instead of fitting new models. NeuroGAMLSS stops with an error if the test data do not match the models: surface instead of volume data or the reverse, or a different number of voxels or vertices, resolution, volume dimensions or vertex indices. It also stops if the models use sex or covariates that the test data lack. It reports test subjects outside the training age range or covariate range, where the models extrapolate linearly.
+`--model` applies a saved file to `--test` data instead of fitting new models. NeuroGAMLSS stops with an error if the test data do not match the models: surface instead of volume data or the reverse, or a different number of voxels or vertices, resolution, volume dimensions or vertex indices. It also stops if the models use sex or covariates that the test data lack. It reports test subjects outside the training age range or covariate range, where the models extrapolate linearly. Models saved with `--brainloss` report BrainLOSS whenever they are applied.
 
 ## Outputs
 
@@ -225,7 +236,7 @@ When the training data are given, a Python replica of the GPR BrainAGE of the Br
 |---|---|
 | `<out>_zmaps_<model>.mat` | struct `NDMzmap`: `Z` (subjects × features), `converged`, `family`, `df_mu`, `df_sigma`, `mask_threshold`, `age`, `male`, `model`, `ind`, and with `--parcellation` `regional_z`, `regions`, `region_names` |
 | `<out>.csv` | normative models only: mean z of each lobe for every subject (with `--parcellation`) |
-| `<out>.mat`, `<out>.csv` | brain age: struct `NDM`, including the df and the mask threshold of every model in `df_mu`, `df_sigma` and `mask_threshold`, and a table with BrainAGE, standard errors and deviations of every model and of the ensemble |
+| `<out>.mat`, `<out>.csv` | brain age: struct `NDM`, including the df and the mask threshold of every model in `df_mu`, `df_sigma` and `mask_threshold`, and a table with BrainAGE, standard errors, deviations and, with `--brainloss`, BrainLOSS of every model and of the ensemble |
 | `<out>_diagnostics.csv` | summary of the diagnostics for every model |
 | `<out>_diagnostics_<model>.mat` | struct `NDMdiag`: `Q`, `p_Q` and `df_Q` (4 × features: mean, variance, skewness, kurtosis), `converged`, `age_groups`, `family`, `model`, `df_mu`, `df_sigma`, `mask_threshold` |
 | `<out>_wormplot_<model>.png` | worm plots |
@@ -258,6 +269,7 @@ When the training data are given, a Python replica of the GPR BrainAGE of the Br
 | `--cov-mean`, `--cov-sd`, `--cov-df` | all, none, 1 | covariates in the mean and in the log SD, and their spline degrees of freedom |
 | `--parcellation` | off | lobe-wise brain age and lobe-wise mean z |
 | `--pca` | 100 | NormBrainAGE only: principal components per model and region, 0 for every voxel |
+| `--brainloss` | off | NormBrainAGE only: also BrainLOSS, the tissue loss that the brain age does not explain |
 | `--warp` | off | NormBrainAGE only: sinh-arcsinh warp of every voxel before PCA |
 | `--no-standardize` | off | NormBrainAGE only: PCA of the raw values instead of voxels or vertices standardized to unit variance |
 | `--kfold` | 10 | folds of the cross-validation without `--test`, 0 with `--save-model` |
