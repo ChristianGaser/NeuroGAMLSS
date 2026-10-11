@@ -272,6 +272,21 @@ def test_with_df_equals_a_new_fit():
     assert np.allclose(a['age'], b['age']) and np.allclose(a['sd'], b['sd'], equal_nan=True)
 
 
+def test_standardized_pca_ignores_the_scale_of_voxels():
+    d = simulate_brain()
+    scaled = NG.Data((d.Y * np.geomspace(0.1, 10, d.Y.shape[1])).astype(np.float32), d.age,
+                     d.male, d.site, d.name, res='8')
+    kw = dict(df_mu=3, df_sigma=1, pca=10, mask_threshold=0)
+    est = NG.NDMBrainAge(**kw).fit(d)
+    a = est.predict(d)['age']
+    assert np.allclose(NG.NDMBrainAge(**kw).fit(scaled).predict(scaled)['age'], a, atol=1e-3)
+    raw = NG.NDMBrainAge(standardize=False, **kw)
+    b = raw.fit(d).predict(d)['age']
+    assert np.max(np.abs(raw.fit(scaled).predict(scaled)['age'] - b)) > 0.01
+    loaded = NG.NDMBrainAge.from_state(est.get_state())
+    assert loaded.standardize and np.array_equal(loaded.predict(d)['age'], a)
+
+
 def test_select_df_brainage():
     d = simulate_brain()
     dm, ds, rec = NG.select_df_brainage(d, dict(pca=10, mask_threshold=0))
