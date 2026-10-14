@@ -214,7 +214,7 @@ python neurogamlss.py --normative-only --model A_norm.npz --test B.mat --adjust 
     --test-nuisance B_iqm.csv --nuisance-cols ICR,NCR,res_ECR,contrastr --out B
 ```
 
-**Image quality measures.** As covariates of the normative models, IQMs improved the fit within the training sample and the brain age of other samples. They made the z-maps of other samples less reproducible, because their effects are learned from the quality differences of the training sample. Effects estimated within the test sample (`--test-nuisance`) worked better for z-maps if the test sample has enough subjects. Composite ratings such as the IQR add nothing to their components. See [Sites and image quality](docs/models.md#sites-and-image-quality).
+**Image quality measures.** As covariates of the normative models, IQMs improved the fit within the training sample and the brain age of other samples. They made the z-maps of other samples less reproducible, because their effects are learned from the quality differences of the training sample. Effects estimated within the test sample (`--test-nuisance`) worked better for z-maps if the test sample has enough subjects. Harmonizing the test data with ComCat looked better still on the harmonized scans themselves, partly because it shrinks all deviations, but it carried over less well to new subjects. Composite ratings such as the IQR add nothing to their components. See [Sites and image quality](docs/models.md#sites-and-image-quality).
 
 ## NormBrainAGE
 
