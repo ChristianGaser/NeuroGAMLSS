@@ -22,7 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 mat73 = ["h5py>=3.0"]          # MATLAB v7.3 input files
-surface = ["nibabel>=3.0"]     # lobe atlas of surface data (--parcellation)
+surface = ["nibabel>=3.0"]     # lobe atlas of surface data (--parcellation), mat2image.py
 plots = ["matplotlib>=3.3"]    # worm plots (--diagnostics)
 all = ["h5py>=3.0", "nibabel>=3.0", "matplotlib>=3.3"]
 test = ["pytest>=7"]
@@ -33,9 +33,10 @@ Issues = "https://github.com/ChristianGaser/NeuroGAMLSS/issues"
 
 [project.scripts]
 neurogamlss = "neurogamlss:main"
+neurogamlss-mat2image = "mat2image:main"
 
 [tool.setuptools]
-py-modules = ["neurogamlss"]
+py-modules = ["neurogamlss", "mat2image"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
