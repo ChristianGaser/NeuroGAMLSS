@@ -378,7 +378,13 @@ def run_testonly(args):
                         Y[app] = correct(method, d, Q, several, est, app, rd)
                     te.append(NG.replace(d, Y=Y))
                 P = NG.apply_models(sets, te, None, 'none', 'mean', gpr=False)['PredictedAge']
-                Z = zset.voxel.zmaps(te[zi])['Z'][:, m.valid].astype(np.float64)
+                if method == 'comcat':
+                    Z = zset.voxel.zmaps(te[zi])['Z'][:, m.valid].astype(np.float64)
+                else:                     # --test-nuisance: z-maps corrected on the z scale
+                    Z = np.empty_like(Z0)
+                    for est, app in parts:
+                        nz = dict(values=Q, ctrl=est, names=list(iqms))
+                        Z[app] = zset.voxel.zmaps(ds[zi], nuisance=nz)['Z'][app][:, m.valid]
                 rows.append(test_row(f'{name}_{mode}', t, P, age, Z, subject, motion,
                                      args.models))
                 print(f"{t} {name} {mode}: {time.time() - t0:.0f}s", flush=True)

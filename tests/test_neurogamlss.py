@@ -578,11 +578,15 @@ def test_command_line_test_nuisance(tmp_path):
         z = loadmat(out + '_zmaps_s4rp1_8mm_TE_CAT12.9.mat', squeeze_me=True,
                     struct_as_record=False)['NDMzmap']
         mean_z.append(np.nanmean(z.Z, axis=1))
-    assert str(z.nuisance) == 'IQR'
+    assert str(z.nuisance) == 'IQR' and 0 < z.nuisance_explained < 1
     ctrl = ~patient
     assert np.corrcoef(mean_z[0][ctrl], q[ctrl, 0])[0, 1] < -0.5
     assert abs(np.corrcoef(mean_z[1][ctrl], q[ctrl, 0])[0, 1]) < 0.1
     assert mean_z[1][patient].mean() < -1                      # the disease effect remains
+    NG.main(base[3:] + ['--zmaps', '--pca', '5', '--no-gpr', '--test-nuisance', table,
+                        '--nuisance-cols', 'IQR'])            # brain age and z-maps
+    r = loadmat(out + '.mat', squeeze_me=True, struct_as_record=False)['NDM']
+    assert str(r.nuisance) == 'IQR' and 0 < float(r.nuisance_explained) < 1
     with pytest.raises(SystemExit):                             # needs controls
         NG.main([a for a in base if a not in ('--adjust', '1:150')] + ['--test-nuisance', table])
     trcov = str(tmp_path / 'train_iqm.csv')
