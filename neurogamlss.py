@@ -9,8 +9,8 @@ Every voxel/vertex gets its own GAMLSS normative model
 
     y ~ D(mu(age, sex, site, covariates), sigma(age, sex, covariates), shape)
 
-with natural cubic splines of age, fitted to all voxels/vertices at once.  The
-distribution D (--family) is
+with natural cubic splines of age, fitted to all voxels/vertices at once.  With
+--site-sd, the site also enters sigma.  The distribution D (--family) is
 
   shash   sinh-arcsinh (SHASHo2 of gamlss.dist, default) with skewness nu and tail
           weight tau.  It contains the normal distribution (nu = 0, tau = 1); normal
@@ -34,8 +34,10 @@ the RS algorithm of GAMLSS (ported from ComBatLS); shash and gg start from it an
 are refined by damped Newton steps with exact (shash) or numerical (gg)
 derivatives and step halving, in chunks of voxels/vertices that run in parallel
 threads (--jobs).  Test subjects get z-maps (normal scores) at chronological age,
-adapted to a new site with its control subjects (--adjust).  --diagnostics writes
-Q statistics and worm plots by age group of the training fit.
+adapted to a new site with its control subjects (--adjust).  Effects of nuisance
+variables such as image quality measures can be estimated in these controls and
+removed from the test data first (--test-nuisance).  --diagnostics writes Q
+statistics and worm plots by age group of the training fit.
 
 NormBrainAGE
 ------------
@@ -929,7 +931,7 @@ class NormativeModel:
     """Normative model (GAMLSS) for every feature.
 
     mu        = 1 + ns(age, df_mu) + male + site + covariates   (site: fixed effects)
-    log sigma = 1 + ns(age, df_sigma) + male + covariates
+    log sigma = 1 + ns(age, df_sigma) + male [+ site] + covariates   (site: site_sd)
     shape     = 1 [+ ns(age, shape_df)]                         (shash: nu, log tau; gg: nu)
 
     family 'normal' (the brain age models), 'shash' (SHASHo2) or 'gg' (generalized
@@ -948,13 +950,17 @@ class NormativeModel:
     condition on every subject's own covariates (missing values: median) and use
     the size-weighted mean of the training sites (as ComBat's stand_mean),
     optionally adapted to a new site by adapt() (location and scale of the z-scores).
+    With site_sd, the sites also enter log sigma, and predictions use the
+    size-weighted mean of these effects as well.
     """
 
     def __init__(self, df_mu=5, df_sigma=3, cov=None, max_iter=2000, tol=1e-6,
-                 family='normal', shape_df=0, tau_max=2.0, shape_prior=1.0, jobs=None):
+                 family='normal', shape_df=0, tau_max=2.0, shape_prior=1.0, jobs=None,
+                 site_sd=False):
         if family not in FAMILIES:
             raise ValueError(f"Unknown family {family!r}; use one of {', '.join(FAMILIES)}.")
         self.df_mu, self.df_sigma = df_mu, df_sigma
+        self.site_sd = bool(site_sd)
         self.cov = cov or Covariates()
         self.max_iter, self.tol = max_iter, tol
         self.family, self.shape_df = family, int(shape_df)
@@ -986,10 +992,13 @@ class NormativeModel:
             W.append(np.asarray(male, dtype=np.float64)[:, None])
         if len(self.site_levels) > 1:
             if site is None:     # reference: size-weighted mean of the sites
-                X.append(np.repeat(self.site_props[None, 1:], n, axis=0))
+                S = np.repeat(self.site_props[None, 1:], n, axis=0)
             else:
                 codes = np.searchsorted(self.site_levels, site)
-                X.append((codes[:, None] == np.arange(1, len(self.site_levels))).astype(float))
+                S = (codes[:, None] == np.arange(1, len(self.site_levels))).astype(float)
+            X.append(S)
+            if self.site_sd:
+                W.append(S)
         X.append(self._cov_columns(C, n, self.cov_mean))      # covariates are the last
         W.append(self._cov_columns(C, n, self.cov_sd))        # columns (cov_effects)
         return np.hstack(X), np.hstack(W)
@@ -1220,7 +1229,8 @@ class NormativeModel:
             n_features=int(self.n_features), valid=self.valid, beta=self.beta,
             theta=self.theta, offset=self.offset, scale=self.scale,
             converged=np.asarray(self.converged, dtype=bool), family=self.family,
-            shape_df=self.shape_df, tau_max=self.tau_max, shape_prior=self.shape_prior)
+            shape_df=self.shape_df, tau_max=self.tau_max, shape_prior=self.shape_prior,
+            site_sd=bool(self.site_sd))
         if self.family != 'normal':
             s.update(kappa=self.kappa, shape_age=self.shape_age,
                      basis_shape=None if self.basis_shape is None else self.basis_shape.get_state())
@@ -1232,7 +1242,8 @@ class NormativeModel:
     def from_state(cls, s):
         self = cls(s['df_mu'], s['df_sigma'], Covariates.from_state(s['cov']),
                    family=s.get('family', 'normal'), shape_df=s.get('shape_df', 0),
-                   tau_max=s.get('tau_max', 2.0), shape_prior=s.get('shape_prior', 1.0))
+                   tau_max=s.get('tau_max', 2.0), shape_prior=s.get('shape_prior', 1.0),
+                   site_sd=s.get('site_sd', False))     # older models: site in mu only
         self.use_male = bool(s['use_male'])
         self.site_levels = np.asarray(s['site_levels']).ravel()
         self.site_props = np.asarray(s['site_props'], dtype=np.float64).ravel()
@@ -1371,11 +1382,11 @@ class Warp:
     """
 
     def __init__(self, df_mu=5, df_sigma=3, max_outer=40, tol=1e-5, prior=9.0,
-                 warp_iter=2, rs_iter=3, chunk=4000, cov=None):
+                 warp_iter=2, rs_iter=3, chunk=4000, cov=None, site_sd=False):
         self.df_mu, self.df_sigma = df_mu, df_sigma
         self.max_outer, self.tol, self.prior = max_outer, tol, prior
         self.warp_iter, self.rs_iter, self.chunk = warp_iter, rs_iter, chunk
-        self.cov = cov or Covariates()
+        self.cov, self.site_sd = cov or Covariates(), bool(site_sd)
 
     def fit(self, Y, age, male, site=None, verbose=False, C=None, mask=None):
         finite = np.all(np.isfinite(Y), axis=0)
@@ -1389,7 +1400,7 @@ class Warp:
         self.sd = sd[self.valid]
         self.eps = np.zeros(self.valid.size)
         self.delta = np.ones(self.valid.size)
-        design = NormativeModel(self.df_mu, self.df_sigma, self.cov)
+        design = NormativeModel(self.df_mu, self.df_sigma, self.cov, site_sd=self.site_sd)
         X, W = design._design(age, male, design._setup(age, male, site, C), C)
         n = len(age)
         ll_start, ll_end, rounds = 0.0, 0.0, 0
@@ -1449,13 +1460,13 @@ class Warp:
 
     def get_state(self):
         return dict(df_mu=self.df_mu, df_sigma=self.df_sigma, cov=asdict(self.cov),
-                    chunk=int(self.chunk), valid=self.valid, center=self.center,
-                    sd=self.sd, eps=self.eps, delta=self.delta)
+                    site_sd=bool(self.site_sd), chunk=int(self.chunk), valid=self.valid,
+                    center=self.center, sd=self.sd, eps=self.eps, delta=self.delta)
 
     @classmethod
     def from_state(cls, s):
         self = cls(s['df_mu'], s['df_sigma'], chunk=int(s['chunk']),
-                   cov=Covariates.from_state(s['cov']))
+                   cov=Covariates.from_state(s['cov']), site_sd=s.get('site_sd', False))
         self.valid = np.asarray(s['valid']).astype(np.int64).ravel()
         for key in ('center', 'sd', 'eps', 'delta'):
             setattr(self, key, np.asarray(s[key], dtype=np.float64).ravel())
@@ -1677,12 +1688,13 @@ class NDMBrainAge:
               brain and regions, raw values) for BrainLOSS, the tissue loss beyond
               the brain age (predict); its df are chosen as for the z-map models
     cov     : covariates of all normative models (Covariates, columns of Data.C)
+    site_sd : the training sites also enter log sigma of all normative models
     """
 
     def __init__(self, df_mu=5, df_sigma=3, pca=100, rank=20, psi_min=0.01,
                  grid_step=0.25, grid_margin=5.0, parcellation=False,
                  atlas_dir=ATLAS_DIR, warp=False, cov=None, verbose=False,
-                 mask_threshold=None, standardize=True, brainloss=False):
+                 mask_threshold=None, standardize=True, brainloss=False, site_sd=False):
         self.df_mu, self.df_sigma = df_mu, df_sigma
         self.pca, self.rank, self.psi_min = pca, rank, psi_min
         self.grid_step, self.grid_margin = grid_step, grid_margin
@@ -1690,6 +1702,7 @@ class NDMBrainAge:
         self.warp, self.cov, self.verbose = warp, cov or Covariates(), verbose
         self.mask_threshold, self.mask_info = mask_threshold, None
         self.standardize, self.brainloss = standardize, brainloss
+        self.site_sd = bool(site_sd)
         self.loss_model = self.loss_record = None
         self.warper = None
 
@@ -1698,7 +1711,7 @@ class NDMBrainAge:
         return d if self.warper is None else replace(d, Y=self.warper.transform(d.Y))
 
     def _normative(self, Y, d, mask=None):
-        return NormativeModel(self.df_mu, self.df_sigma, self.cov).fit(
+        return NormativeModel(self.df_mu, self.df_sigma, self.cov, site_sd=self.site_sd).fit(
             Y, d.age, d.male, d.site, self.verbose, C=d.C, mask=mask)
 
     def _fit_pca_part(self, d, name, cols):
@@ -1727,7 +1740,7 @@ class NDMBrainAge:
             raise ValueError(f"{d.name}: fewer than 2 voxels/vertices pass the mask.")
         raw = d                            # BrainLOSS uses the values before the warp
         if self.warp:
-            self.warper = Warp(self.df_mu, self.df_sigma, cov=self.cov).fit(
+            self.warper = Warp(self.df_mu, self.df_sigma, cov=self.cov, site_sd=self.site_sd).fit(
                 d.Y, d.age, d.male, d.site, self.verbose, C=d.C, mask=mask)
             d = self._prep(d)
         groups = [('global', None, np.flatnonzero(mask))]
@@ -1774,9 +1787,10 @@ class NDMBrainAge:
         BrainLOSS, with df chosen by cross-validation as for the z-map models."""
         M = self._part_means(d.Y)
         dm, ds, self.loss_record = select_df_normative(replace(d, Y=M.astype(np.float32)),
-                                                       self.cov, mask_threshold=0)
-        self.loss_model = NormativeModel(dm, ds, self.cov).fit(M, d.age, d.male, d.site,
-                                                               C=d.C)
+                                                       self.cov, mask_threshold=0,
+                                                       site_sd=self.site_sd)
+        self.loss_model = NormativeModel(dm, ds, self.cov, site_sd=self.site_sd).fit(
+            M, d.age, d.male, d.site, C=d.C)
 
     def _loss(self, d, age):
         """BrainLOSS of every part (n, n_parts): minus the normal score of the part
@@ -1920,6 +1934,7 @@ class NDMBrainAge:
             psi_min=self.psi_min, grid_step=self.grid_step, grid_margin=self.grid_margin,
             parcellation=bool(self.parcellation), warp=bool(self.warp), cov=asdict(self.cov),
             standardize=bool(self.standardize), brainloss=bool(self.brainloss),
+            site_sd=bool(self.site_sd),
             loss_model=None if self.loss_model is None else self.loss_model.get_state(),
             mask_threshold=self.mask_threshold, mask_info=self.mask_info,
             grid=self.grid, regions=[int(r) for r in self.regions],
@@ -1936,6 +1951,7 @@ class NDMBrainAge:
         self.mask_threshold, self.mask_info = s.get('mask_threshold'), s.get('mask_info')
         self.standardize = bool(s.get('standardize', False))     # older models: raw values
         self.brainloss = bool(s.get('brainloss', False))
+        self.site_sd = bool(s.get('site_sd', False))             # older models: site in mu only
         loss = s.get('loss_model')
         self.loss_model = None if loss is None else NormativeModel.from_state(loss)
         self.warper = None if s['warper'] is None else Warp.from_state(s['warper'])
@@ -1956,8 +1972,10 @@ class VoxelModel:
     """
 
     def __init__(self, df_mu=5, df_sigma=3, cov=None, family='shash', shape_df=0,
-                 tau_max=2.0, shape_prior=1.0, verbose=False, mask_threshold=None):
+                 tau_max=2.0, shape_prior=1.0, verbose=False, mask_threshold=None,
+                 site_sd=False):
         self.df_mu, self.df_sigma, self.cov = df_mu, df_sigma, cov or Covariates()
+        self.site_sd = bool(site_sd)
         self.family, self.shape_df = family, shape_df
         self.tau_max, self.shape_prior, self.verbose = tau_max, shape_prior, verbose
         self.mask_threshold, self.mask_info = mask_threshold, None
@@ -1969,7 +1987,7 @@ class VoxelModel:
         mask, self.mask_info = feature_mask(d, self.mask_threshold)
         self.model = NormativeModel(self.df_mu, self.df_sigma, self.cov, family=self.family,
                                     shape_df=self.shape_df, tau_max=self.tau_max,
-                                    shape_prior=self.shape_prior).fit(
+                                    shape_prior=self.shape_prior, site_sd=self.site_sd).fit(
             d.Y, d.age, d.male, d.site, self.verbose, C=d.C, mask=mask)
         return self
 
@@ -1979,7 +1997,7 @@ class VoxelModel:
         if est.pca:
             raise ValueError("Only an NDMBrainAge with pca=0 has a voxel/vertex-wise model.")
         self = cls(est.df_mu, est.df_sigma, est.cov, family='normal', verbose=est.verbose,
-                   mask_threshold=est.mask_threshold)
+                   mask_threshold=est.mask_threshold, site_sd=est.site_sd)
         self.mask_info = est.mask_info
         self.model, self.warper, self.shared = est.parts[0].model, est.warper, True
         return self
@@ -2021,6 +2039,7 @@ class VoxelModel:
 
     def get_state(self):
         return dict(df_mu=self.df_mu, df_sigma=self.df_sigma, cov=asdict(self.cov),
+                    site_sd=bool(self.site_sd),
                     family=self.family, shape_df=self.shape_df, tau_max=self.tau_max,
                     shape_prior=self.shape_prior, shared=bool(self.shared),
                     mask_threshold=self.mask_threshold, mask_info=self.mask_info,
@@ -2032,7 +2051,7 @@ class VoxelModel:
         self = cls(s['df_mu'], s['df_sigma'], Covariates.from_state(s['cov']),
                    family=s.get('family', 'normal'), shape_df=s.get('shape_df', 0),
                    tau_max=s.get('tau_max', 2.0), shape_prior=s.get('shape_prior', 1.0),
-                   mask_threshold=s.get('mask_threshold'))
+                   mask_threshold=s.get('mask_threshold'), site_sd=s.get('site_sd', False))
         self.mask_info = s.get('mask_info')
         if s['shared']:
             if ndm is None:
@@ -2083,7 +2102,8 @@ def _search_df(criteria, df_mu, df_sigma, grid):
 
 
 def select_df_normative(d, cov=None, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS,
-                        max_features=DF_MAX_FEATURES, seed=0, mask_threshold=None, jobs=None):
+                        max_features=DF_MAX_FEATURES, seed=0, mask_threshold=None, jobs=None,
+                        site_sd=False):
     """Spline df of age of mu and sigma of the voxel/vertex-wise normative models,
     the same for all features of the training data d, by k-fold cross-validation.
 
@@ -2093,9 +2113,9 @@ def select_df_normative(d, cov=None, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS
     subject, relative to the mean of the settings compared: the median is robust to
     the few degenerate features, such as near-empty voxels, in which flexible curves
     fail out of sample.  The features are drawn from feature_mask(d, mask_threshold),
-    and the folds and settings are fitted in parallel threads (jobs).
-    df_mu is searched first (_search_df).  Returns df_mu, df_sigma and a record of
-    the search."""
+    and the folds and settings are fitted in parallel threads (jobs).  site_sd as
+    for NormativeModel.  df_mu is searched first (_search_df).  Returns df_mu,
+    df_sigma and a record of the search."""
     ok = np.flatnonzero(feature_mask(d, mask_threshold)[0])
     rng = np.random.default_rng(seed)
     cols = np.sort(rng.choice(ok, min(max_features, ok.size), replace=False))
@@ -2107,8 +2127,8 @@ def select_df_normative(d, cov=None, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS
     def heldout(task):
         (dm, ds), f = task
         tr, te = np.flatnonzero(fold != f), np.flatnonzero(fold == f)
-        m = NormativeModel(dm, ds, cov, jobs=1).fit(Y[tr], d.age[tr], d.male[tr], d.site[tr],
-                                                    C=Cs(tr))
+        m = NormativeModel(dm, ds, cov, jobs=1, site_sd=site_sd).fit(
+            Y[tr], d.age[tr], d.male[tr], d.site[tr], C=Cs(tr))
         known = np.isin(d.site[te], m.site_levels)     # sites seen in training
         mu = np.empty((te.size, m.valid.size))
         sd = np.empty_like(mu)
@@ -2151,7 +2171,8 @@ def select_df_brainage(d, kw, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS, seed=
     """
     if not kw.get('pca', 100):
         return select_df_normative(d, kw.get('cov'), df_mu, df_sigma, k, seed=seed,
-                                   mask_threshold=kw.get('mask_threshold'))
+                                   mask_threshold=kw.get('mask_threshold'),
+                                   site_sd=kw.get('site_sd', False))
     if DF_AUTO not in (df_mu, df_sigma):
         return int(df_mu), int(df_sigma), dict(df_mu=int(df_mu), df_sigma=int(df_sigma),
                                                 selected=False)
@@ -2202,7 +2223,8 @@ def _resolve_df(d, kw, which):
         dm, ds, rec = select_df_brainage(d, kw, dm, ds)
     else:
         dm, ds, rec = select_df_normative(d, kw.get('cov'), dm, ds,
-                                          mask_threshold=kw.get('mask_threshold'))
+                                          mask_threshold=kw.get('mask_threshold'),
+                                          site_sd=kw.get('site_sd', False))
     rec['seconds'] = round(time.time() - t0, 1)
     return dm, ds, rec
 
@@ -2863,7 +2885,8 @@ def fit_models(train, kw, brainage=True, voxel=False, vkw=None):
             else:
                 dm, ds, info['df_voxel'] = _resolve_df(
                     d, dict(kw, mask_threshold=vkw['mask_threshold']), 'voxel')
-                vm = VoxelModel(dm, ds, kw.get('cov'), **vkw).fit(d)
+                vm = VoxelModel(dm, ds, kw.get('cov'), site_sd=kw.get('site_sd', False),
+                                **vkw).fit(d)
                 dfs.append(f"z-maps {dm}/{ds}")
             m = vm.model
             if m.family != 'normal':
@@ -2882,9 +2905,71 @@ def fit_models(train, kw, brainage=True, voxel=False, vkw=None):
     return sets
 
 
+def remove_nuisance(d: Data, Q, ctrl, df=1, names=None, chunk=20000):
+    """Test data d without the effects of nuisance variables Q (n, k), such as image
+    quality measures, estimated in the control subjects ctrl of the test sample.
+
+    Every voxel/vertex of the controls is regressed on an intercept, a natural spline
+    of age (up to 3 df by the number of controls; none if their ages span less than 5
+    years, as for repeated scans of one subject), sex and natural splines of the
+    nuisance variables with df degrees of
+    freedom (1 = linear).  The nuisance part, relative to its mean in the controls, is
+    removed from all test subjects, whose data then enter models fitted without these
+    variables.  Effects of age and sex are kept, and so are effects of a disease, which
+    the controls do not have.  Values outside the range of the controls are
+    extrapolated linearly, and missing values are set to the mean of the controls (no
+    correction).  Returns the corrected data and a record with the share of the
+    controls' variance removed (median over voxels/vertices).
+    """
+    Q = np.asarray(Q, dtype=np.float64).reshape(d.n, -1)
+    names = [str(j + 1) for j in range(Q.shape[1])] if names is None else list(names)
+    ctrl = np.asarray(ctrl)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        mean = np.nanmean(Q[ctrl], axis=0)
+    Q = np.where(np.isfinite(Q), Q, mean)
+    bases, used = [], []
+    for j, nm in enumerate(names):
+        x = Q[ctrl, j]
+        if np.isfinite(mean[j]) and np.ptp(x) > 0:
+            b = NaturalSpline(x, df)
+            bases.append(b(Q[:, j]) - b(x).mean(axis=0))
+            used.append(nm)
+        else:
+            _note(f"Nuisance variable {nm} does not vary in the controls and is not used.")
+    if not used:
+        raise ValueError("No nuisance variable varies in the control subjects.")
+    N = np.hstack(bases)
+    age = d.age[ctrl]
+    age_df = 0 if np.ptp(age) < 5 else min(3, max(1, ctrl.size // 20))
+    cols = [np.ones((ctrl.size, 1))]
+    if age_df:
+        cols.append(NaturalSpline(age, age_df)(age))
+    if np.unique(d.male[ctrl]).size > 1:
+        cols.append(np.asarray(d.male[ctrl], dtype=np.float64)[:, None])
+    D = np.hstack(cols + [N[ctrl]])
+    if ctrl.size <= D.shape[1]:
+        raise ValueError(f"{ctrl.size} controls are too few for {D.shape[1]} regression terms "
+                         "of the nuisance correction.")
+    P = np.linalg.pinv(D)[-N.shape[1]:]            # rows of the nuisance coefficients
+    Y = np.array(d.Y, dtype=np.float32)
+    share = np.full(Y.shape[1], np.nan)
+    idx = np.flatnonzero(np.all(np.isfinite(Y[ctrl]), axis=0))
+    for c0 in range(0, idx.size, chunk):
+        f = idx[c0:c0 + chunk]
+        Yc = np.asarray(Y[np.ix_(ctrl, f)], dtype=np.float64)
+        R = N @ (P @ Yc)                            # nuisance part of all subjects
+        Y[:, f] = Y[:, f] - R
+        vy, vr = np.var(Yc, axis=0), np.var(R[ctrl], axis=0)
+        share[f] = np.where(vy > 0, vr / np.where(vy > 0, vy, 1), np.nan)
+    rec = dict(names=used, n_controls=int(ctrl.size), df=int(df), age_df=int(age_df),
+               explained=float(np.nanmedian(share)) if idx.size else np.nan)
+    return replace(d, Y=Y), rec
+
+
 def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
                  zmaps_out=False, normative_only=False, parcellation=False,
-                 train=None, gpr=True):
+                 train=None, gpr=True, nuisance=None):
     """Apply fitted models (list of ModelSet) to the test inputs in the same order.
 
     adjust         : indices of the control subjects of the test sample
@@ -2903,6 +2988,10 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
     parcellation   : lobe-wise mean z of the z-maps (also if the brain age models
                      were fitted with parcellation)
     train          : training data of the models, needed for the GPR baseline
+    nuisance       : dict(names, values (n, k), df) of nuisance variables of the test
+                     subjects, such as image quality measures, whose effects are
+                     estimated in the controls (adjust) and removed from the test data
+                     before the models are applied (remove_nuisance)
     """
     _check_same_subjects(test)
     if len(sets) != len(test):
@@ -2925,6 +3014,17 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
             raise ValueError("None of the control subjects has a valid age (0 or NaN).")
     zc = None if correction == 'none' else ctrl
     cov_names = test[0].cov_names
+    nuis = None
+    if nuisance is not None:
+        if adjust is None:
+            raise ValueError("The nuisance correction needs the control subjects (adjust).")
+        res = [remove_nuisance(d, nuisance['values'], ctrl, nuisance.get('df', 1),
+                               nuisance['names']) for d in test]
+        test, recs = [r[0] for r in res], [r[1] for r in res]
+        nuis = dict(names=recs[0]['names'], explained=[r['explained'] for r in recs])
+        print(f"Nuisance variables {', '.join(nuis['names'])} removed from the test data, "
+              f"estimated in {ctrl.size} controls; median share of their variance: "
+              + ', '.join(f"{100 * v:.1f}%" for v in nuis['explained']), flush=True)
 
     if normative_only:
         if correction == 'agefree':
@@ -2947,6 +3047,7 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
                    correction=correction, ind_control=ctrl + 1, normative_only=True, zmaps=zm)
         if cov_names:
             out['covariates'] = np.array(cov_names, dtype=object)
+        _add_nuisance(out, nuis)
         return out
 
     post = correction if correction in ('offset', 'trend') else 'none'
@@ -3001,11 +3102,23 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
                              df_mu=s.voxel.model.df_mu, df_sigma=s.voxel.model.df_sigma,
                              mask_threshold=(s.voxel.mask_info or {}).get('threshold', np.nan))
                         for r, d, s in zip(res, test, sets)]
+    _add_nuisance(out, nuis)
     return out
 
 
+def _add_nuisance(out, nuis):
+    """Record of the nuisance correction in the results and z-maps: the names and the
+    median share of the controls' variance removed (per model)."""
+    if nuis is None:
+        return
+    out['nuisance'] = np.array(nuis['names'], dtype=object)
+    out['nuisance_explained'] = np.array(nuis['explained'], dtype=np.float64)
+    for z, explained in zip(out.get('zmaps') or [], nuis['explained']):
+        z['nuisance'], z['nuisance_explained'] = out['nuisance'], explained
+
+
 def train_test(train, test, adjust=None, correction='offset', age_range=(0, np.inf),
-               gpr=True, ensemble='gls', zmaps_out=False, vkw=None, **kw):
+               gpr=True, ensemble='gls', zmaps_out=False, vkw=None, nuisance=None, **kw):
     """Train on one sample and predict another (fit_models and apply_models).
 
     Arguments as for apply_models; kw are passed to NDMBrainAge and vkw to
@@ -3019,7 +3132,8 @@ def train_test(train, test, adjust=None, correction='offset', age_range=(0, np.i
     sel = np.flatnonzero(_valid_train(train[0], age_range))
     train = [d.subset(sel) for d in train]
     sets = fit_models(train, kw, True, zmaps_out, vkw)
-    return apply_models(sets, test, adjust, correction, ensemble, zmaps_out, train=train, gpr=gpr)
+    return apply_models(sets, test, adjust, correction, ensemble, zmaps_out, train=train, gpr=gpr,
+                        nuisance=nuisance)
 
 
 def _check_covariates(C, desc, used):
@@ -3307,6 +3421,19 @@ def main(argv=None):
     p.add_argument('--cov-sd', help="covariates in the log SD (as --cov-mean; default: none)")
     p.add_argument('--cov-df', type=int, default=1,
                    help="spline df of the covariates (default 1 = linear)")
+    p.add_argument('--site-sd', action='store_true',
+                   help="the training sites ('+'-joined files) also enter the log SD of all "
+                        "normative models, not only the mean")
+    p.add_argument('--test-nuisance',
+                   help="table of nuisance variables of the test subjects, e.g. image "
+                        "quality measures, one row per subject (as --test-cov); their "
+                        "effects are estimated in the --adjust controls and removed from "
+                        "all test data before the models are applied")
+    p.add_argument('--nuisance-cols',
+                   help="columns of --test-nuisance: comma-separated names or 1-based "
+                        "numbers (default: all numeric columns)")
+    p.add_argument('--nuisance-df', type=int, default=1,
+                   help="spline df of the nuisance variables (default 1 = linear)")
     p.add_argument('--kfold', type=int,
                    help="folds of the cross-validation of the brain age if no --test "
                         "(default 10; with --save-model 0 = no cross-validation)")
@@ -3349,11 +3476,17 @@ def main(argv=None):
         p.error("give either --train or --model.")
     if a.model and not a.test:
         p.error("--model needs --test.")
-    if a.model and (a.save_model or a.train_cov or a.cov_mean or a.cov_sd):
-        p.error("--save-model, --train-cov, --cov-mean and --cov-sd need --train "
+    if a.model and (a.save_model or a.train_cov or a.cov_mean or a.cov_sd or a.site_sd):
+        p.error("--save-model, --train-cov, --cov-mean, --cov-sd and --site-sd need --train "
                 "(saved models only need --test-cov).")
     if (a.cov_mean or a.cov_sd) and not a.train_cov:
         p.error("--cov-mean and --cov-sd need --train-cov.")
+    if a.test_nuisance and not (a.test and a.adjust):
+        p.error("--test-nuisance needs --test and the controls of the test sample (--adjust).")
+    if a.nuisance_cols and not a.test_nuisance:
+        p.error("--nuisance-cols needs --test-nuisance.")
+    if a.nuisance_df < 1:
+        p.error("--nuisance-df must be at least 1.")
     if a.save_model and os.path.splitext(a.save_model)[1].lower() not in ('.mat', '.npz'):
         p.error("--save-model needs the extension .mat or .npz.")
     kfold = a.kfold if a.kfold is not None else (0 if a.save_model else 10)
@@ -3410,11 +3543,13 @@ def main(argv=None):
             print(f"Covariates ({'linear' if cov.df == 1 else f'natural splines, df {cov.df}'}"
                   f") in the mean: {', '.join(cov.mean) or '-'}; in the log SD: "
                   f"{', '.join(cov.sd) or '-'}")
+        if a.site_sd and np.unique(train[0].site).size < 2:
+            print("--site-sd has no effect: the training data come from one site.")
         kw = dict(df_mu=a.df_mu, df_sigma=a.df_sigma, mask_threshold=a.mask_threshold,
                   pca=a.pca, rank=a.rank,
                   psi_min=a.psi_min, grid_step=a.grid_step, grid_margin=a.grid_margin,
                   parcellation=a.parcellation, warp=a.warp, standardize=not a.no_standardize,
-                  brainloss=a.brainloss, cov=cov)
+                  brainloss=a.brainloss, cov=cov, site_sd=a.site_sd)
         ok = _valid_train(train[0], a.age_range)
         if ok.sum() < 10:
             p.error(f"Only {int(ok.sum())} training subject(s) have a valid age (not 0 or NaN) "
@@ -3490,8 +3625,27 @@ def main(argv=None):
         if not known.all():
             print(f"{int(np.sum(~known))} of the --adjust controls have no valid age and are "
                   "not used.")
+    nuisance = None
+    if a.test_nuisance:
+        names, values, numeric = read_table(a.test_nuisance)
+        if len(values) != test[0].n:
+            p.error(f"--test-nuisance has {len(values)} rows for {test[0].n} test subjects.")
+        try:
+            cols = (_parse_columns(a.nuisance_cols, names, numeric) if a.nuisance_cols else
+                    [nm for j, nm in enumerate(names)
+                     if numeric[j] and np.any(np.isfinite(values[:, j]))])
+        except ValueError as err:
+            p.error(str(err))
+        if not cols:
+            p.error("--test-nuisance contains no numeric column.")
+        both = sorted(set(cols) & used)
+        if both:
+            p.error(f"Covariate(s) {', '.join(both)} of the models cannot also be removed as "
+                    "nuisance.")
+        nuisance = dict(names=cols, values=values[:, [names.index(nm) for nm in cols]],
+                        df=a.nuisance_df)
     out = apply_models(sets, test, adjust, a.correction, a.ensemble, a.zmaps,
-                       a.normative_only, a.parcellation, fit_train, not a.no_gpr)
+                       a.normative_only, a.parcellation, fit_train, not a.no_gpr, nuisance)
     save_results(out, a.out)
     print(f"Total time {time.time() - t0:.0f}s")
 
