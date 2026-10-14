@@ -13,7 +13,7 @@ y_i \sim \mathcal{D}(\mu_i, \sigma_i, \nu_i, \tau_i),
 ```math
 \begin{aligned}
 g(\mu_i) &= \beta_0 + \mathbf{b}_\mu(a_i)^\top \boldsymbol\beta + \beta_s s_i + \gamma_{c_i} + \mathbf{h}(\mathbf{x}_i)^\top \boldsymbol\beta_x,
-\\ \log\, \sigma_i &= \theta_0 + \mathbf{b}_\sigma(a_i)^\top \boldsymbol\theta + \theta_s s_i + \mathbf{h}(\mathbf{x}_i)^\top \boldsymbol\theta_x,
+\\ \log\, \sigma_i &= \theta_0 + \mathbf{b}_\sigma(a_i)^\top \boldsymbol\theta + \theta_s s_i \;[+\, \delta_{c_i}] + \mathbf{h}(\mathbf{x}_i)^\top \boldsymbol\theta_x,
 \\ \nu_i &= \kappa_0 \;[+\, \mathbf{b}_\nu(a_i)^\top \boldsymbol\kappa],
 \\ \log\, \tau_i &= \lambda_0 \;[+\, \mathbf{b}_\nu(a_i)^\top \boldsymbol\lambda].
 \end{aligned}
@@ -22,7 +22,7 @@ g(\mu_i) &= \beta_0 + \mathbf{b}_\mu(a_i)^\top \boldsymbol\beta + \beta_s s_i + 
 - **Link of the location.** $`g`$ is the identity for the normal and SHASH families and the logarithm for GG.
 - **Age.** $`\mathbf{b}_\mu`$, $`\mathbf{b}_\sigma`$ and $`\mathbf{b}_\nu`$ are natural cubic spline bases without intercept (Hastie et al., 2009). The degrees of freedom of $`\mathbf{b}_\mu`$ and $`\mathbf{b}_\sigma`$ are chosen for every training sample, see [Flexibility of the age curves](#flexibility-of-the-age-curves), and those of $`\mathbf{b}_\nu`$ are given by `--shape-df`. Their boundary knots lie at the 5th and 95th percentiles of the training ages and their inner knots at equally spaced quantiles between them, see [Boundary knots](#boundary-knots). The splines are linear below and above the boundary knots, so the models extrapolate linearly.
 - **Sex** enters location and log scale as a main effect. It is left out when the training sample has only one sex or the test data contain no sex.
-- **Site** enters the location as a fixed effect, with $`\gamma_1 = 0`$. Predictions for new data use the size-weighted mean of the site effects, as the standardized mean of ComBat.
+- **Site** enters the location as a fixed effect, with $`\gamma_1 = 0`$. With `--site-sd`, it also enters the log scale, with $`\delta_1 = 0`$ (term in square brackets). Predictions for new data use the size-weighted mean of the site effects, as the standardized mean of ComBat, for the log scale as well.
 - **Covariates** $`\mathbf{h}(\mathbf{x})`$ are natural splines with `--cov-df` degrees of freedom and knots placed as for age, linear by default, centred at their training median. A covariate is dropped from a predictor when it is constant or collinear with the other columns of that predictor.
 - **Shape.** The shape parameters $`\nu`$ and $`\tau`$ are constant by default. The terms in square brackets are added with `--shape-df` where BIC prefers them, see [Age-dependent shape](#age-dependent-shape).
 
@@ -208,6 +208,62 @@ The z-maps and brain age use the same knots, so that both rest on the same age c
 The z-map of a test subject is its normal score $`\Phi^{-1}(F(y))`$ under the model at its chronological age, sex and covariates, at the reference site. For the normal family, this is the usual z-score.
 
 For a new site, the normal scores of its control subjects are standardized for every voxel. If $`o`$ and $`r`$ are their mean and standard deviation, every test subject's normal score becomes $`(z - o)/r`$. For the normal family, this equals the location and scale adaptation of ComBat without empirical Bayes shrinkage (Johnson et al., 2007; Fortin et al., 2018).
+
+## Sites and image quality
+
+The comparisons in this section used models of the 2,241 lifespan subjects (CamCAN, IXI, OASIS-3 and SALD), data smoothed with 6 mm unless stated otherwise, and [scripts/iqm_comparison.py](../scripts/iqm_comparison.py).
+
+### Site effects on the scale
+
+`--site-sd` adds the training sites to the log scale, $`\delta_{c_i}`$ in the model above. ComBat models site differences in the variance in the same way, and Brain Charts with random effects of study. The option was compared with 5-fold cross-validation, as in the choice of the df: models of 1,000 random voxels at 8 mm, evaluated at the subjects' own sites, with the median over voxels. White matter was included here. Gains in held-out log-likelihood per subject over site effects on the location only, in thousandths of a nat:
+
+| Sites | Gray matter, normal | Gray matter, SHASH | White matter, normal | White matter, SHASH |
+|---|---|---|---|---|
+| 4 samples, 494 to 651 subjects | 0.44 | 0.76 | 0.23 | 0.74 |
+| 8 scanners, 67 to 651 subjects | −0.30 | 0.11 | −0.52 | 0.34 |
+
+- **Size.** The sites differ in their standard deviation by only a few percent. The error of an estimated site effect costs about $`1/(2 n_c)`$ nats per subject of a site with $`n_c`$ training subjects, so the effects pay off only for large sites. With the scanners of IXI and OASIS-3 as sites, the small groups lost more than they gained.
+- **New samples.** In the four samples below, the option changed the mean absolute error of brain age by at most 0.12 years and left the z-maps unchanged.
+- **Default.** It is off. It may help with a few large sites that differ in noise, and with image quality measures in the log scale, see below.
+
+### Image quality measures
+
+CAT12 rates every scan by quality measures (IQMs): noise (NCR), inhomogeneity (ICR), resolution (res_RMS), edge sharpness (res_ECR) and tissue contrast (contrastr), combined into the ratings IQR and SIQR. They can be used in two ways. As covariates of the normative models (`--train-cov`, `--cov-mean`, `--cov-sd`), their effects are learned in the training sample, and every test subject is scored at its own quality. Alternatively, their effects are estimated in the test sample itself, as ComCat does when only the test data are harmonized.
+
+Within the training sample, IQMs improved the fit. Held-out log-likelihood as above, with the four samples as sites:
+
+| IQMs in the normative models | Gray matter, normal | Gray matter, SHASH | White matter, normal | White matter, SHASH |
+|---|---|---|---|---|
+| IQR, mean and log scale | −0.22 | −0.10 | −0.39 | −0.29 |
+| ICR, NCR, res_ECR, contrastr, mean | 3.47 | 3.18 | 1.87 | 1.11 |
+| the same, mean and log scale | 3.64 | 4.16 | 1.43 | 1.36 |
+| the same, with `--site-sd` | 5.05 | 5.76 | 2.40 | 3.36 |
+| all seven, mean | 3.12 | 2.72 | 1.14 | 0.25 |
+| all seven, mean and log scale | 0.29 | 0.05 | −2.49 | −2.41 |
+
+The IQR hardly varies in the training sample, and SIQR duplicates res_ECR (correlation 0.99). The composite ratings therefore add nothing, and all seven IQMs in the log scale overfit.
+
+Four independent samples tested the IQMs out of sample. In these samples the biology is fixed and the image quality varies:
+
+- **ON-Harmony:** 10 subjects, 80 scans on 6 scanners.
+- **Tohoku:** one subject, 121 acquisitions with different sequences.
+- **Buchert:** one subject, 531 scans on 116 scanners.
+- **MR-ART:** 148 subjects scanned without and with two levels of head motion.
+
+The models of the lifespan sample were applied without adaptation. Brain age used four models (6 and 12 mm smoothing at 4 and 8 mm) with equal weights, and the z-maps SHASH models at 8 mm. The test samples contain no sex, which was therefore left out. Reproducibility is the within-subject standard deviation over a subject's scans, of BrainAGE in years and of z, the median over voxels. The motion effect is the paired difference between strong and no motion in MR-ART:
+
+| IQMs | BrainAGE SD, Tohoku | BrainAGE SD, Buchert | BrainAGE SD, ON-Harmony | Motion effect on brain age | z SD, Tohoku | z SD, Buchert | z SD, ON-Harmony | Mean \|Δz\| of motion |
+|---|---|---|---|---|---|---|---|---|
+| none | 7.21 | 4.47 | 1.52 | 4.33 | 0.388 | 0.301 | 0.191 | 0.203 |
+| models: ICR, NCR, res_ECR, contrastr, mean and log scale | 6.32 | 4.09 | 1.63 | 2.97 | 0.446 | 0.371 | 0.220 | 0.204 |
+| the same, with `--site-sd` | 5.36 | 3.81 | 1.49 | 2.29 | 0.457 | 0.382 | 0.228 | 0.204 |
+| test sample: the same IQMs, held-out half | 5.74 | 3.78 | 2.91 | 0.50 | 0.343 | 0.289 | 0.329 | 0.069 |
+
+- **IQMs in the normative models.** They improved brain age in three of the four samples and halved the motion effect. They made the z-maps of ON-Harmony, Tohoku and Buchert less reproducible, with more extreme z, and did not improve those of MR-ART. With all seven IQMs in the mean and log scale, the z-scores of the strong-motion scans of MR-ART, whose IQMs lie beyond the training range, were on average 9 lower than without motion.
+- **Why.** Image quality in the training sample varies mainly between subjects and scanners. In MR-ART, the IQM effects on the mean learned in the training sample predicted the spatial pattern of the motion effect on z only partly, with a correlation of 0.38 over voxels, and not its mean, +0.01 instead of −0.17.
+- **IQMs in the test sample.** Here the voxel values (brain age) and the z-scores of models without IQMs were regressed on the IQMs within each test sample, with age kept as a natural spline of 3 df. The IQM effects were estimated on one half of the subjects and removed from the other half. They removed most of the motion effect in MR-ART and made the brain age and z-maps of Tohoku and Buchert more reproducible. In ON-Harmony, five subjects per half confounded anatomy with quality, and the correction made both worse. Estimated on all scans, as ComCat does, the results looked better still, with a motion effect of 0.25 years in MR-ART, but ON-Harmony got worse as well.
+
+For z-maps, IQMs are best used on the test data, for example by harmonizing the test sample with ComCat with the IQMs as nuisance and age, and diagnosis where present, preserved. This needs enough subjects with a spread of image quality, and the controls or a preserved diagnosis, so that disease effects are not removed. IQMs in the normative models should be a few ratings without the composites, and should stay out of the log scale if the test data may leave their training range.
 
 ## Diagnostics
 
