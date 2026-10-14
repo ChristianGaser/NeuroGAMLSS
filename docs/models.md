@@ -228,7 +228,21 @@ The comparisons in this section used models of the 2,241 lifespan subjects (CamC
 
 ### Image quality measures
 
-CAT12 rates every scan by quality measures (IQMs): noise (NCR), inhomogeneity (ICR), resolution (res_RMS), edge sharpness (res_ECR) and tissue contrast (contrastr), combined into the ratings IQR and SIQR. They can be used in two ways. As covariates of the normative models (`--train-cov`, `--cov-mean`, `--cov-sd`), their effects are learned in the training sample, and every test subject is scored at its own quality. Alternatively, their effects are estimated in the test sample itself, as ComCat does when only the test data are harmonized.
+CAT12 rates every scan by quality measures (IQMs): noise (NCR), inhomogeneity (ICR), resolution (res_RMS), edge sharpness (res_ECR) and tissue contrast (contrastr), combined into the ratings IQR and SIQR. They can be used in two ways:
+
+- **In the normative models.** As covariates (`--train-cov`, `--cov-mean`, `--cov-sd`), their effects are learned in the training sample, and every test subject is scored at its own quality.
+- **In the test sample.** Their effects are estimated in the test sample itself and removed from its data, with `--test-nuisance` or by harmonizing only the test data with ComCat.
+
+`--test-nuisance` estimates the effects in the controls $`i \in C`$ of the test sample (`--adjust`). For every voxel, their values are regressed on an intercept, a natural spline $`f_j`$ of age, sex and the nuisance variables $`\mathbf{q}`$:
+
+```math
+y_{ij} = \alpha_j + f_j(a_i) + \beta_j s_i + \mathbf{h}(\mathbf{q}_i)^\top \boldsymbol\gamma_j + e_{ij}, \qquad i \in C .
+```
+
+- **Terms.** $`\mathbf{h}`$ is linear, or a natural spline with `--nuisance-df`. Age has up to 3 df, one per 20 controls, and is left out if the controls' ages span less than 5 years. Sex is left out if the controls have only one.
+- **Brain age.** It uses the data $`y_{ij} - (\mathbf{h}(\mathbf{q}_i) - \bar{\mathbf{h}})^\top \hat{\boldsymbol\gamma}_j`$ of all test subjects, where $`\bar{\mathbf{h}}`$ is the mean over the controls.
+- **z-maps.** They are corrected on their own scale: the controls' normal scores are regressed on the same terms, and the nuisance part is subtracted from all normal scores before the adaptation with the controls. For the normal family, both corrections are nearly the same. For SHASH, a shift of the data is not a constant shift of the skewed normal score.
+- **Disease.** Effects of a disease are kept, because the controls have none. Estimated in all subjects instead, the IQM effects would absorb the part of a disease effect that goes along with worse image quality.
 
 Within the training sample, IQMs improved the fit. Held-out log-likelihood as above, with the four samples as sites:
 
@@ -250,20 +264,45 @@ Four independent samples tested the IQMs out of sample. In these samples the bio
 - **Buchert:** one subject, 531 scans on 116 scanners.
 - **MR-ART:** 148 subjects scanned without and with two levels of head motion.
 
-The models of the lifespan sample were applied without adaptation. Brain age used four models (6 and 12 mm smoothing at 4 and 8 mm) with equal weights, and the z-maps SHASH models at 8 mm. The test samples contain no sex, which was therefore left out. Reproducibility is the within-subject standard deviation over a subject's scans, of BrainAGE in years and of z, the median over voxels. The motion effect is the paired difference between strong and no motion in MR-ART:
+The models of the lifespan sample were applied without adaptation. Brain age used four models (6 and 12 mm smoothing at 4 and 8 mm) with equal weights, and the z-maps SHASH models at 8 mm. The test samples contain no sex, which was therefore left out. Reproducibility is the within-subject standard deviation over a subject's scans, of BrainAGE in years and of z, the median over voxels. The motion effect is the paired difference between strong and no motion in MR-ART.
 
-| IQMs | BrainAGE SD, Tohoku | BrainAGE SD, Buchert | BrainAGE SD, ON-Harmony | Motion effect on brain age | z SD, Tohoku | z SD, Buchert | z SD, ON-Harmony | Mean \|Δz\| of motion |
-|---|---|---|---|---|---|---|---|---|
-| none | 7.21 | 4.47 | 1.52 | 4.33 | 0.388 | 0.301 | 0.191 | 0.203 |
-| models: ICR, NCR, res_ECR, contrastr, mean and log scale | 6.32 | 4.09 | 1.63 | 2.97 | 0.446 | 0.371 | 0.220 | 0.204 |
-| the same, with `--site-sd` | 5.36 | 3.81 | 1.49 | 2.29 | 0.457 | 0.382 | 0.228 | 0.204 |
-| test sample: the same IQMs, held-out half | 5.74 | 3.78 | 2.91 | 0.50 | 0.343 | 0.289 | 0.329 | 0.069 |
+The test-sample corrections were estimated in two ways:
+
+- **In-sample.** All scans of a test sample served as controls, and the same scans were scored, as when a whole sample is harmonized.
+- **Held-out half.** The effects were estimated on one half of the subjects (the scans, for Tohoku and Buchert) and removed from the other half, which shows how they carry over to new subjects.
+
+`--test-nuisance` used the four ratings ICR, NCR, res_ECR and contrastr. ComCat harmonized every test sample as one site, with all seven IQMs as B-splines (5 to 10 df per IQM, as ComCat chooses them) and age preserved where the subjects differ. These are the IQM-only conditions of the ComCat evaluation; scanners as sites were not used. Brain age:
+
+| IQMs | BrainAGE SD, Tohoku | BrainAGE SD, Buchert | BrainAGE SD, ON-Harmony | BrainAGE SD, MR-ART | Motion effect |
+|---|---|---|---|---|---|
+| none | 7.21 | 4.47 | 1.52 | 4.24 | 4.33 |
+| models: ICR, NCR, res_ECR, contrastr, mean and log scale | 6.32 | 4.09 | 1.63 | 3.74 | 2.97 |
+| the same, with `--site-sd` | 5.36 | 3.81 | 1.49 | 3.72 | 2.29 |
+| `--test-nuisance`, in-sample | 5.43 | 3.70 | 2.00 | 3.05 | 0.25 |
+| `--test-nuisance`, held-out half | 5.74 | 3.78 | 2.18 | 3.09 | 0.50 |
+| ComCat, in-sample | 1.46 | 1.54 | 2.17 | 2.94 | −0.21 |
+| ComCat with `residual_delta`, in-sample | 2.91 | 2.35 | 3.18 | 3.35 | −0.16 |
+| ComCat, held-out half | 2.94 | 3.27 | 14.38 | 4.14 | 0.77 |
+
+z-maps, with the share of $`|z| \gt 2.58`$ in the MR-ART scans without motion, which would be 1% for calibrated scores:
+
+| IQMs | z SD, Tohoku | z SD, Buchert | z SD, ON-Harmony | z SD, MR-ART | Mean \|Δz\| of motion | \|z\| > 2.58 without motion |
+|---|---|---|---|---|---|---|
+| none | 0.388 | 0.301 | 0.191 | 0.380 | 0.203 | 1.07% |
+| models: ICR, NCR, res_ECR, contrastr, mean and log scale, `--site-sd` | 0.457 | 0.382 | 0.228 | 0.384 | 0.204 | 1.14% |
+| `--test-nuisance`, in-sample | 0.312 | 0.285 | 0.312 | 0.365 | 0.068 | 1.11% |
+| `--test-nuisance`, held-out half | 0.343 | 0.289 | 0.380 | 0.377 | 0.069 | 1.30% |
+| ComCat, in-sample | 0.098 | 0.140 | 0.295 | 0.422 | 0.085 | 0.71% |
+| ComCat with `residual_delta`, in-sample | 0.195 | 0.208 | 0.455 | 0.478 | 0.105 | 1.31% |
+| ComCat, held-out half | 0.253 | 0.539 | 6.27 | 0.769 | 0.427 | 2.25% |
 
 - **IQMs in the normative models.** They improved brain age in three of the four samples and halved the motion effect. They made the z-maps of ON-Harmony, Tohoku and Buchert less reproducible, with more extreme z, and did not improve those of MR-ART. With all seven IQMs in the mean and log scale, the z-scores of the strong-motion scans of MR-ART, whose IQMs lie beyond the training range, were on average 9 lower than without motion.
 - **Why.** Image quality in the training sample varies mainly between subjects and scanners. In MR-ART, the IQM effects on the mean learned in the training sample predicted the spatial pattern of the motion effect on z only partly, with a correlation of 0.38 over voxels, and not its mean, +0.01 instead of −0.17.
-- **IQMs in the test sample.** Here the voxel values (brain age) and the z-scores of models without IQMs were regressed on the IQMs within each test sample, with age kept as a natural spline of 3 df. The IQM effects were estimated on one half of the subjects and removed from the other half. They removed most of the motion effect in MR-ART and made the brain age and z-maps of Tohoku and Buchert more reproducible. In ON-Harmony, five subjects per half confounded anatomy with quality, and the correction made both worse. Estimated on all scans, as ComCat does, the results looked better still, with a motion effect of 0.25 years in MR-ART, but ON-Harmony got worse as well.
+- **`--test-nuisance`.** It removed most of the motion effect from brain age and z-maps, also for held-out subjects, and made both more reproducible in Tohoku and Buchert. In ON-Harmony, five subjects per half confounded anatomy with quality, and the correction made both worse. The in-sample results were only a little better than the held-out ones.
+- **z scale.** Removing the IQM effects from the voxel values instead of the normal scores left more of the motion effect in the SHASH z-maps: 0.115 instead of 0.069 for held-out subjects.
+- **ComCat.** Evaluated on the harmonized scans themselves, it gave the most reproducible brain age and z-maps of the two single subjects and the most reproducible brain age in MR-ART. The z-maps of MR-ART and ON-Harmony became less reproducible than without correction. Two things contribute besides the IQMs. The scaling by the site variance shrinks all deviations around the fitted values: the share of extreme z in the scans without motion fell to 0.7%. And 35 to 70 spline terms adapt to the sample. With site variances from the residuals (`residual_delta`), the gains shrank. For held-out subjects, the z-maps of Buchert and MR-ART became less reproducible than without correction, and ON-Harmony failed. For the brain age of the two single subjects, ComCat remained better than `--test-nuisance` also for held-out scans.
 
-For z-maps, IQMs are best used on the test data, for example by harmonizing the test sample with ComCat with the IQMs as nuisance and age, and diagnosis where present, preserved. This needs enough subjects with a spread of image quality, and the controls or a preserved diagnosis, so that disease effects are not removed. IQMs in the normative models should be a few ratings without the composites, and should stay out of the log scale if the test data may leave their training range.
+For z-maps, IQMs are best used on the test data with `--test-nuisance`. This needs enough controls with a spread of image quality: it worked with 74 subjects per half in MR-ART, but not with 5 in ON-Harmony. The controls should cover the image quality of the patients, whose values are otherwise extrapolated linearly. Few non-redundant ratings are safer than all seven. IQMs in the normative models should be a few ratings without the composites, and should stay out of the log scale if the test data may leave their training range.
 
 ## Diagnostics
 
