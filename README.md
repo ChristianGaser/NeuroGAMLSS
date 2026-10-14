@@ -14,19 +14,20 @@ NeuroGAMLSS fits a generalized additive model for location, scale and shape (GAM
 - **Diagnostics:** Q statistics and worm plots by age group show how well the models fit.
 - **Saved models:** fitted models are stored as `.mat` or `.npz` files with a JSON description, so new data can be scored without the training data.
 - **NormBrainAGE:** maximum-likelihood brain age with a standard error, regional brain ages for the brain lobes and a deviation score that aging does not explain. With `--brainloss`, also BrainLOSS, the tissue loss that the brain age does not explain.
+- **Images:** `mat2image.py` writes z-maps and diagnostics as NIfTI or GIFTI files that can be overlaid onto a template.
 
 The statistical details are in [docs/models.md](docs/models.md). A draft methods section for NormBrainAGE is in [NDM_methods.md](NDM_methods.md).
 
 ## Installation
 
-NeuroGAMLSS is a single Python file, [neurogamlss.py](neurogamlss.py), plus the lobe atlas in [atlases/](atlases/). It needs Python 3.9 or newer.
+NeuroGAMLSS is a single Python file, [neurogamlss.py](neurogamlss.py), plus the lobe atlas and the voxel indices in [atlases/](atlases/) and the tool [mat2image.py](mat2image.py) for images. It needs Python 3.9 or newer.
 
 | Package | Version | Needed for |
 |---|---|---|
 | NumPy | 1.21 or newer | everything |
 | SciPy | 1.7 or newer | everything |
 | h5py | 3.0 or newer | MATLAB v7.3 input files |
-| nibabel | 3.0 or newer | lobe atlas of surface data, `--parcellation` |
+| nibabel | 3.0 or newer | lobe atlas of surface data, `--parcellation`; images with `mat2image.py` |
 | matplotlib | 3.3 or newer | worm plots, `--diagnostics` |
 
 The tests ran with Python 3.9, NumPy 2.0 and SciPy 1.13. [requirements.txt](requirements.txt) lists all packages, and [pyproject.toml](pyproject.toml) describes the project for pip. Either run the script from the cloned folder:
@@ -38,14 +39,14 @@ pip install -r requirements.txt
 python neurogamlss.py --help
 ```
 
-Or install it in editable mode, which also adds the command `neurogamlss`. The extra `all` adds the three optional packages, and `test` adds pytest:
+Or install it in editable mode, which also adds the commands `neurogamlss` and `neurogamlss-mat2image`. The extra `all` adds the three optional packages, and `test` adds pytest:
 
 ```bash
 pip install -e ".[all]"
 neurogamlss --help
 ```
 
-The lobe atlas is read from the `atlases` folder next to the script, which an editable install keeps in place. `NEUROGAMLSS_ATLAS_DIR` points to another folder.
+The lobe atlas and the voxel indices are read from the `atlases` folder next to the script, which an editable install keeps in place. `NEUROGAMLSS_ATLAS_DIR` points to another folder.
 
 ## Input data
 
@@ -233,14 +234,44 @@ When the training data are given, a Python replica of the GPR BrainAGE of the Br
 
 | File | Content |
 |---|---|
-| `<out>_zmaps_<model>.mat` | struct `NDMzmap`: `Z` (subjects × features), `converged`, `family`, `df_mu`, `df_sigma`, `mask_threshold`, `age`, `male`, `model`, `ind`, and with `--parcellation` `regional_z`, `regions`, `region_names` |
+| `<out>_zmaps_<model>.mat` | struct `NDMzmap`: `Z` (subjects × features), `converged`, `family`, `df_mu`, `df_sigma`, `mask_threshold`, `age`, `male`, `model`, `ind`, `dim`, and with `--parcellation` `regional_z`, `regions`, `region_names` |
 | `<out>.csv` | normative models only: mean z of each lobe for every subject (with `--parcellation`) |
 | `<out>.mat`, `<out>.csv` | brain age: struct `NDM`, including the df and the mask threshold of every model in `df_mu`, `df_sigma` and `mask_threshold`, and a table with BrainAGE, standard errors, deviations and, with `--brainloss`, BrainLOSS of every model and of the ensemble |
 | `<out>_diagnostics.csv` | summary of the diagnostics for every model |
-| `<out>_diagnostics_<model>.mat` | struct `NDMdiag`: `Q`, `p_Q` and `df_Q` (4 × features: mean, variance, skewness, kurtosis), `converged`, `age_groups`, `family`, `model`, `df_mu`, `df_sigma`, `mask_threshold` |
+| `<out>_diagnostics_<model>.mat` | struct `NDMdiag`: `Q`, `p_Q` and `df_Q` (4 × features: mean, variance, skewness, kurtosis), `converged`, `age_groups`, `family`, `model`, `df_mu`, `df_sigma`, `mask_threshold`, `ind`, `dim` |
 | `<out>_wormplot_<model>.png` | worm plots |
 
-`Z` has the same feature order as `Y` in the input file, so it maps back to the image or surface like the input data. Features without a model are NaN, such as voxels outside the mask. `converged` is 1 for voxels whose fit converged, 0 for the others and NaN without a model.
+`Z` has the same feature order as `Y` in the input file, so it maps back to the image or surface like the input data. Features without a model are NaN, such as voxels outside the mask. `converged` is 1 for voxels whose fit converged, 0 for the others and NaN without a model. `ind` and `dim` are copied from the input file: the vertex index and the number of vertices of surface data, and the volume dimensions of volume data.
+
+## Images of the maps
+
+[mat2image.py](mat2image.py) writes the maps as images that can be overlaid onto a template, NIfTI files for volume data and GIFTI files for surface data:
+
+| mat-file | Images |
+|---|---|
+| `<out>_zmaps_<model>.mat` | `<out>_zmaps_<model>.nii`: `Z`, one volume per subject |
+| `<out>_diagnostics_<model>.mat` | `<name>_Q.nii` and `<name>_p_Q.nii` with four volumes each: mean, variance, skewness and kurtosis; `<name>_converged.nii` |
+| input file of `BA_data2mat.m` | `<name>.nii`: `Y`, one volume per subject |
+
+Surface data give `.gii` files with one data array per subject or map. Voxels and vertices without a value are NaN, such as those outside the mask or of the medial wall.
+
+```bash
+python mat2image.py adni_gm4_zmaps_s4rp1_4mm_ADNI_CAT12.9.mat
+python mat2image.py adni_gm4_zmaps_s4rp1_4mm_ADNI_CAT12.9.mat --subjects 1:10 --split --outdir zmaps
+```
+
+| Option | Meaning |
+|---|---|
+| `--ind FILE` | indices of the voxels or vertices instead of the stored or default ones: `ind_<res>mm.mat` or a folder with it for volume data, the input mat-file for surface data |
+| `--res MM` | resolution of volume data whose model name contains none such as `_8mm_` |
+| `--mesh FILE` | surface stored in the metadata of the GIFTI files (`SurfaceID`), which SPM uses for display |
+| `--subjects LIST` | 1-based indices of the subjects, for example `1:10,15`; default all |
+| `--split` | one 3D NIfTI or GIFTI file per subject or map instead of one file with all of them |
+| `--outdir DIR` | output folder; default the folder of each mat-file |
+
+**Volume data.** `cat_io_data2mat.m` of CAT12, which `BA_data2mat.m` calls, resamples the images to a grid of `round([181 217 181]/r)` voxels of r mm whose first voxel lies at (−90, −126, −72) mm in MNI space. It keeps the voxels inside the brain mask in MATLAB order. The NIfTI files have this grid as sform and qform, so they overlay onto templates in MNI space. The mat-files leave the index `ind` of these voxels empty, so `mat2image.py` reads it from `atlases/ind_4mm.mat` or `atlases/ind_8mm.mat`, chosen by the resolution in the model name. Other resolutions or masks need `--ind`. For six IXI subjects, the images written from the mat-files matched the original segmentations, smoothed and resampled in the same way, with correlations of 0.9999 at 4 and 8 mm.
+
+**Surface data.** The z-maps and diagnostics store the vertex index `ind` of the input files and the number of vertices of the mesh, 64,984 for both hemispheres of the 32k mesh of CAT12. CAT12 displays the GIFTI files on its template surface with the same number of vertices (`cat_surf_display`, `cat_surf_results`). SPM needs the surface in the metadata, for example `--mesh templates_surfaces_32k/mesh.central.freesurfer.gii` of the CAT12 folder. Diagnostics of surface data saved by earlier versions contain no `ind` and need the input mat-file with `--ind`.
 
 ## Command-line options
 
@@ -322,7 +353,7 @@ pip install -e ".[all,test]"
 python -m pytest
 ```
 
-The tests use simulated data. They check the SHASH derivatives, the GG density and normal scores, parameter recovery, the τ bound, the BIC choice of age-dependent shape, the calibration of the Q statistics, the boundary knots of the splines, the choice of the df, the mask, saving and loading of all families in both formats, and the command line.
+The tests use simulated data. They check the SHASH derivatives, the GG density and normal scores, parameter recovery, the τ bound, the BIC choice of age-dependent shape, the calibration of the Q statistics, the boundary knots of the splines, the choice of the df, the mask, saving and loading of all families in both formats, the command line, and the images of `mat2image.py`.
 
 ## Limitations
 

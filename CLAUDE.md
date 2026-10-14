@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-NeuroGAMLSS is a single Python module, `neurogamlss.py`, with two parts. It fits vectorized GAMLSS normative models to every voxel or vertex of brain MRI data and writes z-maps. Its brain-age part, NormBrainAGE, estimates brain age as the maximum-likelihood age under normative models of principal component scores. The inputs are mat-files written by `BA_data2mat.m` of the BrainAGE toolbox, for example from CAT12. The repository contains no real MRI data.
+NeuroGAMLSS is a single Python module, `neurogamlss.py`, with two parts. It fits vectorized GAMLSS normative models to every voxel or vertex of brain MRI data and writes z-maps. Its brain-age part, NormBrainAGE, estimates brain age as the maximum-likelihood age under normative models of principal component scores. The inputs are mat-files written by `BA_data2mat.m` of the BrainAGE toolbox, for example from CAT12. The repository contains no real MRI data. A second tool, `mat2image.py`, writes the maps as NIfTI or GIFTI images.
 
 - `README.md` is the user guide, with options and outputs.
 - `docs/models.md` describes the statistics and holds the evidence for the defaults.
@@ -18,11 +18,12 @@ python3 -m pytest                             # all tests, about 15 s
 python3 -m pytest tests/test_neurogamlss.py::test_spline_boundary_knots   # one test
 python3 -m pytest -k brainage                 # tests whose name matches
 python3 neurogamlss.py --help                 # command line; installed as `neurogamlss`
+python3 mat2image.py --help                   # images of the maps; installed as `neurogamlss-mat2image`
 ```
 
 No linter or formatter is configured. The code keeps lines to about 100 characters and must stay compatible with Python 3.9.
 
-The tests use simulated data only. The simulators are `simulate_shash`, `simulate_gg`, `simulate_trajectories`, `simulate_brain` and `masked_data` in `tests/test_neurogamlss.py`. Command-line tests write mat-files with `scipy.io.savemat` to `tmp_path` and call `NG.main([...])`.
+The tests use simulated data only. The simulators are `simulate_shash`, `simulate_gg`, `simulate_trajectories`, `simulate_brain` and `masked_data` in `tests/test_neurogamlss.py`. Command-line tests write mat-files with `scipy.io.savemat` to `tmp_path` and call `NG.main([...])`. `tests/test_mat2image.py` converts such outputs with `M2I.main([...])`.
 
 ## Architecture
 
@@ -47,6 +48,11 @@ The module is organized in sections, in this order.
 6. **Diagnostics.** Q statistics and worm plots by age group (`run_diagnostics`).
 7. **Persistence.** `ModelSet` holds `info`, `brainage` and `voxel` for one input. Every model class has `get_state()` and `from_state()`. `save_models` writes `.npz`, or `.mat` with struct `NDMmodel`, plus a JSON description. `load_models` checks `MODEL_FORMAT` and `MODEL_VERSION`.
 8. **Drivers.** `fit_models`, `apply_models` (test data, `--adjust` controls, `--correction`), `cross_validate` (`--kfold`), `train_test` and `main`. `gpr_baseline` is a replica of the GPR BrainAGE of the BrainAGE toolbox, run for comparison.
+
+**`mat2image.py`** imports `neurogamlss` and writes the maps of `NDMzmap`, `NDMdiag` and input mat-files as images.
+
+- **Volume data.** The grid is that of `cat_io_data2mat.m`: `round([181 217 181]/r)` voxels of r mm, first voxel at (−90, −126, −72) mm (`volume_grid`). The columns of `Y` are the voxels of the brain mask in MATLAB (column-major) order. The mat-files store an empty `ind` for volume data, so the indices come from `atlases/ind_<r>mm.mat` or `--ind`.
+- **Surface data.** `ind` and `dim` (number of mesh vertices) are stored in the z-maps and diagnostics. The GIFTI files hold all vertices, NaN elsewhere, and `--mesh` sets the metadata `SurfaceID` for SPM.
 
 ## Conventions
 
