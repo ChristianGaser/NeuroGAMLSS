@@ -455,6 +455,143 @@ def test_fit_chunks_in_threads():
     assert all(np.array_equal(a, b) for a, b in zip(one, many))
 
 
+def simulate_site_variance(n=1200, p=20, sd=(0.2, 0.5, 0.1), seed=21):
+    """Normal data whose mean and noise SD differ between three sites; the log SD also
+    rises by 0.2 per unit of a covariate x."""
+    rng = np.random.default_rng(seed)
+    site = rng.integers(0, len(sd), n)
+    age = rng.uniform(20, 80, n)
+    male = rng.integers(0, 2, n).astype(float)
+    x = rng.standard_normal(n)
+    noise = (np.asarray(sd)[site] * np.exp(0.2 * x))[:, None] * rng.standard_normal((n, p))
+    return 1 - 0.01 * (age - 20)[:, None] + 0.1 * site[:, None] + noise, age, male, site, x[:, None]
+
+
+@pytest.mark.parametrize("family", ['normal', 'shash'])
+def test_site_sd(family):
+    Y, age, male, site, C = simulate_site_variance()
+    cov = NG.Covariates(('x',), (), ('x',))
+    old = NG.NormativeModel(2, 1, cov, family=family).fit(Y, age, male, site, C=C)
+    new = NG.NormativeModel(2, 1, cov, family=family, site_sd=True).fit(Y, age, male, site, C=C)
+    assert old._design(age, male, site, C)[1].shape[1] == 4     # intercept, age, sex, x
+    assert new._design(age, male, site, C)[1].shape[1] == 6     # and two site dummies
+
+    def spread(m):
+        z = m.zscores(Y, age, male, site, C)
+        return np.array([np.std(z[site == s]) for s in range(3)])
+    assert np.all(np.abs(spread(new) - 1) < 0.1)                 # calibrated at every site
+    s_old = spread(old)
+    assert s_old[1] > 1.2 and s_old[2] < 0.8                     # pooled SD
+    if family == 'normal':
+        lw = new.cov_effects(C)[1]                               # covariates stay the last columns
+        slope = np.linalg.lstsq(C - np.median(C), lw, rcond=None)[0]
+        assert abs(np.mean(slope) - 0.2) < 0.03
+        sd_ref = new.mu_sigma(age, male, C=np.full_like(C, np.median(C)))[1]
+        props = np.bincount(site) / site.size                    # reference: size-weighted mean
+        assert abs(np.mean(np.log(sd_ref)) - props @ np.log([0.2, 0.5, 0.1])) < 0.03
+    loaded = NG.NormativeModel.from_state(new.get_state())
+    assert loaded.site_sd and np.array_equal(loaded.zscores(Y, age, male, site, C),
+                                             new.zscores(Y, age, male, site, C))
+    state = old.get_state()
+    del state['site_sd']                                         # models saved before site_sd
+    assert not NG.NormativeModel.from_state(state).site_sd
+
+
+def test_command_line_site_sd(tmp_path):
+    import json
+    Y, age, male, site, _ = simulate_site_variance(n=600, p=30)
+    files = []
+    for s in range(3):
+        files.append(str(tmp_path / f's4rp1_8mm_S{s}_CAT12.9.mat'))
+        savemat(files[-1], dict(Y=Y[site == s].astype(np.float32), age=age[site == s][:, None],
+                                male=male[site == s][:, None]))
+    model, out = str(tmp_path / 'norm.npz'), str(tmp_path / 'r')
+    NG.main(['--train', '+'.join(files), '--site-sd', '--zmaps', '--family', 'normal', '--pca',
+             '10', '--df-mu', '2', '--df-sigma', '1', '--brainloss', '--kfold', '0',
+             '--save-model', model, '--out', out])
+    with open(str(tmp_path / 'norm.json')) as f:
+        assert json.load(f)['settings']['site_sd'] is True
+    s = NG.load_models(model)[0][0]
+    assert s.voxel.model.site_sd and s.brainage.site_sd
+    assert s.brainage.parts[0].model.site_sd and s.brainage.loss_model.site_sd
+    with pytest.raises(SystemExit):                              # saved models keep their design
+        NG.main(['--normative-only', '--model', model, '--site-sd', '--test', files[0]])
+
+
+def simulate_test_site(n_ctrl=150, n_pat=100, p=40, seed=31):
+    """Test sample whose data depend on age, on an image quality measure q and, for the
+    patients, on a disease effect of -0.3; q is worse with age and in the patients."""
+    rng = np.random.default_rng(seed)
+    n = n_ctrl + n_pat
+    age = rng.uniform(20, 80, n)
+    patient = np.arange(n) >= n_ctrl
+    q = rng.standard_normal(n) + 0.02 * (age - 50) + patient
+    male = rng.integers(0, 2, n).astype(float)
+    Y = ((1 - 0.01 * (age - 20))[:, None] - 0.2 * q[:, None] * rng.uniform(0.5, 1.5, p)
+         - 0.3 * patient[:, None] + 0.1 * rng.standard_normal((n, p)))
+    d = NG.Data(Y.astype(np.float32), age, male, np.zeros(n, int), 'sim_8mm_T.mat', res='8')
+    return d, q[:, None], patient
+
+
+def effects(Y, *x):
+    """Least-squares effects of the variables x on every column of Y (len(x), p)."""
+    D = np.column_stack([np.ones(len(x[0]))] + list(x))
+    return np.linalg.lstsq(D, np.asarray(Y, np.float64), rcond=None)[0][1:]
+
+
+def test_remove_nuisance_keeps_age_and_disease():
+    d, q, patient = simulate_test_site()
+    ctrl = np.flatnonzero(~patient)
+    out, rec = NG.remove_nuisance(d, q, ctrl, names=['IQR'])
+    assert rec['names'] == ['IQR'] and rec['n_controls'] == 150 and rec['explained'] > 0.3
+    e_q = effects(out.Y, d.age, patient, q[:, 0])[2]
+    assert np.all(np.abs(e_q) < 0.03)                           # quality effect removed
+    e_age, e_pat = effects(out.Y, d.age, patient)               # group comparison without q
+    assert abs(e_pat.mean() + 0.3) < 0.02                       # disease effect kept
+    assert abs(e_age.mean() + 0.01) < 0.001                     # age effect kept
+    # estimated in all subjects, the quality effect absorbs part of the disease effect
+    e_pat_all = effects(NG.remove_nuisance(d, q, np.arange(d.n))[0].Y, d.age, patient)[1]
+    assert e_pat_all.mean() > -0.27
+    q[0] = np.nan                                               # missing: no correction
+    out = NG.remove_nuisance(d, q, ctrl)[0]
+    assert np.allclose(out.Y[0], d.Y[0], atol=1e-5)
+    with pytest.raises(ValueError):                             # constant in the controls
+        NG.remove_nuisance(d, np.where(patient, 1.0, 0.0)[:, None], ctrl)
+
+
+def test_command_line_test_nuisance(tmp_path):
+    from scipy.io import loadmat
+    d, q, patient = simulate_test_site(n_ctrl=150, n_pat=60, p=30)
+    rng = np.random.default_rng(32)
+    age = rng.uniform(20, 80, 300)
+    Ytr = (1 - 0.01 * (age - 20))[:, None] + 0.15 * rng.standard_normal((300, 30))
+    tr, te = str(tmp_path / 's4rp1_8mm_TR_CAT12.9.mat'), str(tmp_path / 's4rp1_8mm_TE_CAT12.9.mat')
+    savemat(tr, dict(Y=Ytr.astype(np.float32), age=age[:, None]))
+    savemat(te, dict(Y=d.Y, age=d.age[:, None]))
+    table, out = str(tmp_path / 'iqm.csv'), str(tmp_path / 'r')
+    np.savetxt(table, np.column_stack([q, d.age]), delimiter=',', header='IQR,age', comments='')
+    base = ['--normative-only', '--family', 'normal', '--df-mu', '2', '--df-sigma', '1',
+            '--train', tr, '--test', te, '--adjust', '1:150', '--out', out]
+    mean_z = []
+    for extra in ([], ['--test-nuisance', table, '--nuisance-cols', 'IQR']):
+        NG.main(base + extra)
+        z = loadmat(out + '_zmaps_s4rp1_8mm_TE_CAT12.9.mat', squeeze_me=True,
+                    struct_as_record=False)['NDMzmap']
+        mean_z.append(np.nanmean(z.Z, axis=1))
+    assert str(z.nuisance) == 'IQR'
+    ctrl = ~patient
+    assert np.corrcoef(mean_z[0][ctrl], q[ctrl, 0])[0, 1] < -0.5
+    assert abs(np.corrcoef(mean_z[1][ctrl], q[ctrl, 0])[0, 1]) < 0.1
+    assert mean_z[1][patient].mean() < -1                      # the disease effect remains
+    with pytest.raises(SystemExit):                             # needs controls
+        NG.main([a for a in base if a not in ('--adjust', '1:150')] + ['--test-nuisance', table])
+    trcov = str(tmp_path / 'train_iqm.csv')
+    np.savetxt(trcov, rng.standard_normal((300, 1)), header='IQR', comments='')
+    with pytest.raises(SystemExit):                             # also a covariate of the models
+        NG.main(base + ['--train-cov', trcov, '--test-cov', table, '--test-nuisance', table,
+                        '--nuisance-cols', 'IQR'])
+
+
 def write_brain(tmp_path, name, d, sel, age):
     path = str(tmp_path / f's4rp{name}_CAT12.9.mat')
     savemat(path, dict(Y=np.abs(d.Y[sel]) + 0.5, age=np.asarray(age, float)[:, None],
