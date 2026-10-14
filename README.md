@@ -10,7 +10,7 @@ NeuroGAMLSS fits a generalized additive model for location, scale and shape (GAM
 - **Distribution families:** sinh-arcsinh (SHASH, the default) for skewed or heavy-tailed voxel data, normal for near-Gaussian data, and generalized gamma (GG) as in Brain Charts for positive data.
 - **Age curves:** natural cubic splines for location and scale, whose flexibility is chosen for each training sample by cross-validation. The shape is constant or, where BIC prefers it, also a function of age.
 - **Speed:** all voxels are fitted together, in parallel threads. SHASH models for 30,000 voxels and 2,241 subjects take one to two minutes on a laptop.
-- **Sites and covariates:** sites enter as fixed effects, and new sites are adapted with their control subjects. Covariates such as image quality measures can enter the mean and the standard deviation.
+- **Sites and covariates:** sites enter the mean, and optionally the standard deviation, as fixed effects, and new sites are adapted with their control subjects. Covariates such as image quality measures can enter the mean and the standard deviation.
 - **Diagnostics:** Q statistics and worm plots by age group show how well the models fit.
 - **Saved models:** fitted models are stored as `.mat` or `.npz` files with a JSON description, so new data can be scored without the training data.
 - **NormBrainAGE:** maximum-likelihood brain age with a standard error, regional brain ages for the brain lobes and a deviation score that aging does not explain. With `--brainloss`, also BrainLOSS, the tissue loss that the brain age does not explain.
@@ -180,7 +180,7 @@ With thousands of training subjects, the Q statistics detect even small misfit. 
 
 ## New sites and covariates
 
-**Training sites.** Files joined with `+` are sites, which enter the location as fixed effects. Without adaptation, z-scores refer to the size-weighted average of the training sites.
+**Training sites.** Files joined with `+` are sites, which enter the location as fixed effects. Without adaptation, z-scores refer to the size-weighted average of the training sites. With `--site-sd`, the sites also enter the log standard deviation. A site with more or less noise then no longer bends the standard deviation curve in the age range it covers, and the reference is the size-weighted average of the site effects on both parameters. In the lifespan sample, this improved the fit only slightly and only with large sites, so it is off by default, see [Sites and image quality](docs/models.md#sites-and-image-quality).
 
 **New sites.** `--adjust` lists the healthy control subjects of the test sample as 1-based indices, for example `1:108,150,160:170`. For every voxel, the z-scores of the controls are then rescaled to mean 0 and standard deviation 1. This is the location and scale step of ComBat without empirical Bayes shrinkage. `--correction` chooses how brain age uses the controls:
 
@@ -196,11 +196,25 @@ With thousands of training subjects, the Q statistics detect even small misfit. 
 
 ```bash
 python neurogamlss.py --normative-only --train A.mat --train-cov A_iqm.csv \
-    --cov-mean IQR --cov-sd IQR --save-model A_norm.npz
+    --cov-mean ICR,NCR,res_ECR,contrastr --save-model A_norm.npz
 python neurogamlss.py --normative-only --model A_norm.npz --test B.mat --test-cov B_iqm.csv --out B
 ```
 
 Covariates are centred at their training median, and z-scores condition on every subject's own values. Missing test values are replaced by the training median. Constant or collinear covariates are dropped with a note. A covariate that changes strongly with age competes with age and can make brain age less accurate.
+
+**Image quality of the test data.** `--test-nuisance` gives a table of nuisance variables of the test subjects, such as image quality measures (IQMs), in the format of `--test-cov`. Their effects are estimated in the `--adjust` controls and removed from all test data before the models are applied. The models themselves are fitted without these variables.
+
+- **Regression.** Every voxel of the controls is regressed on the nuisance variables, age and sex. Age enters as a natural spline with up to 3 df, and not at all if the controls' ages span less than 5 years.
+- **What is removed.** Only the nuisance part, relative to the controls' mean, is removed from every test subject. Effects of age and sex stay, and so do effects of a disease, because the controls have none.
+- **Options.** `--nuisance-cols` selects the columns, by default all numeric ones, and `--nuisance-df` uses natural splines instead of linear terms.
+- **Order.** The usual adaptation with the controls (`--correction`) follows.
+
+```bash
+python neurogamlss.py --normative-only --model A_norm.npz --test B.mat --adjust 1:108 \
+    --test-nuisance B_iqm.csv --nuisance-cols ICR,NCR,res_ECR,contrastr --out B
+```
+
+**Image quality measures.** As covariates of the normative models, IQMs improved the fit within the training sample and the brain age of other samples. They made the z-maps of other samples less reproducible, because their effects are learned from the quality differences of the training sample. Effects estimated within the test sample (`--test-nuisance`) worked better for z-maps if the test sample has enough subjects. Composite ratings such as the IQR add nothing to their components. See [Sites and image quality](docs/models.md#sites-and-image-quality).
 
 ## NormBrainAGE
 
@@ -297,6 +311,8 @@ python mat2image.py adni_gm4_zmaps_s4rp1_4mm_ADNI_CAT12.9.mat --subjects 1:10 --
 | `--test-male` | | text file with the sex of the test subjects, if the mat-files lack it |
 | `--train-cov`, `--test-cov` | | covariate tables |
 | `--cov-mean`, `--cov-sd`, `--cov-df` | all, none, 1 | covariates in the mean and in the log SD, and their spline degrees of freedom |
+| `--site-sd` | off | the training sites also enter the log SD |
+| `--test-nuisance`, `--nuisance-cols`, `--nuisance-df` | off, all, 1 | nuisance variables of the test subjects, such as IQMs, whose effects are estimated in the controls and removed from the test data |
 | `--parcellation` | off | lobe-wise brain age and lobe-wise mean z |
 | `--pca` | 100 | NormBrainAGE only: principal components per model and region, 0 for every voxel |
 | `--brainloss` | off | NormBrainAGE only: also BrainLOSS, the tissue loss that the brain age does not explain |
@@ -353,12 +369,12 @@ pip install -e ".[all,test]"
 python -m pytest
 ```
 
-The tests use simulated data. They check the SHASH derivatives, the GG density and normal scores, parameter recovery, the τ bound, the BIC choice of age-dependent shape, the calibration of the Q statistics, the boundary knots of the splines, the choice of the df, the mask, saving and loading of all families in both formats, the command line, and the images of `mat2image.py`.
+The tests use simulated data. They check the SHASH derivatives, the GG density and normal scores, parameter recovery, the τ bound, the BIC choice of age-dependent shape, the calibration of the Q statistics, the boundary knots of the splines, the choice of the df, the mask, site effects on the scale, the nuisance correction of test data, saving and loading of all families in both formats, the command line, and the images of `mat2image.py`.
 
 ## Limitations
 
 - **Independent voxels.** Every voxel is fitted on its own, without spatial smoothing of the parameters.
-- **Fixed site effects.** Sites are fixed effects of the location. Many small sites would be better served by random effects, which are not implemented.
+- **Fixed site effects.** Sites are fixed effects of the location and, with `--site-sd`, of the scale. Many small sites would be better served by random effects, which are not implemented.
 - **Non-converged fits.** Without the mask, about 1% of the SHASH fits did not converge, almost all in near-empty voxels. With the default mask, 1 of 3,546 gray matter voxels and 1 of 3,242 white matter voxels at 8 mm failed to converge. Such fits keep the best parameters found and are flagged in `converged`.
 - **Bounded data.** Gray and white matter densities are bounded by 0 and 1. SHASH describes the resulting skewness well but is not bounded itself.
 
