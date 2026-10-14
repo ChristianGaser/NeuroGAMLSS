@@ -2303,7 +2303,8 @@ def run_diagnostics(sets, train, prefix, n_groups=10):
     """Q statistics and worm plots of the voxel/vertex-wise models on their training
     data (z-scores at the subjects' own sites): <prefix>_diagnostics.csv (summary),
     <prefix>_diagnostics_<model>.mat (Q statistics, p-values, degrees of freedom and
-    convergence per feature) and <prefix>_wormplot_<model>.png."""
+    convergence per feature, with ind and dim of the input for mat2image.py) and
+    <prefix>_wormplot_<model>.png."""
     from scipy.io import savemat
     rows = []
     for s, d in zip(sets, train):
@@ -2325,7 +2326,9 @@ def run_diagnostics(sets, train, prefix, n_groups=10):
             Q=_full_map(q['Q'], m), p_Q=_full_map(q['p'], m), df_Q=_full_map(q['df'], m),
             age_groups=q['groups'], converged=_full_map(m.converged[None].astype(float), m)[0],
             family=m.family, model=d.name, df_mu=m.basis_mu.df, df_sigma=m.basis_sigma.df,
-            mask_threshold=(s.voxel.mask_info or {}).get('threshold', np.nan))},
+            mask_threshold=(s.voxel.mask_info or {}).get('threshold', np.nan),
+            ind=np.zeros(0) if d.ind is None else d.ind,
+            dim=np.zeros(0) if d.dim is None else d.dim)},
             do_compression=True)
         try:
             worm_plot(Z, d.age, f'{prefix}_wormplot_{name}.png',
@@ -2930,7 +2933,7 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         for s, d in zip(sets, test):
             t0 = time.time()
             z = s.voxel.zmaps(d, zc, parcellation=parcellation)
-            zm.append(dict(z, model=d.name, family=s.voxel.model.family, ind=d.ind,
+            zm.append(dict(z, model=d.name, family=s.voxel.model.family, ind=d.ind, dim=d.dim,
                            age=age, male=d.male, df_mu=s.voxel.model.df_mu,
                            df_sigma=s.voxel.model.df_sigma,
                            mask_threshold=(s.voxel.mask_info or {}).get('threshold', np.nan)))
@@ -2994,8 +2997,8 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         out['covariates'] = np.array(cov_names, dtype=object)
     if zmaps_out:
         out['zmaps'] = [dict(r['zmaps'], model=r['name'], family=s.voxel.model.family,
-                             ind=d.ind, age=age, male=d.male, df_mu=s.voxel.model.df_mu,
-                             df_sigma=s.voxel.model.df_sigma,
+                             ind=d.ind, dim=d.dim, age=age, male=d.male,
+                             df_mu=s.voxel.model.df_mu, df_sigma=s.voxel.model.df_sigma,
                              mask_threshold=(s.voxel.mask_info or {}).get('threshold', np.nan))
                         for r, d, s in zip(res, test, sets)]
     return out
@@ -3158,8 +3161,9 @@ def save_results(out, prefix):
     Brain age: <prefix>.mat (struct NDM) and <prefix>.csv.  z-maps, if computed:
     one <prefix>_zmaps_<model>.mat per model (struct NDMzmap: Z (n, n_features) in
     the feature order of the input Y, converged (n_features,), regional_z, regions,
-    region_names, age, male, model, family, ind).  With --normative-only, only the z-maps are saved and, with
-    regional z, their lobe-wise means as <prefix>.csv.
+    region_names, age, male, model, family, and ind and dim of the input, which
+    mat2image.py uses to write images).  With --normative-only, only the z-maps are
+    saved and, with regional z, their lobe-wise means as <prefix>.csv.
     """
     from scipy.io import savemat
     out = dict(out)
