@@ -56,7 +56,6 @@ The inputs are mat-files written by `BA_data2mat.m` of the [BrainAGE toolbox](ht
 | `Y` | data, subjects × voxels or vertices |
 | `age` | age in years; 0 or NaN for an unknown age |
 | `male` | sex, 1 for male and 0 for female (optional) |
-| `ind` | 1-based vertex indices of surface data |
 | `dim` | volume dimensions (optional) |
 
 Subjects with an age of 0 or NaN count as of unknown age. They are left out of fitting, of the controls and of the evaluation. NormBrainAGE still estimates their brain age, which needs no age, but their BrainAGE and z-maps are NaN. NeuroGAMLSS reports how many subjects this affects, and it stops if fewer than 10 training subjects or no controls have a valid age.
