@@ -1196,15 +1196,18 @@ class NormativeModel:
                 z = gg_score(Yv, a, s, nu)
         return (z - self.offset) / self.scale
 
-    def adapt(self, Y, age, male, C=None):
+    def adapt(self, Y, age, male, C=None, shift=None):
         """Adapt to a new site using its control subjects.
 
         Removes the mean and scales the SD of the controls' z-scores to 0 and 1
-        (the ComBat location/scale step without empirical Bayes).
+        (the ComBat location/scale step without empirical Bayes).  shift (n, p_valid)
+        is subtracted from their z-scores first (nuisance effects, VoxelModel.zmaps).
         """
         self.offset[:] = 0
         self.scale[:] = 1
         z = self.zscores(Y, age, male, C=C)
+        if shift is not None:
+            z = z - shift
         self.offset = np.nanmean(z, axis=0)
         self.scale = np.nanstd(z, axis=0, ddof=1)
         self.scale[~(self.scale > 0)] = 1
@@ -2003,30 +2006,53 @@ class VoxelModel:
         return self
 
     def zmaps(self, d: Data, ctrl=None, ctrl_age=None, parcellation=False,
-              atlas_dir=ATLAS_DIR, chunk=256):
+              atlas_dir=ATLAS_DIR, chunk=256, nuisance=None):
         """z-maps of the subjects d at chronological age.
 
         Given the indices ctrl of control subjects of d (and their ages ctrl_age,
         by default their chronological ages), a copy of the model is first
-        adapted to the site of d.  Returns Z (n, n_features) as float32, with NaN
-        for features without a model and for subjects without a valid age, the
-        convergence of the fit per feature (1, 0 or NaN without a model) and,
-        with parcellation, the lobe-wise mean z (n, n_regions), the region labels
-        and their names.
+        adapted to the site of d.  nuisance = dict(values (n, k), ctrl, df, names)
+        removes the effects of nuisance variables such as image quality measures on
+        the z-scores, estimated in the controls nuisance['ctrl'] as in
+        remove_nuisance (nuisance_design), before the adaptation.  Returns Z (n,
+        n_features) as float32, with NaN for features without a model and for
+        subjects without a valid age, the convergence of the fit per feature (1, 0
+        or NaN without a model) and, with parcellation, the lobe-wise mean z (n,
+        n_regions), the region labels and their names; with nuisance also the
+        median share of the variance of the controls' z-scores removed.
         """
         Y = d.Y if self.warper is None else self.warper.transform(d.Y)
         Cs = (lambda idx: None) if d.C is None else (lambda idx: d.C[idx])
         model = self.model.copy()
+        N = G = None
+        if nuisance is not None:
+            nc = np.asarray(nuisance['ctrl'])
+            N, P, _, _ = nuisance_design(nuisance['values'], d.age, d.male, nc,
+                                         nuisance.get('df', 1), nuisance.get('names'))
+            raw = self.model.copy()
+            raw.offset[:], raw.scale[:] = 0, 1
+            Zc = raw.zscores(Y[nc], d.age[nc], d.male[nc], C=Cs(nc))
+            fin = np.all(np.isfinite(Zc), axis=0)
+            G = np.zeros((N.shape[1], Zc.shape[1]))
+            G[:, fin] = P @ Zc[:, fin]
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                explained = float(np.nanmedian(np.var(N[nc] @ G, axis=0)[fin]
+                                               / np.var(Zc[:, fin], axis=0)))
         if ctrl is not None:
             model.adapt(Y[ctrl], d.age[ctrl] if ctrl_age is None else ctrl_age,
-                        d.male[ctrl], C=Cs(ctrl))
+                        d.male[ctrl], C=Cs(ctrl), shift=None if G is None else N[ctrl] @ G)
         Z = np.full(d.Y.shape, np.nan, dtype=np.float32)
         ok = np.flatnonzero(np.isfinite(d.age) & (d.age > 0))
         for c0 in range(0, ok.size, chunk):
             sub = ok[c0:c0 + chunk]
-            Z[np.ix_(sub, model.valid)] = model.zscores(Y[sub], d.age[sub], d.male[sub],
-                                                        C=Cs(sub))
+            z = model.zscores(Y[sub], d.age[sub], d.male[sub], C=Cs(sub))
+            if G is not None:                  # (z - nuisance - offset) / scale
+                z = z - (N[sub] @ G) / model.scale
+            Z[np.ix_(sub, model.valid)] = z
         out = dict(Z=Z, converged=_full_map(model.converged[None].astype(float), model)[0])
+        if G is not None:
+            out['nuisance_explained'] = explained
         if parcellation:
             atlas, regions, names = lobe_atlas(d, atlas_dir)
             with warnings.catch_warnings():
@@ -2905,23 +2931,15 @@ def fit_models(train, kw, brainage=True, voxel=False, vkw=None):
     return sets
 
 
-def remove_nuisance(d: Data, Q, ctrl, df=1, names=None, chunk=20000):
-    """Test data d without the effects of nuisance variables Q (n, k), such as image
-    quality measures, estimated in the control subjects ctrl of the test sample.
+def nuisance_design(Q, age, male, ctrl, df=1, names=None):
+    """Regression of the nuisance correction (remove_nuisance, VoxelModel.zmaps).
 
-    Every voxel/vertex of the controls is regressed on an intercept, a natural spline
-    of age (up to 3 df by the number of controls; none if their ages span less than 5
-    years, as for repeated scans of one subject), sex and natural splines of the
-    nuisance variables with df degrees of
-    freedom (1 = linear).  The nuisance part, relative to its mean in the controls, is
-    removed from all test subjects, whose data then enter models fitted without these
-    variables.  Effects of age and sex are kept, and so are effects of a disease, which
-    the controls do not have.  Values outside the range of the controls are
-    extrapolated linearly, and missing values are set to the mean of the controls (no
-    correction).  Returns the corrected data and a record with the share of the
-    controls' variance removed (median over voxels/vertices).
+    Returns the nuisance bases N (n, k) of all subjects, centred at their mean in the
+    controls ctrl, the rows P (k, n_controls) of the pseudo-inverse of the controls'
+    design that give the nuisance coefficients of any data of the controls, the names
+    of the variables used and the df of age.
     """
-    Q = np.asarray(Q, dtype=np.float64).reshape(d.n, -1)
+    Q = np.asarray(Q, dtype=np.float64).reshape(len(age), -1)
     names = [str(j + 1) for j in range(Q.shape[1])] if names is None else list(names)
     ctrl = np.asarray(ctrl)
     with warnings.catch_warnings():
@@ -2940,18 +2958,38 @@ def remove_nuisance(d: Data, Q, ctrl, df=1, names=None, chunk=20000):
     if not used:
         raise ValueError("No nuisance variable varies in the control subjects.")
     N = np.hstack(bases)
-    age = d.age[ctrl]
-    age_df = 0 if np.ptp(age) < 5 else min(3, max(1, ctrl.size // 20))
+    a = np.asarray(age, dtype=np.float64)[ctrl]
+    age_df = 0 if np.ptp(a) < 5 else min(3, max(1, ctrl.size // 20))
     cols = [np.ones((ctrl.size, 1))]
     if age_df:
-        cols.append(NaturalSpline(age, age_df)(age))
-    if np.unique(d.male[ctrl]).size > 1:
-        cols.append(np.asarray(d.male[ctrl], dtype=np.float64)[:, None])
+        cols.append(NaturalSpline(a, age_df)(a))
+    if np.unique(male[ctrl]).size > 1:
+        cols.append(np.asarray(male[ctrl], dtype=np.float64)[:, None])
     D = np.hstack(cols + [N[ctrl]])
     if ctrl.size <= D.shape[1]:
         raise ValueError(f"{ctrl.size} controls are too few for {D.shape[1]} regression terms "
                          "of the nuisance correction.")
-    P = np.linalg.pinv(D)[-N.shape[1]:]            # rows of the nuisance coefficients
+    return N, np.linalg.pinv(D)[-N.shape[1]:], used, age_df
+
+
+def remove_nuisance(d: Data, Q, ctrl, df=1, names=None, chunk=20000):
+    """Test data d without the effects of nuisance variables Q (n, k), such as image
+    quality measures, estimated in the control subjects ctrl of the test sample.
+
+    Every voxel/vertex of the controls is regressed on an intercept, a natural spline
+    of age (up to 3 df by the number of controls; none if their ages span less than 5
+    years, as for repeated scans of one subject), sex and natural splines of the
+    nuisance variables with df degrees of
+    freedom (1 = linear).  The nuisance part, relative to its mean in the controls, is
+    removed from all test subjects, whose data then enter models fitted without these
+    variables.  Effects of age and sex are kept, and so are effects of a disease, which
+    the controls do not have.  Values outside the range of the controls are
+    extrapolated linearly, and missing values are set to the mean of the controls (no
+    correction).  Returns the corrected data and a record with the share of the
+    controls' variance removed (median over voxels/vertices).
+    """
+    ctrl = np.asarray(ctrl)
+    N, P, used, age_df = nuisance_design(Q, d.age, d.male, ctrl, df, names)
     Y = np.array(d.Y, dtype=np.float32)
     share = np.full(Y.shape[1], np.nan)
     idx = np.flatnonzero(np.all(np.isfinite(Y[ctrl]), axis=0))
@@ -3014,17 +3052,23 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
             raise ValueError("None of the control subjects has a valid age (0 or NaN).")
     zc = None if correction == 'none' else ctrl
     cov_names = test[0].cov_names
-    nuis = None
+    nuis = nz = None
+    test_ba = test                 # data of the brain age models
     if nuisance is not None:
         if adjust is None:
             raise ValueError("The nuisance correction needs the control subjects (adjust).")
-        res = [remove_nuisance(d, nuisance['values'], ctrl, nuisance.get('df', 1),
-                               nuisance['names']) for d in test]
-        test, recs = [r[0] for r in res], [r[1] for r in res]
-        nuis = dict(names=recs[0]['names'], explained=[r['explained'] for r in recs])
-        print(f"Nuisance variables {', '.join(nuis['names'])} removed from the test data, "
-              f"estimated in {ctrl.size} controls; median share of their variance: "
-              + ', '.join(f"{100 * v:.1f}%" for v in nuis['explained']), flush=True)
+        nz = dict(nuisance, ctrl=ctrl)
+        names = nuisance_design(nuisance['values'], age, test[0].male, ctrl,
+                                nuisance.get('df', 1), nuisance['names'])[2]
+        nuis = dict(names=names, explained=[])
+        if not normative_only:
+            res = [remove_nuisance(d, nuisance['values'], ctrl, nuisance.get('df', 1),
+                                   nuisance['names']) for d in test]
+            test_ba = [r[0] for r in res]
+            nuis['explained'] = [r[1]['explained'] for r in res]
+        print(f"Nuisance variables {', '.join(names)}: effects estimated in {ctrl.size} "
+              "controls and removed from the test data (brain age) and z-scores (z-maps)",
+              flush=True)
 
     if normative_only:
         if correction == 'agefree':
@@ -3032,7 +3076,7 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         zm = []
         for s, d in zip(sets, test):
             t0 = time.time()
-            z = s.voxel.zmaps(d, zc, parcellation=parcellation)
+            z = s.voxel.zmaps(d, zc, parcellation=parcellation, nuisance=nz)
             zm.append(dict(z, model=d.name, family=s.voxel.model.family, ind=d.ind, dim=d.dim,
                            age=age, male=d.male, df_mu=s.voxel.model.df_mu,
                            df_sigma=s.voxel.model.df_sigma,
@@ -3056,7 +3100,7 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
     gpr_post = 'offset' if correction in ('adapt', 'agefree') else post
     gpr = gpr and train is not None
     res = []
-    for i, (s, dte) in enumerate(zip(sets, test)):
+    for i, (s, dte, draw) in enumerate(zip(sets, test_ba, test)):
         t0 = time.time()
         est = s.brainage.copy()
         if correction == 'adapt':
@@ -3081,8 +3125,9 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
             r['gpr'] = gpr_baseline(train[i].Y, train[i].age, dte.Y)
             r['gpr_ba'] = correct_age(r['gpr'], age, ctrl, gpr_post) - age
         if zmaps_out:
-            r['zmaps'] = s.voxel.zmaps(dte, zc, out['age'][zc] if correction == 'agefree' else None,
-                                       parcellation or est.parcellation, est.atlas_dir)
+            r['zmaps'] = s.voxel.zmaps(
+                draw, zc, out['age'][zc] if correction == 'agefree' else None,
+                parcellation or est.parcellation, est.atlas_dir, nuisance=nz)
         res.append(r)
         print(f"  {dte.name}: {time.time() - t0:.1f}s", flush=True)
     if adjust is None:
@@ -3108,13 +3153,15 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
 
 def _add_nuisance(out, nuis):
     """Record of the nuisance correction in the results and z-maps: the names and the
-    median share of the controls' variance removed (per model)."""
+    median share of the controls' variance removed (brain age data per model; the
+    z-maps keep their own share of the variance of the z-scores)."""
     if nuis is None:
         return
     out['nuisance'] = np.array(nuis['names'], dtype=object)
-    out['nuisance_explained'] = np.array(nuis['explained'], dtype=np.float64)
-    for z, explained in zip(out.get('zmaps') or [], nuis['explained']):
-        z['nuisance'], z['nuisance_explained'] = out['nuisance'], explained
+    if nuis['explained']:
+        out['nuisance_explained'] = np.array(nuis['explained'], dtype=np.float64)
+    for z in out.get('zmaps') or []:
+        z['nuisance'] = out['nuisance']
 
 
 def train_test(train, test, adjust=None, correction='offset', age_range=(0, np.inf),
