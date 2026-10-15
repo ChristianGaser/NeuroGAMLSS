@@ -9,7 +9,7 @@ NeuroGAMLSS fits a generalized additive model for location, scale and shape (GAM
 
 - **Distribution families:** sinh-arcsinh (SHASH, the default) for skewed or heavy-tailed voxel data, normal for near-Gaussian data, and generalized gamma (GG) as in Brain Charts for positive data.
 - **Age curves:** natural cubic splines for location and scale, whose flexibility is chosen for each training sample by cross-validation. The shape is constant or, where BIC prefers it, also a function of age.
-- **Speed:** all voxels are fitted together, in parallel threads. SHASH models for 30,000 voxels and 2,241 subjects take one to two minutes on a laptop.
+- **Speed:** all voxels are fitted together, in parallel threads. SHASH models for 30,000 voxels and 2,241 subjects take less than half a minute on a laptop, including the choice of the df.
 - **Sites and covariates:** sites enter the mean, and optionally the standard deviation, as fixed effects, and new sites are adapted with their control subjects. Covariates such as image quality measures can enter the mean and the standard deviation.
 - **Diagnostics:** Q statistics and worm plots by age group show how well the models fit.
 - **Saved models:** fitted models are stored as `.mat` or `.npz` files with a JSON description, so new data can be scored without the training data.
@@ -344,23 +344,23 @@ z = m.zscores(Y_new, age_new, male_new)          # columns m.valid of Y_new
 
 ## Speed
 
-NeuroGAMLSS fits chunks of voxels in parallel threads, by default as many as half the CPU count, which on most machines are the physical or performance cores. `--jobs` sets another number, and the results do not depend on it. On an Apple M2, four threads were 2.4 times faster than one core. More threads did not help there, because the other four cores are slower efficiency cores and the computation is limited by memory speed.
+NeuroGAMLSS fits chunks of voxels in parallel threads, by default as many as half the CPU count, which on most machines are the physical or performance cores. `--jobs` sets another number, and the results do not depend on it. On an Apple M2, four threads were 1.9 times faster than one core. More threads did not help there, because the other four cores are slower efficiency cores and the computation is limited by memory speed.
 
 Times for fitting with fixed df to 2,241 training subjects on an Apple M2 laptop, with four threads and the default mask:
 
 | Data | Voxels | normal, gray matter | normal, white matter | shash, gray matter | shash, white matter |
 |---|---|---|---|---|---|
-| 8 mm volume | 3,747 | 1 s | 1 s | 7 s | 13 s |
-| 4 mm volume | 29,852 | 8 s | 11 s | 56 s | 97 s |
+| 8 mm volume | 3,747 | 0.7 s | 0.6 s | 2 s | 2 s |
+| 4 mm volume | 29,852 | 5 s | 6 s | 18 s | 18 s |
 
-White matter is more skewed than gray matter, and its SHASH fits take longer. Memory is bounded by processing the voxels in chunks.
+The normal fits pool subjects with the same age, sex and site, which helps where ages are given in whole years and no continuous covariates are used. Three of the four training samples here give whole years. Memory is bounded by processing the voxels in chunks.
 
 The automatic choice of the df adds the following times for gray matter. Fixed df given with `--df-mu` and `--df-sigma` skip it.
 
 | Choice of the df | 8 mm | 4 mm |
 |---|---|---|
-| z-map models | 20 s | 20 s |
-| brain age models | 40 s | 79 s |
+| z-map models | 9 s | 9 s |
+| brain age models | 34 s | 46 s |
 
 ## Tests
 
