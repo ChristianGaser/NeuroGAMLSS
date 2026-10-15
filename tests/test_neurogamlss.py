@@ -455,6 +455,49 @@ def test_fit_chunks_in_threads():
     assert all(np.array_equal(a, b) for a, b in zip(one, many))
 
 
+def test_cells_give_the_same_fit(monkeypatch):
+    """Subjects with the same rows of the designs (whole-year ages) are pooled into
+    cells.  The fit equals the one over the subjects, also for data far from 0, and
+    does not depend on the threads."""
+    Y, age, male, site, _, _ = simulate_shash(n=1000, p=30)
+    age = np.round(age)
+    Y = Y + 1000                             # sums of squares around a large mean
+    m = NG.NormativeModel(4, 2)
+    site = m._setup(age, male, site)
+    X, W = m._design(age, male, site)
+    assert len(NG._cells(X, W)[1]) < 0.5 * len(age)
+    one = NG.fit_location_scale(Y, X, W, max_elements=1000 * 7, jobs=1)
+    many = NG.fit_location_scale(Y, X, W, max_elements=1000 * 7, jobs=3)    # 5 chunks
+    assert all(np.array_equal(a, b) for a, b in zip(one, many))
+    monkeypatch.setattr(NG, 'CELL_SHARE', 0.0)                  # every subject on its own
+    assert NG._cells(X, W) is None
+    ref = NG.fit_location_scale(Y, X, W, max_elements=1000 * 7, jobs=1)
+    assert np.all(one[2]) and np.all(ref[2])
+    assert np.max(np.abs(X @ (one[0] - ref[0])) / np.exp(W @ ref[1])) < 1e-5
+    assert np.max(np.abs(W @ (one[1] - ref[1]))) < 1e-5
+
+
+def test_intercept_only_shape_blocks():
+    """The predictors of shape blocks with the intercept alone are rows that broadcast.
+    The fit equals the one from a design with an additional zero column, also where
+    the bound of tau is reached."""
+    Y, age, male, site, _, _ = simulate_shash(n=800, p=12)
+    m = NG.NormativeModel(4, 2).fit(Y, age, male, site)
+    X, W = m._design(age, male, site)
+    one = np.ones((len(age), 1))
+    bound = (3, np.log(NG.TAU_MIN), np.log(1.1))         # tau of the simulation up to 1.4
+    fits = [NG.fit_distribution(Y, [X, W, V, V], NG.shash_terms,
+                                [m.beta, m.theta] + [np.zeros((V.shape[1], Y.shape[1]))] * 2,
+                                (2, 3), 1.0, bound, jobs=1)
+            for V in (one, np.column_stack([one, np.zeros(len(age))]))]
+    (c1, l1, v1), (c2, l2, v2) = fits
+    assert np.all(v1) and np.all(v2)
+    assert np.any(c1[3][0] > np.log(1.1))                # bound reached
+    assert all(np.allclose(a, b[:len(a)], rtol=0, atol=1e-6) for a, b in zip(c1, c2))
+    assert np.all(c2[2][1] == 0) and np.all(c2[3][1] == 0)
+    assert np.allclose(l1, l2, rtol=0, atol=1e-5)
+
+
 def simulate_site_variance(n=1200, p=20, sd=(0.2, 0.5, 0.1), seed=21):
     """Normal data whose mean and noise SD differ between three sites; the log SD also
     rises by 0.2 per unit of a covariate x."""
