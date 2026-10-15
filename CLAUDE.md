@@ -37,8 +37,8 @@ The module is organized in sections, in this order.
 2. **Normative model.** `NormativeModel` is one GAMLSS per feature, fitted for all features at once.
    - **Designs.** μ uses intercept, natural spline of age, sex, site dummies and covariates. log σ uses the same terms except the site dummies, which `site_sd` (`--site-sd`) adds. Covariates are the last columns of both designs (`cov_effects`).
    - **Splines.** `NaturalSpline` places its boundary knots at the quantiles `SPLINE_BOUNDARY` and is linear outside them.
-   - **Normal family.** `fit_location_scale` fits it with the RS algorithm, ported from ComBatLS.
-   - **SHASH and GG.** They start from the normal fit and are refined by `fit_distribution`: penalized Newton steps with exact SHASH or numerical GG derivatives, shape priors and a bound on τ.
+   - **Normal family.** `fit_location_scale` fits it with the RS algorithm, ported from ComBatLS. Subjects with the same rows of both designs form cells (`_cells`); with at most `CELL_SHARE` cells per subject, the updates use the cell means and the sums of squares within cells, which gives the same fit faster. Continuous covariates or exact ages (e.g. in days) give nearly one cell per subject, and then the subjects are used directly.
+   - **SHASH and GG.** They start from the normal fit and are refined by `fit_distribution`: penalized Newton steps with exact SHASH or numerical GG derivatives, shape priors and a bound on τ. Trial steps are evaluated with their derivatives, so an accepted step is not evaluated again. Intercept-only shape blocks pass their predictor as a row (1, p), which `shash_terms` and `gg_terms` broadcast.
 3. **NormBrainAGE.** `NDMBrainAge` works on parts: the whole brain and, with `--parcellation`, each lobe of the atlas in `atlases/`.
    - **Pipeline per part.** Standardized voxels → PCA (`_pca`, via the Gram matrix) → normal `NormativeModel` of the scores → `ResidualCorrelation` R → log-likelihood on an age grid (`_loglik_grid`) → maximum with Laplace SE (`_argmax_refine`).
    - **`pca=0`.** It fits every voxel with a low-rank R. With the normal family, `VoxelModel.from_ndm` shares this model with the z-maps.

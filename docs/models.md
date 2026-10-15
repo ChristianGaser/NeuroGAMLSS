@@ -105,6 +105,8 @@ The normal model is fitted by the RS algorithm of GAMLSS, ported from ComBatLS (
 
 Iterations stop when the location changes by less than $`10^{-6}\sigma`$ and the coefficients of $`\log\, \sigma`$ by less than $`10^{-6}`$, or after 2,000 iterations. All voxels are updated together with batched linear algebra, in chunks of voxels that run in parallel threads.
 
+Subjects with the same rows of both designs, such as the same age, sex and site without continuous covariates, have the same $`\mu`$ and $`\sigma`$. If there are at most 0.7 of these cells per subject (`CELL_SHARE`), both updates use the mean of $`y`$ and the sum of squares around it in every cell instead of the single subjects. The sum of squared residuals of a cell of $`m`$ subjects is then $`\sum_i (y_i - \bar y)^2 + m (\bar y - \mu)^2`$, which avoids the cancellation of $`\sum_i y_i^2 - 2 \mu \sum_i y_i + m \mu^2`$ for data far from 0. The fit is the same up to the convergence tolerance.
+
 ### SHASH and GG: penalized Newton steps
 
 The models with shape parameters maximize, for every voxel, the penalized log-likelihood
@@ -121,10 +123,10 @@ The coefficients are updated by Newton steps for all voxels at once:
 
 - **Derivatives.** The first and second derivatives of $`\log\, f`$ with respect to the linear predictors are exact for SHASH. For GG, they are central differences with step $`10^{-4}`$. The gradient and the Hessian of every voxel are assembled from these derivatives with one matrix product per pair of predictors.
 - **Squared scores.** Where the negative Hessian plus the prior is not positive definite, the outer product of the scores replaces it (the BHHH approximation). This always gives an ascent direction. gamlss.dist uses the same squared-score approximation for the expected second derivatives of SHASH.
-- **Step halving.** A step is halved, up to 30 times, until the penalized log-likelihood does not decrease, as in the autostep of gamlss.
+- **Step halving.** A step is halved, up to 30 times, until the penalized log-likelihood does not decrease, as in the autostep of gamlss. Every trial step is evaluated with its derivatives, so that the gradient and the Hessian of an accepted step are ready for the next iteration without a second evaluation.
 - **Convergence.** A voxel stops when half its Newton decrement falls below $`10^{-9}`$ per subject. Voxels that reach 500 iterations, or whose step cannot be improved by halving, keep their best fit and are flagged as not converged.
 - **Parallel chunks.** The voxels are processed in chunks of about 500,000 values, which run in parallel threads (`--jobs`, by default half the CPU count). NumPy releases Python's global lock in its array operations, so the threads use several cores. The chunks do not depend on the number of threads, so neither do the results.
-- **Arithmetic.** One exponential of $`t`$ gives $`\sinh\, t`$, $`\cosh\, t`$, $`\tanh\, t`$ and $`\cosh\, 2t`$, and $`\mathrm{asinh}\, z`$ is computed as $`\mathrm{log1p}(|z| + z^2/(1 + \sqrt{1 + z^2}))`$ with the sign of $`z`$, which is accurate also for small $`|z|`$.
+- **Arithmetic.** One exponential of $`t`$ gives $`\sinh\, t`$, $`\cosh\, t`$, $`\tanh\, t`$ and $`\cosh\, 2t`$, and $`\mathrm{asinh}\, z`$ is computed as $`\mathrm{log1p}(|z| + z^2/(1 + \sqrt{1 + z^2}))`$ with the sign of $`z`$, which is accurate also for small $`|z|`$. Exponentials and logarithms take most of the time, so the log-density uses only two more: the exponential for $`1/(\sigma\tau)`$ and one logarithm of $`\cosh(t)/\sqrt{1 + z^2}`$. Constant $`\nu`$ and $`\tau`$ enter as one value per voxel rather than one per subject.
 - **Mixed algorithm.** The optimizer can start with iterations that ignore the cross-derivatives between predictors, as the RS phase of the mixed algorithm of gamlss (`rs_iter` of `fit_distribution`). This was slower without better fits for SHASH and is off by default.
 
 In 8 mm gray and white matter of 2,241 subjects without a mask, 0.7% and 0.9% of the voxels did not converge. These voxels contain almost no tissue, with a median density of 0.001, and only a few subjects have nonzero values. Their raw skewness is about 10, and most of them have $`\tau`$ between 0.2 and 0.4. With the default mask, 1 of 3,546 gray matter voxels and 1 of 3,242 white matter voxels did not converge.
