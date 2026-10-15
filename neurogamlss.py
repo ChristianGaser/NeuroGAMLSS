@@ -157,6 +157,12 @@ VOXEL_DEFAULTS = dict(family='shash', shape_df=0, tau_max=2.0, shape_prior=1.0,
 MASK_DEFAULT = dict(volume='0.05', surface='5%')
 TAU_MIN = 0.2                  # lower bound of the shash tail parameter
 
+# subjects with the same rows of the designs of mu and sigma (the same age, sex and site
+# without continuous covariates) form cells; the normal fits work on the cells if there
+# are at most this many per subject (fit_location_scale), below the break-even of about
+# 0.8 on an Apple M2
+CELL_SHARE = 0.7
+
 # boundary knots of all natural splines (age, shape, covariates) at these quantiles of
 # the training values; the splines are linear outside them, so that single extreme
 # subjects do not bend the curves (as restricted cubic splines)
@@ -565,9 +571,22 @@ class NaturalSpline:
         return self
 
 
-def _deviance(r, eta):
-    """-2 log-likelihood of N(mu, exp(eta)^2) given residuals r = y - mu."""
-    return np.sum(np.log(2 * np.pi) + 2 * eta + r ** 2 * np.exp(-2 * eta), axis=0)
+def _cells(X, W):
+    """Cells of subjects with the same rows of X and W, which have the same mu and
+    sigma: the cell of every subject, the first subject and the number of subjects
+    of every cell; None if there are more than CELL_SHARE cells per subject."""
+    _, first, cell, counts = np.unique(np.hstack([X, W]), axis=0, return_index=True,
+                                       return_inverse=True, return_counts=True)
+    if first.size > CELL_SHARE * len(X):
+        return None
+    return cell.ravel(), first, counts
+
+
+def _deviance(S, eta, size=None):
+    """-2 log-likelihood of N(mu, exp(eta)^2) given the sums S of the squared residuals
+    y - mu of the subjects of every row (size: their number; None: one)."""
+    base = np.log(2 * np.pi) + 2 * eta
+    return np.sum((base if size is None else size * base) + S * np.exp(-2 * eta), axis=0)
 
 
 def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000, init=None,
@@ -579,18 +598,32 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000,
     identity link for mu, log link for sigma): alternate a weighted
     least-squares update of beta with a Fisher-scoring update of theta,
     halving the theta step if the deviance increases.  W[:, 0] must be the
-    intercept.  Features are processed in chunks of max_elements values, in
-    parallel threads (jobs, see _jobs); the chunks do not depend on jobs, so the
-    results do not either.  init = (beta, theta) starts from a previous solution
-    instead of OLS.
+    intercept.  Subjects with the same rows of X and W have the same mu and sigma;
+    if they form few cells (_cells), the updates use the mean of y and the sum of
+    squares around it in every cell instead of the subjects, which gives the same
+    fit with less computation.  Features are processed in chunks of max_elements
+    values, in parallel threads (jobs, see _jobs); the chunks do not depend on jobs,
+    so the results do not either.  init = (beta, theta) starts from a previous
+    solution instead of OLS.
 
     Returns beta (kx, p), theta (kw, p), converged (p,)
     """
     n, p = Y.shape
     kx, kw = X.shape[1], W.shape[1]
-    XX = (X[:, :, None] * X[:, None, :]).reshape(n, kx * kx)
-    X_pinv = np.linalg.pinv(X)
-    W_pinv = np.linalg.pinv(W)
+    cells = _cells(X, W)
+    size = None                                    # subjects per row of X and W: one
+    if cells is not None:                          # one row per cell
+        cell, first, counts = cells
+        order = np.argsort(cell, kind='stable')
+        starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
+        X, W, size = X[first], W[first], counts[:, None].astype(np.float64)
+    XX = (X[:, :, None] * X[:, None, :]).reshape(len(X), kx * kx)
+    if size is None:
+        X_pinv, W_pinv = np.linalg.pinv(X), np.linalg.pinv(W)
+    else:                                          # least squares over the subjects
+        root = np.sqrt(size)
+        X_pinv = np.linalg.pinv(root * X) * root.T
+        W_pinv = np.linalg.pinv(root * W) / root.T
 
     beta = np.empty((kx, p))
     theta = np.empty((kw, p))
@@ -598,37 +631,50 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000,
 
     step = max(1, max_elements // n)
 
+    def squares(r, Q):
+        """Sums of the squared residuals of the subjects of every row from the
+        residuals r of the row means and the sums of squares Q within the cells."""
+        return r ** 2 if Q is None else size * r ** 2 + Q
+
     def run(start):
         y_all = np.asarray(Y[:, start:start + step], dtype=np.float64)
+        Q_all = None
+        if size is not None:                       # mean and sum of squares of every cell
+            y_all = y_all[order]
+            mean = np.add.reduceat(y_all, starts, axis=0) / size
+            y_all -= np.repeat(mean, counts, axis=0)
+            Q_all = np.add.reduceat(y_all ** 2, starts, axis=0)
+            y_all = mean
 
         if init is not None:
             b_all = np.array(init[0][:, start:start + step], dtype=np.float64)
             t_all = np.array(init[1][:, start:start + step], dtype=np.float64)
         else:                                      # start: OLS mean, constant sigma
             b_all = X_pinv @ y_all
-            r = y_all - X @ b_all
             t_all = np.zeros((kw, y_all.shape[1]))
-            t_all[0] = 0.5 * np.log(np.mean(r ** 2, axis=0))
+            t_all[0] = 0.5 * np.log(np.sum(squares(y_all - X @ b_all, Q_all), axis=0) / n)
 
         active = np.arange(y_all.shape[1])
         for _ in range(max_iter):
             y, b, t = y_all[:, active], b_all[:, active], t_all[:, active]
+            Q = None if Q_all is None else Q_all[:, active]
             eta = W @ t
 
             # mu step: weighted least squares with weights 1/sigma^2
             w = np.exp(-2 * eta)
-            A = (XX.T @ w).T.reshape(-1, kx, kx)
-            rhs = (X.T @ (w * y)).T[..., None]
+            sw = w if size is None else size * w
+            A = (XX.T @ sw).T.reshape(-1, kx, kx)
+            rhs = (X.T @ (sw * y)).T[..., None]
             b_new = np.linalg.solve(A, rhs)[..., 0].T
             d_mu = np.max(np.abs(X @ (b_new - b)) * np.exp(-eta), axis=0)
-            r = y - X @ b_new
+            S = squares(y - X @ b_new, Q)
 
             # sigma step: Fisher scoring on log(sigma)
-            dev_old = _deviance(r, eta)
-            d_t = W_pinv @ (0.5 * (r ** 2 * w - 1))
+            dev_old = _deviance(S, eta, size)
+            d_t = W_pinv @ (0.5 * (S * w - (1 if size is None else size)))
             t_new = t + d_t
             eta_new = W @ t_new
-            dev_new = _deviance(r, eta_new)
+            dev_new = _deviance(S, eta_new, size)
             for _ in range(20):                    # step halving (gamlss autostep)
                 worse = dev_new > dev_old
                 if not np.any(worse):
@@ -636,7 +682,7 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000,
                 d_t[:, worse] *= 0.5
                 t_new[:, worse] = t[:, worse] + d_t[:, worse]
                 eta_new[:, worse] = W @ t_new[:, worse]
-                dev_new[worse] = _deviance(r[:, worse], eta_new[:, worse])
+                dev_new[worse] = _deviance(S[:, worse], eta_new[:, worse], size)
             d_theta = np.max(np.abs(t_new - t), axis=0)
 
             b_all[:, active] = b_new
@@ -669,46 +715,56 @@ def shash_terms(y, a, s, n, e, order=2):
 
     Sinh-arcsinh distribution (Jones & Pewsey 2009) in the SHASHo2 parameterization
     of gamlss.dist: z = (y - mu) / (sigma tau) and sinh(tau asinh(z) - nu) ~ N(0, 1).
-    a = mu, s = log sigma, n = nu and e = log tau are the linear predictors.  Returns
-    the log-density and, up to the given order, its first derivatives (a, s, n, e)
-    and its exact second derivatives {(i, j): d2 l / d i d j} for i <= j (None if
-    not requested).  nu = 0, tau = 1 is the normal distribution.
+    a = mu, s = log sigma, n = nu and e = log tau are the linear predictors, which
+    broadcast against y (e.g. rows (1, p) of constant shape).  Returns the
+    log-density and, up to the given order, its first derivatives (a, s, n, e) and
+    its exact second derivatives {(i, j): d2 l / d i d j} for i <= j (None if not
+    requested).  nu = 0, tau = 1 is the normal distribution.
     """
     with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
         return _shash_terms(y, a, s, n, e, order)
 
 
 def _shash_terms(y, a, s, n, e, order):
+    # the exponentials and logarithms dominate the time: one exponential each gives
+    # 1/(sigma tau) and sinh, cosh of t, and log(cosh(t) q) is a single logarithm
     tau = np.exp(e)
-    S = np.exp(s + e)                            # sigma tau
-    z = (y - a) / S
+    iS = np.exp(-(s + e))                        # 1 / (sigma tau)
+    z = (y - a) * iS
     z2 = z * z
     rq = np.sqrt(1 + z2)                         # 1 / q
     u = np.copysign(np.log1p(np.abs(z) + z2 / (1 + rq)), z)     # asinh(z)
-    t = np.clip(tau * u - n, -300, 300)
+    tu = tau * u
+    t = np.clip(tu - n, -300, 300)
     et = np.exp(t)
     iet = 1 / et
     r, c = 0.5 * (et - iet), 0.5 * (et + iet)    # sinh(t), cosh(t)
-    ll = np.log(c) - s - 0.5 * np.log1p(z2) - 0.5 * r * r - 0.5 * LOG2PI
+    q = 1 / rq
+    ll = np.log(c * q) - s - 0.5 * r * r - 0.5 * LOG2PI
     if order < 1:
         return ll, None, None
-    q = 1 / rq
-    q2 = q * q
-    g = r / c - r * c                            # d l / d t = tanh(t) - sinh(t) cosh(t)
-    Lz = g * tau * q - z * q2                    # d l / d z
-    d1 = (-Lz / S, -1 - z * Lz, -g, g * tau * u - z * Lz)
+    tq = tau * q
+    zq2 = z * q * q
+    ic = 1 / c
+    g = r * (ic - c)                             # d l / d t = tanh(t) - sinh(t) cosh(t)
+    Lz = g * tq - zq2                            # d l / d z
+    zLz = z * Lz
+    d1 = (-Lz * iS, -1 - zLz, -g, g * tu - zLz)
     if order < 2:
         return ll, d1, None
-    c2 = c * c
-    gp = 1 / c2 - (c2 + r * r)                   # d g / d t = sech(t)^2 - cosh(2 t)
-    Lzz = gp * (tau * q) ** 2 - g * tau * z * q2 * q - q2 + 2 * (z * q2) ** 2
-    Lze = tau * q * (gp * tau * u + g)
+    gp = ic * ic - 2 * c * c + 1                 # d g / d t = sech(t)^2 - cosh(2 t)
+    gptq = gp * tq
+    Lzz = (gptq - g * zq2) * tq - q * q + 2 * zq2 * zq2       # d2 l / d z2
+    h = gp * tu + g
+    Lze = tq * h                                 # d (d l / d z) / d log tau
     w = u - z * q
-    zz = z * Lz + z * z * Lzz
-    d2 = {(0, 0): Lzz / S ** 2, (0, 1): (z * Lzz + Lz) / S, (0, 2): gp * tau * q / S,
-          (0, 3): (z * Lzz - Lze + Lz) / S, (1, 1): zz, (1, 2): z * gp * tau * q,
-          (1, 3): zz - z * Lze, (2, 2): gp, (2, 3): -gp * tau * w,
-          (3, 3): gp * tau ** 2 * u * w + g * tau * w + zz - z * Lze}
+    zLzz = z * Lzz
+    zz = zLz + z * zLzz
+    d01 = zLzz + Lz
+    d13 = zz - z * Lze
+    d2 = {(0, 0): Lzz * iS * iS, (0, 1): d01 * iS, (0, 2): gptq * iS,
+          (0, 3): (d01 - Lze) * iS, (1, 1): zz, (1, 2): z * gptq,
+          (1, 3): d13, (2, 2): gp, (2, 3): -gp * tau * w, (3, 3): tau * w * h + d13}
     return ll, d1, d2
 
 
@@ -804,8 +860,10 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
     """Penalized maximum likelihood fit of a distribution for every column of Y.
 
     Every parameter block b has a linear predictor eta_b = designs[b] @ coef_b;
-    terms(y, *etas, order) returns the log-density per observation and, for order 2,
-    its first and second derivatives with respect to the linear predictors.
+    terms(y, *etas, order) returns the log-density per observation and, up to the
+    given order, its first and second derivatives with respect to the linear
+    predictors.  Blocks whose design is the intercept alone (constant shape) pass
+    their predictor as a row (1, p), which terms must broadcast.
     Columns are fitted at once by Newton steps: gradient and Hessian are assembled
     by matrix products over observations.  As in the mixed() algorithm of gamlss,
     the first rs_iter iterations can ignore the cross-derivatives between parameter
@@ -814,10 +872,11 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
     default.  Where the Hessian is not negative definite, the outer
     product of the scores is used instead, which is always an ascent direction (the
     squared-score weights of gamlss).  Steps are halved until the penalized
-    log-likelihood increases (the autostep of gamlss), and columns stop when the
-    Newton decrement falls below tol per observation.  Columns are processed in
-    chunks of max_elements values, in parallel threads (jobs, see _jobs); the chunks
-    do not depend on jobs, so the results do not either.
+    log-likelihood increases (the autostep of gamlss); every trial step is evaluated
+    with its derivatives, so that an accepted step is not evaluated again.  Columns
+    stop when the Newton decrement falls below tol per observation.  Columns are
+    processed in chunks of max_elements values, in parallel threads (jobs, see
+    _jobs); the chunks do not depend on jobs, so the results do not either.
 
     shape_blocks : blocks whose coefficients get N(0, prior_sd^2) priors, which shrink
                    the shape parameters toward the normal distribution
@@ -834,6 +893,7 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
     pairs = [(i, j) for i in range(nb) for j in range(i, nb)]
     OD = {(i, j): (designs[i][:, :, None] * designs[j][:, None, :]).reshape(n, -1)
           for i, j in pairs}
+    const = [D.shape[1] == 1 and bool(np.all(D == 1)) for D in designs]
     prior = np.zeros(k)
     for b in shape_blocks:
         prior[off[b]:off[b + 1]] = 1 / prior_sd ** 2
@@ -841,22 +901,39 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
     coef = np.vstack([np.asarray(c, np.float64) for c in init])
     loglik, conv = np.full(p, np.nan), np.zeros(p, dtype=bool)
 
-    def evaluate(B, y, hess):
-        etas = [designs[i] @ B[off[i]:off[i + 1]] for i in range(nb)]
-        ll, d1, d2 = terms(y, *etas, order=2 if hess else 0)
+    def evaluate(B, y, order):
+        """Penalized log-likelihood, log-likelihood and the derivatives up to order."""
+        etas = [B[off[i]:off[i + 1]] if const[i] else designs[i] @ B[off[i]:off[i + 1]]
+                for i in range(nb)]
+        ll, d1, d2 = terms(y, *etas, order=order)
         lsum = ll.sum(axis=0)
         pen = 0.5 * np.sum(prior[:, None] * B ** 2, axis=0)
         if bound is not None:
             b, lo, hi = bound
             vh, vl = np.maximum(etas[b] - hi, 0), np.maximum(lo - etas[b], 0)
-            pen = pen + 0.5 * rho * np.sum(vh ** 2 + vl ** 2, axis=0)
-            if hess:
+            pen = pen + 0.5 * rho * np.sum(vh ** 2 + vl ** 2, axis=0) * (n if const[b] else 1)
+            if order >= 1:
                 d1 = list(d1)
                 d1[b] = d1[b] - rho * (vh - vl)
+            if order >= 2:
                 d2 = dict(d2)
                 d2[(b, b)] = d2[(b, b)] - rho * ((vh > 0) | (vl > 0))
         f = lsum - pen
         return np.where(np.isfinite(f), f, -np.inf), lsum, d1, d2
+
+    def gradient(B, d1):
+        return np.vstack([designs[i].T @ d1[i] for i in range(nb)]) - prior[:, None] * B
+
+    def blocks(D, m):
+        """Symmetric (m, k, k) with the blocks designs[i]' diag(D[(i, j)]) designs[j]
+        summed over observations, and zero blocks for the pairs not in D."""
+        M = np.zeros((m, k, k))
+        for (i, j), v in D.items():
+            h = (OD[(i, j)].T @ v).reshape(ks[i], ks[j], -1).transpose(2, 0, 1)
+            M[:, off[i]:off[i + 1], off[j]:off[j + 1]] = h
+            if i != j:
+                M[:, off[j]:off[j + 1], off[i]:off[i + 1]] = h.transpose(0, 2, 1)
+        return M
 
     step = max(1, int(max_elements // n))
 
@@ -864,63 +941,60 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
         y = np.asarray(Y[:, c0:c0 + step], np.float64)
         B = coef[:, c0:c0 + step].copy()
         pc = B.shape[1]
-        f_all, _, d1, d2 = evaluate(B, y, True)
+        f_all, l_all, d1, d2 = evaluate(B, y, 2)
+        G, H = gradient(B, d1), blocks(d2, pc)        # at B, for every column
+        del d1, d2
         active, done_ok = np.arange(pc), np.zeros(pc, dtype=bool)
         for it in range(max_iter):
             if not active.size:
                 break
             Ba = B[:, active]
-            g = np.vstack([designs[i].T @ d1[i] for i in range(nb)]) - prior[:, None] * Ba
-            H = np.empty((active.size, k, k))
-            for i, j in pairs:
-                if i != j and it < rs_iter:           # RS: no cross-derivatives
-                    H[:, off[i]:off[i + 1], off[j]:off[j + 1]] = 0
-                    H[:, off[j]:off[j + 1], off[i]:off[i + 1]] = 0
-                    continue
-                h = (OD[(i, j)].T @ d2[(i, j)]).reshape(ks[i], ks[j], -1).transpose(2, 0, 1)
-                H[:, off[i]:off[i + 1], off[j]:off[j + 1]] = h
-                if i != j:
-                    H[:, off[j]:off[j + 1], off[i]:off[i + 1]] = h.transpose(0, 2, 1)
-            A = -H
+            A = -H[active]
+            if it < rs_iter:                          # RS: no cross-derivatives
+                for i, j in pairs:
+                    if i != j:
+                        A[:, off[i]:off[i + 1], off[j]:off[j + 1]] = 0
+                        A[:, off[j]:off[j + 1], off[i]:off[i + 1]] = 0
             A[:, diag, diag] += prior
             A = np.where(np.isfinite(A), A, 0)
             scl = np.max(np.abs(A[:, diag, diag]), axis=1) + 1e-12
             bad = ~(np.linalg.eigvalsh(A)[:, 0] > 1e-10 * scl)
             if np.any(bad):                   # outer product of the scores
-                sc = [np.where(np.isfinite(d1[i][:, bad]), d1[i][:, bad], 0) for i in range(nb)]
-                for i, j in pairs:
-                    if i != j and it < rs_iter:
-                        continue
-                    h = (OD[(i, j)].T @ (sc[i] * sc[j])).reshape(ks[i], ks[j], -1).transpose(2, 0, 1)
-                    A[bad, off[i]:off[i + 1], off[j]:off[j + 1]] = h
-                    if i != j:
-                        A[bad, off[j]:off[j + 1], off[i]:off[i + 1]] = h.transpose(0, 2, 1)
+                cols = active[bad]
+                sc = [np.where(np.isfinite(d), d, 0)
+                      for d in evaluate(B[:, cols], y[:, cols], 1)[2]]
+                A[bad] = blocks({(i, j): sc[i] * sc[j] for i, j in pairs
+                                 if i == j or it >= rs_iter}, cols.size)
                 bi = np.flatnonzero(bad)[:, None]
                 A[bi, diag, diag] += prior + 1e-8 * scl[bi]
-            gt = np.where(np.isfinite(g), g, 0).T[..., None]
+            gt = np.where(np.isfinite(G[:, active]), G[:, active], 0).T[..., None]
             delta = np.linalg.solve(A, gt)[..., 0].T
             decr = np.sum(gt[..., 0].T * delta, axis=0)          # Newton decrement
             small = (0.5 * decr < tol * n) & (it >= rs_iter)
-            f0, fnew = f_all[active], f_all[active].copy()
+            f0, fnew, lnew = f_all[active], f_all[active].copy(), l_all[active].copy()
             Bnew, todo, fac = Ba.copy(), np.flatnonzero(~small), np.ones(active.size)
-            for _ in range(30):                                   # step halving
+            Gnew, Hnew = G[:, active], H[active]
+            for _ in range(30):                 # step halving, trial steps with derivatives
                 if not todo.size:
                     break
                 cand = Ba[:, todo] + fac[todo] * delta[:, todo]
-                fc = evaluate(cand, y[:, active[todo]], False)[0]
+                fc, lc, d1, d2 = evaluate(cand, y[:, active[todo]], 2)
                 good = fc >= f0[todo] - 1e-12 * np.abs(f0[todo])
-                Bnew[:, todo[good]], fnew[todo[good]] = cand[:, good], fc[good]
+                if np.any(good):
+                    acc = todo[good]
+                    Bnew[:, acc], fnew[acc], lnew[acc] = cand[:, good], fc[good], lc[good]
+                    Gnew[:, acc] = gradient(cand, d1)[:, good]
+                    Hnew[acc] = blocks(d2, todo.size)[good]
+                del d1, d2
                 todo = todo[~good]
                 fac[todo] *= 0.5
-            B[:, active], f_all[active] = Bnew, fnew
+            B[:, active], f_all[active], l_all[active] = Bnew, fnew, lnew
+            G[:, active], H[active] = Gnew, Hnew
             stop = small | np.isin(np.arange(active.size), todo)
             done_ok[active[small]] = True
             active = active[~stop]
-            if active.size:
-                f_act, _, d1, d2 = evaluate(B[:, active], y[:, active], True)
-                f_all[active] = f_act
         coef[:, c0:c0 + step] = B
-        loglik[c0:c0 + step] = evaluate(B, y, False)[1]
+        loglik[c0:c0 + step] = l_all
         conv[c0:c0 + step] = done_ok
 
     _map(run, range(0, p, step), jobs)
@@ -1497,7 +1571,7 @@ class ResidualCorrelation:
             return self
         G = Z @ Z.T / n                            # eigenvectors via the n x n Gram matrix
         lam, U = np.linalg.eigh(G)
-        lam, U = lam[::-1][:k], U[:, ::-1][:, :k]
+        lam, U = lam[::-1][:k], np.ascontiguousarray(U[:, ::-1][:, :k])
         V = (Z.T @ U) / np.sqrt(n * lam)           # (p, k), orthonormal columns
         psi = np.maximum(1 - (V ** 2) @ lam, self.psi_min)
         self.D = 1 / psi
@@ -1626,7 +1700,8 @@ def _pca(X, n_comp, chunk=8192):
     Xc = X - center.astype(X.dtype)
     lam, U = np.linalg.eigh(_gram(Xc, Xc))
     k = min(n_comp, len(lam) - 1)
-    lam, U = lam[::-1][:k], U[:, ::-1][:, :k]
+    # contiguous copy: products with the reversed view do not use BLAS and are slow
+    lam, U = lam[::-1][:k], np.ascontiguousarray(U[:, ::-1][:, :k])
     Vt = np.empty((k, X.shape[1]))
     for c in range(0, X.shape[1], chunk):
         Vt[:, c:c + chunk] = U.T @ np.asarray(Xc[:, c:c + chunk], np.float64)
@@ -2678,7 +2753,7 @@ def gpr_baseline(Y_train, age_train, Y_test, mean_hyp=100.0, lik_hyp=-1.0):
     Xte = (Y_test - center) / np.float32(mx - mn)
     lam, U = np.linalg.eigh(_gram(Xtr, Xtr))
     k = min(Xtr.shape) - 1
-    lam, U = lam[::-1][:k], U[:, ::-1][:, :k]
+    lam, U = lam[::-1][:k], np.ascontiguousarray(U[:, ::-1][:, :k])
     Mtr = U * np.sqrt(lam)                         # training scores (U S)
     Mte = _gram(Xte, Xtr) @ U / np.sqrt(lam)
     lo, hi = Mtr.min(), Mtr.max()
