@@ -216,7 +216,7 @@ class Data:
     male: np.ndarray               # (n_subjects,)
     site: np.ndarray               # (n_subjects,) index of '+'-joined file
     name: str
-    ind: np.ndarray | None = None  # 1-based vertex indices of surface data
+    ind: np.ndarray | None = None  # 1-based vertex/voxel indices (older volume files: none)
     is_surf: bool = False
     res: str | None = None         # resampling of volume data, e.g. '8'
     has_male: bool = True          # False if the mat-file contains no sex
@@ -2464,8 +2464,9 @@ def check_compatible(info, d: Data):
         err.append(f"resolution {d.res} mm instead of {info['res']} mm")
     if info['dim'] and d.dim is not None and [int(x) for x in d.dim] != info['dim']:
         err.append(f"dimensions {[int(x) for x in d.dim]} instead of {info['dim']}")
-    if info['ind_sha1'] and _ind_hash(d.ind) != info['ind_sha1']:
-        err.append("other vertex indices (ind)")
+    # older volume files of cat_io_data2mat.m store no voxel indices: compare stored ones
+    if info['ind_sha1'] and d.ind is not None and _ind_hash(d.ind) != info['ind_sha1']:
+        err.append("other vertex or voxel indices (ind)")
     if err:
         raise ValueError(f"{d.name} does not match the model of {info['name']}: "
                          + '; '.join(err) + '.')

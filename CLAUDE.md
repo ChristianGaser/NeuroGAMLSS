@@ -52,7 +52,7 @@ The module is organized in sections, in this order.
 
 **`mat2image.py`** imports `neurogamlss` and writes the maps of `NDMzmap`, `NDMdiag` and input mat-files as images.
 
-- **Volume data.** The grid is that of `cat_io_data2mat.m`: `round([181 217 181]/r)` voxels of r mm, first voxel at (−90, −126, −72) mm (`volume_grid`). The columns of `Y` are the voxels of the brain mask in MATLAB (column-major) order. The mat-files store an empty `ind` for volume data, so the indices come from `atlases/ind_<r>mm.mat` or `--ind`.
+- **Volume data.** The grid is that of `cat_io_data2mat.m`: `round([181 217 181]/r)` voxels of r mm, first voxel at (−90, −126, −72) mm (`volume_grid`). The columns of `Y` are the voxels of the brain mask in MATLAB (column-major) order. Older versions of `cat_io_data2mat.m` stored an empty `ind` for volume data; then the indices come from `atlases/ind_<r>mm.mat` or `--ind`. `check_compatible` compares `ind` only where the data store it.
 - **Surface data.** `ind` and `dim` (number of mesh vertices) are stored in the z-maps and diagnostics. The GIFTI files hold all vertices, NaN elsewhere, and `--mesh` sets the metadata `SurfaceID` for SPM.
 
 ## Conventions

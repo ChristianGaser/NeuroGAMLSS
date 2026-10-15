@@ -20,10 +20,10 @@ Volume data
 -----------
 cat_io_data2mat.m resamples the images to r mm on a grid of round([181 217 181]/r)
 voxels whose first voxel lies at (-90, -126, -72) mm in MNI space.  The columns of Y
-are the voxels inside the brain mask in MATLAB order.  The mat-files
-store no indices of these voxels (ind is empty for volume data), so they are read
-from ind_<r>mm.mat: from --ind, or else from the atlas folder of NeuroGAMLSS, which
-contains them for 4 and 8 mm.  The resolution r comes from the model name, as in
+are the voxels inside the brain mask in MATLAB order, with their 1-based indices
+ind.  Older versions of cat_io_data2mat.m stored ind empty for volume data; the
+indices are then read from ind_<r>mm.mat: from --ind, or else from the atlas folder
+of NeuroGAMLSS, which contains them for 4 and 8 mm.  The resolution r comes from the model name, as in
 s4rp1_8mm_..., or from --res.  The maps are written as float32 NIfTI-1 files with
 this grid as sform and qform: one 4D file with a volume per subject or map, or with
 --split one 3D file each.

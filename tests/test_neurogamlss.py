@@ -644,3 +644,25 @@ def test_samples_without_valid_ages(tmp_path):
     few = write_brain(tmp_path, '1_8mm_FEW', d, slice(0, 20), np.r_[d.age[:5], np.zeros(15)])
     with pytest.raises(SystemExit):                                  # too few training ages
         NG.main(['--normative-only', '--train', few, '--save-model', out + '.npz'])
+
+
+def test_volume_files_with_and_without_ind(tmp_path):
+    """Older volume files of cat_io_data2mat.m store no voxel indices: models of files with
+    ind apply to files without ind, but not to files with other indices."""
+    d = simulate_brain(n=300, p=40)
+    ind = 7 * np.arange(1, 41, dtype=float)[:, None]
+
+    def write(name, sel, index):
+        path = str(tmp_path / f's4rp1_8mm_{name}_CAT12.9.mat')
+        savemat(path, dict(Y=np.abs(d.Y[sel]) + 0.5, age=d.age[sel][:, None],
+                           male=d.male[sel][:, None], ind=index))
+        return path
+    model, out = str(tmp_path / 'm.npz'), str(tmp_path / 'r')
+    NG.main(['--normative-only', '--train', write('TR', slice(0, 200), ind), '--family',
+             'normal', '--df-mu', '2', '--df-sigma', '1', '--save-model', model])
+    old = write('OLD', slice(200, 300), np.zeros((0, 1)))
+    NG.main(['--normative-only', '--model', model, '--test', old, '--out', out])
+    assert os.path.isfile(out + '_zmaps_s4rp1_8mm_OLD_CAT12.9.mat')
+    with pytest.raises(ValueError):
+        NG.main(['--normative-only', '--model', model, '--test',
+                 write('NEW', slice(200, 300), ind + 1), '--out', out])

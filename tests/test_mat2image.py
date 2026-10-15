@@ -128,3 +128,14 @@ def test_number_of_vertices_without_dim():
     assert n_vertices == 64984 and ind.dtype == np.int64     # both hemispheres of the 32k mesh
     with pytest.raises(ValueError):
         M2I.surface_space('s12.mesh.thickness_X.mat', 4, np.array([1., 5., 40000.]))
+
+
+def test_volume_indices_stored_in_the_mat_files(tmp_path):
+    shape, _ = M2I.volume_grid('8')
+    ind = np.sort(np.random.default_rng(3).choice(np.prod(shape), 40, replace=False)) + 1
+    out = zmaps(tmp_path, 's4rp1_8mm', 40, ind=ind[:, None].astype(float))
+    M2I.main([out + '_zmaps_s4rp1_8mm_TE_CAT12.9.mat'])       # stored ind, no --ind
+    img = nib.load(out + '_zmaps_s4rp1_8mm_TE_CAT12.9.nii')
+    flat = img.get_fdata().reshape(-1, 30, order='F')
+    assert np.isfinite(flat[ind[1:] - 1]).all() and np.isnan(flat[ind[0] - 1]).all()
+    assert np.isnan(np.delete(flat, ind - 1, axis=0)).all()
