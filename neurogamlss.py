@@ -60,10 +60,11 @@ distance of the z-scores at the brain age (NDM.Deviation; at chronological age:
 NDM.Deviation_age).  --brainloss adds BrainLOSS (Loss Of Substance beyond
 Senescence), the tissue loss that the brain age does not explain: minus the
 z-score of the mean of the whole brain and of each lobe at the brain age, from a
-normal normative model of these means.  Several models (tissue, resolution,
-smoothing, surface measure) are combined by a weighted average with weights that
-sum to one.  For a new site, its control subjects (--adjust) correct the
-estimates (--correction).
+normal normative model of these means (NDM.BrainLOSS; at chronological age, the
+total loss including the part that the brain age explains: NDM.BrainLOSS_age).
+Several models (tissue, resolution, smoothing, surface measure) are combined by a
+weighted average with weights that sum to one.  For a new site, its control
+subjects (--adjust) correct the estimates (--correction).
 A Python replica of the GPR BrainAGE (BA_gpr.m) is run for comparison when the
 training data are given.
 
@@ -1764,7 +1765,8 @@ class NDMBrainAge:
               False, voxels with a large variance dominate the components
     brainloss : also fit a normal normative model of the mean of every part (whole
               brain and regions, raw values) for BrainLOSS, the tissue loss beyond
-              the brain age (predict); its df are chosen as for the z-map models
+              the brain age, and for the total loss at chronological age (predict);
+              its df are chosen as for the z-map models
     cov     : covariates of all normative models (Covariates, columns of Data.C)
     site_sd : the training sites also enter log sigma of all normative models
     """
@@ -1872,8 +1874,9 @@ class NDMBrainAge:
 
     def _loss(self, d, age):
         """BrainLOSS of every part (n, n_parts): minus the normal score of the part
-        mean at the given ages, the subjects' brain ages; positive values mean less
-        tissue than expected at that age."""
+        mean at the given ages, the subjects' brain ages (BrainLOSS) or chronological
+        ages (BrainLOSS_age); positive values mean less tissue than expected at that
+        age."""
         L = np.full((d.n, len(self.parts)), np.nan)
         L[:, self.loss_model.valid] = -self.loss_model.zscores(self._part_means(d.Y), age,
                                                                d.male, C=d.C)
@@ -1973,6 +1976,8 @@ class NDMBrainAge:
         'brainloss'     with a BrainLOSS model: tissue loss beyond the brain age, minus
                         the normal score of the mean of every part at the global brain
                         age (positive: less tissue than expected at that age)
+        'brainloss_age' the same at chronological age: the total loss, including the
+                        part that the brain age explains (NaN without a valid age)
         """
         raw = d
         d = self._prep(d)
@@ -2002,6 +2007,10 @@ class NDMBrainAge:
         if self.loss_model is not None:
             L = self._loss(raw, out['age'])
             out['brainloss'], out['regional_brainloss'] = L[:, 0], L[:, 1:]
+            L = np.full_like(L, np.nan)
+            if ok.size:
+                L[ok] = self._loss(raw.subset(ok), raw.age[ok])
+            out['brainloss_age'], out['regional_brainloss_age'] = L[:, 0], L[:, 1:]
         return out
 
     def get_state(self):
@@ -2936,11 +2945,12 @@ def cross_validate(datas, kfold=10, seed=0, age_range=(0, np.inf), gpr=True,
             t0 = time.time()
             est = NDMBrainAge(**kd).fit(d.subset(tr))
             out = est.predict(d.subset(te))
-            for key in ('age', 'sd', 'at_bound', 'deviation', 'deviation_age', 'brainloss'):
+            for key in ('age', 'sd', 'at_bound', 'deviation', 'deviation_age', 'brainloss',
+                        'brainloss_age'):
                 if key in out:
                     r.setdefault(key, np.full(n, np.nan))[te] = out[key]
             for key in ('regional', 'regional_deviation', 'regional_deviation_age',
-                        'regional_brainloss'):
+                        'regional_brainloss', 'regional_brainloss_age'):
                 if key in out:
                     if r.get(key) is None:
                         r[key] = np.full((n, len(est.regions)), np.nan)
@@ -3192,11 +3202,12 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
                  offset=np.nanmedian(out['age'][ctrl] - age[ctrl]) if ctrl.size else np.nan)
         for key in ('deviation', 'deviation_age', 'regional_deviation', 'regional_deviation_age'):
             r[key] = out[key]
-        if 'brainloss' in out:
-            L = np.column_stack([out['brainloss'], out['regional_brainloss']])
-            if zc is not None:             # standardized with the controls of the test site
-                L = (L - np.nanmean(L[zc], axis=0)) / np.nanstd(L[zc], axis=0, ddof=1)
-            r['brainloss'], r['regional_brainloss'] = L[:, 0], L[:, 1:]
+        for key in ('brainloss', 'brainloss_age'):
+            if key in out:
+                L = np.column_stack([out[key], out['regional_' + key]])
+                if zc is not None:         # standardized with the controls of the test site
+                    L = (L - np.nanmean(L[zc], axis=0)) / np.nanstd(L[zc], axis=0, ddof=1)
+                r[key], r['regional_' + key] = L[:, 0], L[:, 1:]
         if gpr:
             r['gpr'] = gpr_baseline(train[i].Y, train[i].age, dte.Y)
             r['gpr_ba'] = correct_age(r['gpr'], age, ctrl, gpr_post) - age
@@ -3357,17 +3368,19 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
     if known:
         print(f"\nNon-aging deviation (normal score, ensemble) in controls: "
               f"mean {np.mean(dev[ctrl]):+.2f}, SD {np.std(dev[ctrl]):.2f}")
-    # tissue loss beyond the brain age (normal scores); the ensemble is the mean over models
+    # tissue loss beyond the brain age and, at chronological age, in total (normal scores);
+    # the ensemble is the mean over models
     loss = all('brainloss' in r for r in res)
-    if loss:
-        out['BrainLOSS'] = np.column_stack([r['brainloss'] for r in res])
-        out['BrainLOSS_ensemble'] = np.mean(out['BrainLOSS'], axis=1)
+    losses = (('brainloss', 'BrainLOSS'), ('brainloss_age', 'BrainLOSS_age')) if loss else ()
+    for key, name in losses:
+        out[name] = np.column_stack([r[key] for r in res])
+        out[name + '_ensemble'] = np.mean(out[name], axis=1)
     if e['regions']:
         n_reg, n_mod = len(e['regions']), len(res)
         R = np.full((len(age), n_reg, n_mod), np.nan)
         Dr = {key: np.full((len(age), n_reg, n_mod), np.nan)
               for key in ('regional_deviation', 'regional_deviation_age')
-              + (('regional_brainloss',) if loss else ())}
+              + tuple('regional_' + key for key, _ in losses)}
         for m, r in enumerate(res):
             for j, rid in enumerate(e['regions']):
                 if rid in r['regions']:
@@ -3378,11 +3391,12 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
         out['BrainAGE_regional'] = R
         out['Deviation_regional'] = Dr['regional_deviation']
         out['Deviation_age_regional'] = Dr['regional_deviation_age']
-        with np.errstate(all='ignore'):
+        with np.errstate(all='ignore'), warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)     # subjects without age
             out['Deviation_regional_ensemble'] = np.nanmean(Dr['regional_deviation'], axis=2)
-            if loss:
-                out['BrainLOSS_regional'] = Dr['regional_brainloss']
-                out['BrainLOSS_regional_ensemble'] = np.nanmean(Dr['regional_brainloss'], axis=2)
+            for key, name in losses:
+                out[name + '_regional'] = Dr['regional_' + key]
+                out[name + '_regional_ensemble'] = np.nanmean(Dr['regional_' + key], axis=2)
     if gpr:
         out['PredictedAge_GPR'] = np.column_stack([r['gpr'] for r in res])
         out['BrainAGE_GPR'] = np.column_stack([r['gpr_ba'] for r in res])
@@ -3425,19 +3439,18 @@ def save_results(out, prefix):
         return
     savemat(prefix + '.mat', {'NDM': out}, do_compression=True)
     cols = ['age', 'male', 'BrainAGE_ensemble', 'Deviation_ensemble', 'Deviation_age_ensemble']
-    loss = 'BrainLOSS' in out
-    if loss:
-        cols.append('BrainLOSS_ensemble')
+    losses = [name for name in ('BrainLOSS', 'BrainLOSS_age') if name in out]
+    cols += [name + '_ensemble' for name in losses]
     if 'BrainAGE_GPR_ensemble' in out:
         cols.append('BrainAGE_GPR_ensemble')
     with open(prefix + '.csv', 'w') as f:
         f.write(','.join(['subject'] + cols + [f'BrainAGE_{m}' for m in names]
                          + [f'SD_{m}' for m in names] + [f'Deviation_{m}' for m in names]
-                         + ([f'BrainLOSS_{m}' for m in names] if loss else [])) + '\n')
+                         + [f'{name}_{m}' for name in losses for m in names]) + '\n')
         for i in range(len(out['age'])):
             vals = ([out[c][i] for c in cols] + list(out['BrainAGE'][i])
                     + list(out['PredictedAge_sd'][i]) + list(out['Deviation'][i])
-                    + (list(out['BrainLOSS'][i]) if loss else []))
+                    + [v for name in losses for v in out[name][i]])
             f.write(','.join([str(i + 1)] + [f'{v:.4f}' for v in vals]) + '\n')
     print(f"\nSaved {prefix}.mat and {prefix}.csv" + (f" and {zfiles}" if zm else ''))
 
@@ -3508,7 +3521,8 @@ def main(argv=None):
                         "minus the normal score of the mean of the whole brain (and, with "
                         "--parcellation, of each lobe) at the subject's brain age, "
                         "standardized with the --adjust controls (positive: less tissue "
-                        "than expected)")
+                        "than expected), and BrainLOSS_age, the same at chronological age "
+                        "(the total loss, including the part that the brain age explains)")
     p.add_argument('--family', choices=FAMILIES, default='shash',
                    help="distribution of the voxel/vertex-wise normative models: shash "
                         "(sinh-arcsinh with skewness and tail weight; default), normal "
