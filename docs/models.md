@@ -428,9 +428,21 @@ Its df are chosen by cross-validation of the held-out likelihood, as for the z-m
 \mathrm{BrainLOSS}_p = -\frac{\bar y_p - \mu_p(\hat a)}{\sigma_p(\hat a)} .
 ```
 
-With controls (`--adjust`), BrainLOSS is standardized to mean 0 and standard deviation 1 in the controls. Positive values mean less tissue than expected at the brain age.
+`BrainLOSS_age` is the same normal score at the chronological age $`a`$. It is the total tissue loss for the subject's age and is not defined for subjects without a valid age:
 
-- **Why at the brain age.** At chronological age, a tissue deficit mixes an older-looking brain with loss of other kinds. At the brain age, the part that the aging pattern explains is removed, so BrainLOSS is nearly uncorrelated with BrainAGE.
+```math
+\mathrm{BrainLOSS}^{\mathrm{age}}_p = -\frac{\bar y_p - \mu_p(a)}{\sigma_p(a)} .
+```
+
+With controls (`--adjust`), both are standardized to mean 0 and standard deviation 1 in the controls. Positive values mean less tissue than expected at the brain age or at the chronological age.
+
+- **Why at the brain age.** The two scores differ by the part of the deficit that the brain age explains. Before the standardization, and exactly for a linear $`\mu_p`$ with constant $`\sigma_p`$,
+
+  ```math
+  \mathrm{BrainLOSS}^{\mathrm{age}}_p = \mathrm{BrainLOSS}_p + b_p\,(\hat a - a), \qquad b_p = -\frac{\mu_p'}{\sigma_p} ,
+  ```
+
+  where $`b_p`$ is the normative decline of the mean per year in standard deviations. At chronological age, a tissue deficit therefore mixes an older-looking brain with loss of other kinds, and BrainLOSS_age overlaps with BrainAGE. At the brain age, the part that the aging pattern explains is removed, so BrainLOSS is nearly uncorrelated with BrainAGE. In a model that also contains BrainAGE, the two scores carry nearly the same information. On their own, BrainLOSS shows whether there is less tissue than expected for the brain age, and BrainLOSS_age whether there is less tissue than in people of the same age.
 - **Why signed.** The non-aging deviation of NormBrainAGE is a Mahalanobis distance over all components. It counts atypicality in every direction, including more tissue than expected, so a loss that is specific to a disease is diluted. BrainLOSS measures one direction, less tissue.
 - **Weights of the voxels.** The mean weights all voxels equally in the units of the data. In a voxel-wise version of the measure, the mean of the residuals separated pMCI from sMCI in gray matter (see below) at least as well as the mean of the z-scores (AUC 0.63 against 0.62) and better than a mean weighted by the inverse variance (0.60).
 
@@ -448,6 +460,7 @@ The evidence comes from ADNI, with CAT12 r1840 data of 835 subjects and models t
 - **Added to BrainAGE.** In cross-validated logistic regression, BrainAGE of gray matter reached 0.716. With BrainLOSS of the whole brain, it reached 0.729, and with that of the temporal lobes 0.742. The bootstrap intervals of the gains, −0.018 to +0.044 and −0.012 to +0.064, include zero, so a larger sample has to confirm them.
 - **Flexibility.** Cross-validation chose 3 df for $`\mu_p`$ in gray matter. With 2 df, which it rated almost equally, BrainLOSS of the whole brain reached 0.63.
 - **Non-aging deviation.** It hardly separated pMCI from sMCI, also with the models adapted to the site (`--correction adapt`, 0.53), with raw or noise-weighted values before the PCA, or with fewer components.
+- **BrainLOSS_age** was added after this comparison and has not been evaluated in these data.
 
 ## Relation to the gamlss R package
 

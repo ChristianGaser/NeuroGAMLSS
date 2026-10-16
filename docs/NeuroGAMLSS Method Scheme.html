@@ -94,6 +94,9 @@ ol.steps { margin: 4px 0 0; padding-left: 1.7em; }
 ol.steps li { margin: 0 0 8px; padding-left: .2em; }
 ol.steps li::marker { font-family: var(--font-mono); font-size: 13px; color: var(--muted); }
 .code { font-size: 13.5px; color: var(--muted); margin-top: 14px; }
+.why { border-left: 3px solid var(--c); padding: 2px 0 2px 16px; margin: 24px 0 0; }
+.why h3 { margin-top: 0; color: var(--c); }
+.why p { font-size: 15.5px; }
 .note { border-left: 3px solid var(--rule); padding: 2px 0 2px 14px; margin: 16px 0 0; font-size: 15px; color: var(--ink); }
 dl.opts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 20px; margin: 14px 0 0; max-width: 96ch; }
 dl.opts dt { font-family: var(--font-mono); font-size: 13.5px; padding-top: 2px; }
@@ -207,7 +210,7 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
 <main class="page">
 
 <header>
-  <p class="eyebrow">NeuroGAMLSS · neurogamlss.py at commit 2d762b7</p>
+  <p class="eyebrow">NeuroGAMLSS · neurogamlss.py</p>
   <h1>z-maps, NormBrainAGE and BrainLOSS, step by step</h1>
   <div class="prose">
     <p class="lede">All three results use the same building block, a GAMLSS normative model fitted separately to each column of a data matrix, with a natural spline of age plus sex, site and optional covariates. The results differ in what the columns are (voxels, principal component scores or the mean of a brain region) and in the age at which a test subject is compared with the model.</p>
@@ -226,7 +229,7 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
     <div class="lane" style="--lc: var(--c)">
       <p class="tag">C · BrainLOSS</p>
       <p class="q">Is there less tissue than expected for that brain age?</p>
-      <p class="facts">A normative model of the mean of each brain part, read at the global brain age.</p>
+      <p class="facts">A normative model of the mean of each brain part, read at the global brain age. BrainLOSS_age reads it at the chronological age.</p>
     </div>
   </div>
 </header>
@@ -239,7 +242,7 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
   </div>
   <figure>
     <div class="frame">
-<svg viewBox="0 0 1180 868" role="img" aria-label="Overview of the three pipelines for one model. Lane A, z-maps: every voxel gets its own SHASH normative model, which is read at the chronological age; no PCA. Lane B, NormBrainAGE: for each part, the voxels are standardized and reduced by PCA to 100 component scores; every score gets a normal normative model, and a residual correlation R links them; the brain age is the age that maximizes the likelihood of the subject's scores. Lane C, BrainLOSS: the mean of each part gets a normal normative model, which is read at the global brain age from lane B; no PCA. Several models are combined at the end.">
+<svg viewBox="0 0 1180 868" role="img" aria-label="Overview of the three pipelines for one model. Lane A, z-maps: every voxel gets its own SHASH normative model, which is read at the chronological age; no PCA. Lane B, NormBrainAGE: for each part, the voxels are standardized and reduced by PCA to 100 component scores; every score gets a normal normative model, and a residual correlation R links them; the brain age is the age that maximizes the likelihood of the subject's scores. Lane C, BrainLOSS: the mean of each part gets a normal normative model, which is read at the global brain age from lane B, and as BrainLOSS_age at the chronological age; no PCA. Several models are combined at the end.">
   <defs>
     <marker id="f1-m" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto"><path d="M0,1L10,5L0,9z" class="ah"/></marker>
     <marker id="f1-b" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M0,1L10,5L0,9z" class="ah-b"/></marker>
@@ -396,6 +399,7 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
   <rect x="692" y="566" width="240" height="136" rx="7" class="box ln-c"/>
   <text x="706" y="589" class="t">Read at the global brain age <tspan class="mi">â</tspan></text>
   <text x="706" y="616" class="d">BrainLOSS<tspan class="sub" dy="3">p</tspan><tspan class="m" dy="-3"> = −(</tspan><tspan class="m mi">ȳ</tspan><tspan class="sub" dy="3">p</tspan><tspan class="m" dy="-3"> − </tspan><tspan class="m mi">μ</tspan><tspan class="sub" dy="3">p</tspan><tspan class="m" dy="-3">(</tspan><tspan class="m mi">â</tspan><tspan class="m">)) / </tspan><tspan class="m mi">σ</tspan><tspan class="sub" dy="3">p</tspan><tspan class="m" dy="-3">(</tspan><tspan class="m mi">â</tspan><tspan class="m">)</tspan></text>
+  <text x="706" y="641" class="n">BrainLOSS_age: at chronological age</text>
   <text x="706" y="668" class="n">controls of the test site:</text>
   <text x="706" y="684" class="n">standardized to mean 0 and SD 1</text>
 
@@ -404,6 +408,7 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
   <text x="976" y="608" class="d">whole brain and each lobe</text>
   <text x="976" y="626" class="d">&gt; 0: less tissue than expected</text>
   <text x="976" y="644" class="d">for the brain age</text>
+  <text x="976" y="670" class="n">+ BrainLOSS_age, the total loss</text>
 
   <line x1="410" y1="634" x2="438" y2="634" class="ar" marker-end="url(#f1-m)"/>
   <line x1="660" y1="634" x2="690" y2="634" class="ar" marker-end="url(#f1-m)"/>
@@ -422,7 +427,7 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
   <text x="900" y="799" class="d">one map per model, not combined</text>
 </svg>
     </div>
-    <figcaption><b>Figure 1.</b> Three pipelines for one model. Each lane fits its own normative models to the training sample. Only NormBrainAGE uses PCA, which turns the voxels of each part into <span class="math"><i>K</i></span> = 100 component scores, so its normative models live in the space of these scores. The z-maps model every voxel and BrainLOSS models one mean per part, both without PCA. Apart from the shared mask, the blue arrow is the only link between the lanes: it carries the global brain age from lane B to BrainLOSS. All normative models can add covariates such as image quality measures to <span class="math"><i>μ</i></span> and log <span class="math"><i>σ</i></span>, and <code>--site-sd</code> adds the site to log <span class="math"><i>σ</i></span>.</figcaption>
+    <figcaption><b>Figure 1.</b> Three pipelines for one model. Each lane fits its own normative models to the training sample. Only NormBrainAGE uses PCA, which turns the voxels of each part into <span class="math"><i>K</i></span> = 100 component scores, so its normative models live in the space of these scores. The z-maps model every voxel and BrainLOSS models one mean per part, both without PCA. Apart from the shared mask, the blue arrow is the only link between the lanes: it carries the global brain age from lane B to BrainLOSS. BrainLOSS_age reads the same model at the chronological age. All normative models can add covariates such as image quality measures to <span class="math"><i>μ</i></span> and log <span class="math"><i>σ</i></span>, and <code>--site-sd</code> adds the site to log <span class="math"><i>σ</i></span>.</figcaption>
   </figure>
 </section>
 
@@ -434,7 +439,7 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
   </div>
   <figure>
     <div class="frame">
-<svg viewBox="0 0 1180 296" role="img" aria-label="Three panels with the same kind of normative curve and a subject aged 45. Panel A, z-maps: at the chronological age the value is 2.1 SD below the mean. Panel B, NormBrainAGE: the value is most typical at age 59, the brain age, so BrainAGE is plus 14 years. Panel C, BrainLOSS: the mean of a brain part is 2.7 SD below the mean at age 45 but only 1.3 SD below it at the brain age of 59, so BrainLOSS is plus 1.3.">
+<svg viewBox="0 0 1180 296" role="img" aria-label="Three panels with the same kind of normative curve and a subject aged 45. Panel A, z-maps: at the chronological age the value is 2.1 SD below the mean. Panel B, NormBrainAGE: the value is most typical at age 59, the brain age, so BrainAGE is plus 14 years. Panel C, BrainLOSS: the mean of a brain part is 2.7 SD below the mean at age 45 but only 1.3 SD below it at the brain age of 59, so BrainLOSS is plus 1.3 and BrainLOSS_age is plus 2.7.">
   <!-- Panel A -->
   <g transform="translate(10,0)">
     <text x="0" y="22"><tspan class="lt ln-a">A · z-maps</tspan><tspan class="lq" dx="10">read at the chronological age</tspan></text>
@@ -505,12 +510,12 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
     <text x="150" y="238" text-anchor="end" class="n halo">age 45</text>
     <text x="219" y="238" class="n ln-b-text halo">brain age 59</text>
     <text x="338" y="84" text-anchor="end" class="anno ln-c halo">BrainLOSS = −z(â) = +1.3</text>
-    <text x="338" y="100" text-anchor="end" class="n halo">at age 45 the deficit is 2.7 SD,</text>
-    <text x="338" y="115" text-anchor="end" class="n halo">aging and loss mixed</text>
+    <text x="338" y="102" text-anchor="end" class="d halo">BrainLOSS_age = −z(age) = +2.7</text>
+    <text x="338" y="117" text-anchor="end" class="n halo">aging and loss mixed</text>
   </g>
 </svg>
     </div>
-    <figcaption><b>Figure 2.</b> One normative model, read at three ages. Simulated example of a 45-year-old whose brain looks like that of a 59-year-old. The grey band is the 95 % range of the training sample. <b>A.</b> At the chronological age, the value lies 2.1 SD below the mean. <b>B.</b> NormBrainAGE looks for the age at which the value is most typical, here 59 years, so BrainAGE is +14 years. With <span class="math"><i>K</i></span> component scores, it is the age at which all scores together are most likely (Figure 3). <b>C.</b> BrainLOSS reads the mean of a brain part at the brain age. At the chronological age, the deficit is 2.7 SD and mixes the older-looking brain with additional loss. At the brain age, 1.3 SD remain, so BrainLOSS is +1.3.</figcaption>
+    <figcaption><b>Figure 2.</b> One normative model, read at three ages. Simulated example of a 45-year-old whose brain looks like that of a 59-year-old. The grey band is the 95 % range of the training sample. <b>A.</b> At the chronological age, the value lies 2.1 SD below the mean. <b>B.</b> NormBrainAGE looks for the age at which the value is most typical, here 59 years, so BrainAGE is +14 years. With <span class="math"><i>K</i></span> component scores, it is the age at which all scores together are most likely (Figure 3). <b>C.</b> BrainLOSS reads the mean of a brain part at the brain age. At the chronological age, the deficit is 2.7 SD (BrainLOSS_age = +2.7) and mixes the older-looking brain with additional loss. At the brain age, 1.3 SD remain, so BrainLOSS is +1.3.</figcaption>
   </figure>
 </section>
 
@@ -520,7 +525,7 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
   <div class="plain">
     <p style="--lc: var(--a)"><span class="who">z-maps</span>For every voxel, the training sample shows how much tissue people have at each age, for women and men and for each scanner. A patient's voxel is compared with people of the same age. A z-score of −2 means unusually little tissue for that age. Every voxel has its own model, and no PCA is involved.</p>
     <p style="--lc: var(--b)"><span class="who">NormBrainAGE</span>PCA first summarizes the brain, or one lobe, by 100 patterns of variation among the training subjects. Each pattern's score gets a normative model of age. For a new person, we ask the reverse question: at which age would this combination of scores be most typical? That age is the brain age. The width of the likelihood peak gives each person a standard error.</p>
-    <p style="--lc: var(--c)"><span class="who">BrainLOSS</span>Once the brain age is known, we ask whether the person has less tissue than a typical person of that brain age. The mean tissue of the whole brain, or of a lobe, is compared with its normative range at the brain age. An older-looking brain explains part of a tissue deficit, and BrainLOSS is the part that it does not explain.</p>
+    <p style="--lc: var(--c)"><span class="who">BrainLOSS</span>Once the brain age is known, we ask whether the person has less tissue than a typical person of that brain age. The mean tissue of the whole brain, or of a lobe, is compared with its normative range at the brain age. An older-looking brain explains part of a tissue deficit, and BrainLOSS is the part that it does not explain. BrainLOSS_age is the deficit compared with people of the same age, before the brain age is taken into account.</p>
   </div>
 </section>
 
@@ -540,8 +545,8 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
         <tr><th>Distribution</th><td>SHASH by default (normal and GG optional)</td><td>normal</td><td>normal</td></tr>
         <tr><th>Link between the columns</th><td>none</td><td>residual correlation <span class="math"><b>R</b></span>, <span class="math"><i>K</i> × <i>K</i></span></td><td>none</td></tr>
         <tr><th>Spline df of age</th><td>5-fold CV, held-out log-likelihood of normal models of 1,000 random voxels</td><td>5-fold CV, mean absolute error of the held-out global brain age</td><td>5-fold CV, held-out log-likelihood</td></tr>
-        <tr><th>Test subject read at</th><td>the chronological age</td><td>every age of a grid; the most likely age is the brain age</td><td>the global brain age of the same model</td></tr>
-        <tr><th>Result per subject</th><td>one <span class="math"><i>z</i></span> per voxel; mean <span class="math"><i>z</i></span> per lobe</td><td>global and regional brain age, standard error, non-aging deviation</td><td>BrainLOSS of the whole brain and of each lobe</td></tr>
+        <tr><th>Test subject read at</th><td>the chronological age</td><td>every age of a grid; the most likely age is the brain age</td><td>the global brain age of the same model; <code>BrainLOSS_age</code>: the chronological age</td></tr>
+        <tr><th>Result per subject</th><td>one <span class="math"><i>z</i></span> per voxel; mean <span class="math"><i>z</i></span> per lobe</td><td>global and regional brain age, standard error, non-aging deviation</td><td>BrainLOSS and BrainLOSS_age of the whole brain and of each lobe</td></tr>
         <tr><th>Controls of a new site</th><td><span class="math"><i>z</i></span> of every voxel set to mean 0 and SD 1</td><td>their median BrainAGE is subtracted (default)</td><td>standardized to mean 0 and SD 1</td></tr>
         <tr><th>Several models</th><td>one map per model</td><td>weighted mean, GLS weights</td><td>mean</td></tr>
         <tr><th>Option</th><td><code>--zmaps</code>, <code>--normative-only</code></td><td>default</td><td><code>--brainloss</code></td></tr>
@@ -882,10 +887,21 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
     </ol>
     <p class="display">BrainLOSS<sub><i>p</i></sub> = −(<i>ȳ</i><sub><i>p</i></sub> − <i>μ</i><sub><i>p</i></sub>(<i>â</i>)) / <i>σ</i><sub><i>p</i></sub>(<i>â</i>)</p>
     <ol class="steps" start="4">
-      <li>With controls of the test site, standardize BrainLOSS of every part to mean 0 and SD 1 in the controls.</li>
-      <li>Positive values mean less tissue than expected for the brain age.</li>
+      <li>Read it also at the chronological age <span class="math"><i>a</i></span>, for subjects with a known age:</li>
     </ol>
-    <p class="note">Step 3 uses the brain age as estimated, before the site correction of BrainAGE. The standardization with the controls in step 4 then removes a shift that is common to the test site.</p>
+    <p class="display">BrainLOSS<sub><i>p</i></sub><sup>age</sup> = −(<i>ȳ</i><sub><i>p</i></sub> − <i>μ</i><sub><i>p</i></sub>(<i>a</i>)) / <i>σ</i><sub><i>p</i></sub>(<i>a</i>)</p>
+    <ol class="steps" start="5">
+      <li>With controls of the test site, standardize both scores of every part to mean 0 and SD 1 in the controls.</li>
+      <li>Positive values mean less tissue than expected for the brain age (BrainLOSS) or for the chronological age (BrainLOSS_age).</li>
+    </ol>
+    <p class="note">Step 3 uses the brain age as estimated, before the site correction of BrainAGE. The standardization with the controls in step 5 then removes a shift that is common to the test site.</p>
+    <div class="why">
+      <h3>Why the brain age, and what BrainLOSS_age adds</h3>
+      <p>The two scores differ by the part of the tissue deficit that the brain age explains. Before the standardization, and exactly for a linear age curve with a constant SD,</p>
+      <p class="display">BrainLOSS<sub><i>p</i></sub><sup>age</sup> = BrainLOSS<sub><i>p</i></sub> + <i>b</i><sub><i>p</i></sub> · BrainAGE,   <i>b</i><sub><i>p</i></sub> = −<i>μ</i><sub><i>p</i></sub>′ / <i>σ</i><sub><i>p</i></sub></p>
+      <p>Here <span class="math"><i>b</i><sub><i>p</i></sub></span> is the normative decline of the part mean per year, in SD units. In Figure 2, the 45-year-old whose brain looks 59 has 2.7 SD less tissue than 45-year-olds. About 1.4 SD of that is what any 59-year-old brain has, and BrainAGE = +14 already reports it. BrainLOSS is the 1.3 SD that remain.</p>
+      <p>BrainLOSS_age therefore overlaps with BrainAGE, while BrainLOSS hardly does. In the MCI patients of ADNI (gray matter), the Spearman correlation of BrainLOSS with BrainAGE was −0.01 for the whole brain and 0.14 for the temporal lobes. In a model that also contains BrainAGE, the two scores carry nearly the same information. On its own, BrainLOSS shows whether there is less tissue than expected for the brain age, and BrainLOSS_age whether there is less tissue than in people of the same age.</p>
+    </div>
     <p class="code">In the code: <code>NDMBrainAge.fit</code> (the parts), <code>_part_means</code>, <code>_fit_loss</code>, <code>_loss</code>; the standardization is in <code>apply_models</code>.</p>
   </div>
 </section>
@@ -904,7 +920,7 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
       <tbody>
         <tr><th class="tb">Brain age</th><td><span class="math"><i>â</i><sub><i>m</i></sub></span> of the whole brain and of each lobe</td><td>subtract their median BrainAGE, separately for the whole brain and each lobe (default <code>--correction offset</code>)</td><td>weighted mean <span class="math">Σ<sub><i>m</i></sub> <i>w</i><sub><i>m</i></sub> <i>â</i><sub><i>m</i></sub></span> with GLS weights; each lobe with its own weights</td><td><code>BrainAGE_ensemble</code>, <code>BrainAGE_regional_ensemble</code></td></tr>
         <tr><th>Non-aging deviation</th><td>normal score of each model</td><td>unchanged</td><td>mean</td><td><code>Deviation_ensemble</code></td></tr>
-        <tr><th class="tc">BrainLOSS</th><td>whole brain and each lobe, at <span class="math"><i>â</i><sub><i>m</i></sub></span></td><td>standardized to mean 0 and SD 1</td><td>mean</td><td><code>BrainLOSS_ensemble</code>, <code>BrainLOSS_regional_ensemble</code></td></tr>
+        <tr><th class="tc">BrainLOSS</th><td>whole brain and each lobe, at <span class="math"><i>â</i><sub><i>m</i></sub></span>; BrainLOSS_age at the chronological age</td><td>both standardized to mean 0 and SD 1</td><td>mean</td><td><code>BrainLOSS_ensemble</code>, <code>BrainLOSS_regional_ensemble</code>, <code>BrainLOSS_age_ensemble</code>, <code>BrainLOSS_age_regional_ensemble</code></td></tr>
         <tr><th class="ta">z-maps</th><td>one map per model</td><td><span class="math"><i>z</i></span> of every voxel set to mean 0 and SD 1</td><td>not combined</td><td><code>&lt;out&gt;_zmaps_&lt;model&gt;.mat</code></td></tr>
       </tbody>
     </table>
@@ -932,7 +948,7 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
 </section>
 
 <footer>
-  Built from <code>neurogamlss.py</code> at commit 2d762b7, <code>NDM_methods.md</code> and <code>docs/models.md</code>. Defaults shown: <code>--pca 100</code>, <code>--psi-min 0.01</code>, <code>--grid-step 0.25</code>, <code>--grid-margin 5</code>, <code>--df-mu auto</code>, <code>--df-sigma auto</code>, <code>--correction offset</code>, <code>--ensemble gls</code>, and <code>--family shash</code> for the z-maps. Figure 2 uses simulated values.
+  Built from <code>neurogamlss.py</code>, <code>NDM_methods.md</code> and <code>docs/models.md</code> as of 16 October 2026. Defaults shown: <code>--pca 100</code>, <code>--psi-min 0.01</code>, <code>--grid-step 0.25</code>, <code>--grid-margin 5</code>, <code>--df-mu auto</code>, <code>--df-sigma auto</code>, <code>--correction offset</code>, <code>--ensemble gls</code>, and <code>--family shash</code> for the z-maps. Figure 2 uses simulated values.
 </footer>
 
 </main>

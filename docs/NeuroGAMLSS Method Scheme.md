@@ -1,61 +1,47 @@
-NeuroGAMLSS · neurogamlss.py at commit 2d762b7
-
 # z-maps, NormBrainAGE and BrainLOSS, step by step
+
+NeuroGAMLSS · `neurogamlss.py`. The figures are in the HTML version of this page, [NeuroGAMLSS Method Scheme.html](NeuroGAMLSS%20Method%20Scheme.html).
 
 All three results use the same building block, a GAMLSS normative model fitted separately to each column of a data matrix, with a natural spline of age plus sex, site and optional covariates. The results differ in what the columns are (voxels, principal component scores or the mean of a brain region) and in the age at which a test subject is compared with the model.
 
-A · z-maps
-
-How unusual is each voxel for a person of this age?
-
-A normative model for every voxel or vertex, read at the chronological age.
-
-B · NormBrainAGE
-
-At which age does this brain look most typical?
-
-Normative models of 100 principal component scores per brain part, read at every age of a grid. The most likely age is the brain age.
-
-C · BrainLOSS
-
-Is there less tissue than expected for that brain age?
-
-A normative model of the mean of each brain part, read at the global brain age.
+- **A · z-maps.** How unusual is each voxel for a person of this age? A normative model for every voxel or vertex, read at the chronological age.
+- **B · NormBrainAGE.** At which age does this brain look most typical? Normative models of 100 principal component scores per brain part, read at every age of a grid. The most likely age is the brain age.
+- **C · BrainLOSS.** Is there less tissue than expected for that brain age? A normative model of the mean of each brain part, read at the global brain age. BrainLOSS_age reads it at the chronological age.
 
 ## The three pipelines for one model
 
 One model is one input file, such as gray matter at 8 mm. Each lane reads from left to right, and the columns line up across lanes. A column shows what the three pipelines model, where PCA enters and at which age the test subject is read.
 
-**Figure 1.** Three pipelines for one model. Each lane fits its own normative models to the training sample. Only NormBrainAGE uses PCA, which turns the voxels of each part into *K* = 100 component scores, so its normative models live in the space of these scores. The z-maps model every voxel and BrainLOSS models one mean per part, both without PCA. Apart from the shared mask, the blue arrow is the only link between the lanes: it carries the global brain age from lane B to BrainLOSS. All normative models can add covariates such as image quality measures to *μ* and log *σ*, and `--site-sd` adds the site to log *σ*.
+**Figure 1.** Three pipelines for one model. Each lane fits its own normative models to the training sample. Only NormBrainAGE uses PCA, which turns the voxels of each part into $`K = 100`$ component scores, so its normative models live in the space of these scores. The z-maps model every voxel and BrainLOSS models one mean per part, both without PCA. Apart from the shared mask, the blue arrow is the only link between the lanes: it carries the global brain age from lane B to BrainLOSS. BrainLOSS_age reads the same model at the chronological age. All normative models can add covariates such as image quality measures to $`\mu`$ and $`\log \sigma`$, and `--site-sd` adds the site to $`\log \sigma`$.
 
 ## Three ways to read a normative model
 
 The difference between the three results is easiest to see in a single normative model. A z-map reads the model at the chronological age. NormBrainAGE inverts it and looks for the age that fits the data best. BrainLOSS reads its own model at that brain age.
 
-**Figure 2.** One normative model, read at three ages. Simulated example of a 45-year-old whose brain looks like that of a 59-year-old. The grey band is the 95 % range of the training sample. **A.** At the chronological age, the value lies 2.1 SD below the mean. **B.** NormBrainAGE looks for the age at which the value is most typical, here 59 years, so BrainAGE is +14 years. With *K* component scores, it is the age at which all scores together are most likely (Figure 3). **C.** BrainLOSS reads the mean of a brain part at the brain age. At the chronological age, the deficit is 2.7 SD and mixes the older-looking brain with additional loss. At the brain age, 1.3 SD remain, so BrainLOSS is +1.3.
+**Figure 2.** One normative model, read at three ages. Simulated example of a 45-year-old whose brain looks like that of a 59-year-old. The grey band is the 95% range of the training sample. **A.** At the chronological age, the value lies 2.1 SD below the mean. **B.** NormBrainAGE looks for the age at which the value is most typical, here 59 years, so BrainAGE is +14 years. With $`K`$ component scores, it is the age at which all scores together are most likely (Figure 3). **C.** BrainLOSS reads the mean of a brain part at the brain age. At the chronological age, the deficit is 2.7 SD (BrainLOSS_age = +2.7) and mixes the older-looking brain with additional loss. At the brain age, 1.3 SD remain, so BrainLOSS is +1.3.
 
 ## In plain words
 
-z-mapsFor every voxel, the training sample shows how much tissue people have at each age, for women and men and for each scanner. A patient's voxel is compared with people of the same age. A z-score of −2 means unusually little tissue for that age. Every voxel has its own model, and no PCA is involved.
+**z-maps.** For every voxel, the training sample shows how much tissue people have at each age, for women and men and for each scanner. A patient's voxel is compared with people of the same age. A z-score of −2 means unusually little tissue for that age. Every voxel has its own model, and no PCA is involved.
 
-NormBrainAGEPCA first summarizes the brain, or one lobe, by 100 patterns of variation among the training subjects. Each pattern's score gets a normative model of age. For a new person, we ask the reverse question: at which age would this combination of scores be most typical? That age is the brain age. The width of the likelihood peak gives each person a standard error.
+**NormBrainAGE.** PCA first summarizes the brain, or one lobe, by 100 patterns of variation among the training subjects. Each pattern's score gets a normative model of age. For a new person, we ask the reverse question: at which age would this combination of scores be most typical? That age is the brain age. The width of the likelihood peak gives each person a standard error.
 
-BrainLOSSOnce the brain age is known, we ask whether the person has less tissue than a typical person of that brain age. The mean tissue of the whole brain, or of a lobe, is compared with its normative range at the brain age. An older-looking brain explains part of a tissue deficit, and BrainLOSS is the part that it does not explain.
+**BrainLOSS.** Once the brain age is known, we ask whether the person has less tissue than a typical person of that brain age. The mean tissue of the whole brain, or of a lobe, is compared with its normative range at the brain age. An older-looking brain explains part of a tissue deficit, and BrainLOSS is the part that it does not explain. BrainLOSS_age is the deficit compared with people of the same age, before the brain age is taken into account.
 
 ## Side by side
 
 |  | A · z-maps | B · NormBrainAGE | C · BrainLOSS |
 | --- | --- | --- | --- |
-| Columns with a normative model | every voxel or vertex in the mask | *K* = 100 principal component scores of each part | the mean of each part |
+| Columns with a normative model | every voxel or vertex in the mask | $`K = 100`$ principal component scores of each part | the mean of each part |
 | PCA | no | yes, for each part, on the standardized voxels | no |
 | Values that enter | raw voxel values | voxels standardized with their training mean and SD | raw voxel values, averaged in data units |
-| Terms of *μ* and log *σ* | *μ*: natural spline of age, sex, site, covariates · log *σ*: natural spline of age, sex, covariates (and site with `--site-sd`) |  |  |
+| Terms of $`\mu`$ and $`\log \sigma`$ | the same for all three: $`\mu`$ is a natural spline of age plus sex, site and covariates; $`\log \sigma`$ a natural spline of age plus sex and covariates (and site with `--site-sd`) | | |
 | Distribution | SHASH by default (normal and GG optional) | normal | normal |
-| Link between the columns | none | residual correlation **R**, *K* × *K* | none |
+| Link between the columns | none | residual correlation $`\mathbf{R}`$, $`K \times K`$ | none |
 | Spline df of age | 5-fold CV, held-out log-likelihood of normal models of 1,000 random voxels | 5-fold CV, mean absolute error of the held-out global brain age | 5-fold CV, held-out log-likelihood |
-| Test subject read at | the chronological age | every age of a grid; the most likely age is the brain age | the global brain age of the same model |
-| Result per subject | one *z* per voxel; mean *z* per lobe | global and regional brain age, standard error, non-aging deviation | BrainLOSS of the whole brain and of each lobe |
-| Controls of a new site | *z* of every voxel set to mean 0 and SD 1 | their median BrainAGE is subtracted (default) | standardized to mean 0 and SD 1 |
+| Test subject read at | the chronological age | every age of a grid; the most likely age is the brain age | the global brain age of the same model; `BrainLOSS_age`: the chronological age |
+| Result per subject | one $`z`$ per voxel; mean $`z`$ per lobe | global and regional brain age, standard error, non-aging deviation | BrainLOSS and BrainLOSS_age of the whole brain and of each lobe |
+| Controls of a new site | $`z`$ of every voxel set to mean 0 and SD 1 | their median BrainAGE is subtracted (default) | standardized to mean 0 and SD 1 |
 | Several models | one map per model | weighted mean, GLS weights | mean |
 | Option | `--zmaps`, `--normative-only` | default | `--brainloss` |
 
@@ -65,8 +51,8 @@ The z-maps answer the classical question of normative modeling. Every voxel or v
 
 ### Training sample
 
-1. Keep the voxels or vertices whose mean over the training subjects reaches 0.05 (volume) or 5 % of the median of all means (surface). Brain age and BrainLOSS use the same mask.
-2. Fit a GAMLSS to every voxel with the SHASH distribution. Location *μ* and log scale log *σ* are natural splines of age plus sex, site and covariates; skewness *ν* and tail weight *τ* are constant. All voxels are fitted at once.
+1. Keep the voxels or vertices whose mean over the training subjects reaches 0.05 (volume) or 5% of the median of all means (surface). Brain age and BrainLOSS use the same mask.
+2. Fit a GAMLSS to every voxel with the SHASH distribution. Location $`\mu`$ and log scale $`\log \sigma`$ are natural splines of age plus sex, site and covariates; skewness $`\nu`$ and tail weight $`\tau`$ are constant. All voxels are fitted at once.
 3. One pair of spline df serves all voxels. It is chosen by 5-fold cross-validation of the held-out log-likelihood of normal models of 1,000 random voxels.
 
 ### Test subject
@@ -86,25 +72,29 @@ NormBrainAGE does not use the voxel-wise models of the z-maps. It reduces the vo
 ### Training sample, for every part
 
 1. Take the masked voxels of the part and standardize each one with its training mean and SD, so that all enter the PCA with unit variance.
-2. Compute the PCA from the *n* × *n* Gram matrix of the *n* training subjects and keep *K* = 100 components (fewer if the part has fewer voxels or subjects). The PCA does not see age.
-3. The *K* component scores are the features. Each gets a normal GAMLSS whose *μ**j*(*a*) and log *σ**j*(*a*) are natural splines of age plus sex, site and covariates.
-4. The z-scores of the training subjects at their own age give the residual correlation, a *K* × *K* matrix:
+2. Compute the PCA from the $`n \times n`$ Gram matrix of the $`n`$ training subjects and keep $`K = 100`$ components (fewer if the part has fewer voxels or subjects). The PCA does not see age.
+3. The $`K`$ component scores are the features. Each gets a normal GAMLSS whose $`\mu_j(a)`$ and $`\log \sigma_j(a)`$ are natural splines of age plus sex, site and covariates.
+4. The z-scores of the training subjects at their own age give the residual correlation, a $`K \times K`$ matrix:
 
-**R** = (1/*n*) Σ*i* **z***i***z***i*T + 0.01 **I**
+```math
+\mathbf{R} = \frac{1}{n} \sum_i \mathbf{z}_i \mathbf{z}_i^\top + 0.01\, \mathbf{I}
+```
 
 5. One pair of spline df serves all scores and parts. It is chosen by 5-fold cross-validation of the mean absolute error of the held-out global brain age.
 
 ### Test subject
 
-6. Standardize the subject's voxels with the training means and SDs and project them onto the saved axes. This gives the subject's *K* scores *s**j*.
-7. For every age *a* of a grid, in steps of 0.25 years from 5 years below the youngest to 5 years above the oldest training subject (not below 0), compute *z**j*(*a*) = (*s**j* − *μ**j*(*a*)) / *σ**j*(*a*) and the log-likelihood below. It uses the model of the subject's sex at the reference site, with the subject's own covariates.
+6. Standardize the subject's voxels with the training means and SDs and project them onto the saved axes. This gives the subject's $`K`$ scores $`s_j`$.
+7. For every age $`a`$ of a grid, in steps of 0.25 years from 5 years below the youngest to 5 years above the oldest training subject (not below 0), compute $`z_j(a) = (s_j - \mu_j(a)) / \sigma_j(a)`$ and the log-likelihood below. It uses the model of the subject's sex at the reference site, with the subject's own covariates.
 
-ℓ(*a*) = −½ **z**(*a*)T **R**−1 **z**(*a*) − Σ*j* log *σ**j*(*a*)
+```math
+\ell(a) = -\tfrac{1}{2}\, \mathbf{z}(a)^\top \mathbf{R}^{-1} \mathbf{z}(a) - \sum_j \log \sigma_j(a)
+```
 
-8. The brain age *â* is the maximum of ℓ, refined by a parabola through the grid maximum and its neighbours. The curvature gives the standard error, SE = (−ℓ″(*â*))−1/2. BrainAGE is *â* minus the chronological age. Estimates at the end of the grid are flagged.
-9. The non-aging deviation is the Mahalanobis distance *d*2 = **z**(*â*)T**R**−1**z**(*â*), turned into a normal score with the Wilson–Hilferty approximation of χ2 with *K* df. The same distance at the chronological age gives the total deviation.
+8. The brain age $`\hat a`$ is the maximum of $`\ell`$, refined by a parabola through the grid maximum and its neighbours. The curvature gives the standard error, $`\mathrm{SE} = (-\ell''(\hat a))^{-1/2}`$. BrainAGE is $`\hat a`$ minus the chronological age. Estimates at the end of the grid are flagged.
+9. The non-aging deviation is the Mahalanobis distance $`d^2 = \mathbf{z}(\hat a)^\top \mathbf{R}^{-1} \mathbf{z}(\hat a)`$, turned into a normal score with the Wilson–Hilferty approximation of $`\chi^2`$ with $`K`$ df. The same distance at the chronological age gives the total deviation.
 
-PCA scores are uncorrelated in the training sample. Their z-scores are correlated, because removing age, sex and site and dividing by an age-dependent SD changes them differently. **R** carries this correlation into the likelihood.
+PCA scores are uncorrelated in the training sample. Their z-scores are correlated, because removing age, sex and site and dividing by an age-dependent SD changes them differently. $`\mathbf{R}`$ carries this correlation into the likelihood.
 
 In the code: `NDMBrainAge._fit_pca_part`, `_pca`, `ResidualCorrelation`, `_loglik_grid`, `_argmax_refine`, `_mahalanobis`, `deviation_z`.
 
@@ -116,19 +106,39 @@ With `--parcellation`, every lobe of the atlas becomes a part of its own, next t
 
 ### BrainLOSS, training sample, for every part
 
-1. Average the part's voxels for every subject. The mean *ȳ**p* is in the units of the data: raw values, not standardized, without PCA and before any warp.
-2. Fit a normal GAMLSS of *ȳ**p* with the same terms as the other models. Its spline df are chosen by 5-fold cross-validation of the held-out log-likelihood.
+1. Average the part's voxels for every subject. The mean $`\bar y_p`$ is in the units of the data: raw values, not standardized, without PCA and before any warp.
+2. Fit a normal GAMLSS of $`\bar y_p`$ with the same terms as the other models. Its spline df are chosen by 5-fold cross-validation of the held-out log-likelihood.
 
 ### BrainLOSS, test subject
 
-3. Read the model at the global brain age *â* of the same model (input file), at the reference site:
+3. Read the model at the global brain age $`\hat a`$ of the same model (input file), at the reference site:
 
-BrainLOSS*p* = −(*ȳ**p* − *μ**p*(*â*)) / *σ**p*(*â*)
+```math
+\mathrm{BrainLOSS}_p = -\frac{\bar y_p - \mu_p(\hat a)}{\sigma_p(\hat a)}
+```
 
-4. With controls of the test site, standardize BrainLOSS of every part to mean 0 and SD 1 in the controls.
-5. Positive values mean less tissue than expected for the brain age.
+4. Read it also at the chronological age $`a`$, for subjects with a known age:
 
-Step 3 uses the brain age as estimated, before the site correction of BrainAGE. The standardization with the controls in step 4 then removes a shift that is common to the test site.
+```math
+\mathrm{BrainLOSS}^{\mathrm{age}}_p = -\frac{\bar y_p - \mu_p(a)}{\sigma_p(a)}
+```
+
+5. With controls of the test site, standardize both scores of every part to mean 0 and SD 1 in the controls.
+6. Positive values mean less tissue than expected for the brain age (BrainLOSS) or for the chronological age (BrainLOSS_age).
+
+Step 3 uses the brain age as estimated, before the site correction of BrainAGE. The standardization with the controls in step 5 then removes a shift that is common to the test site.
+
+### Why the brain age, and what BrainLOSS_age adds
+
+The two scores differ by the part of the tissue deficit that the brain age explains. Before the standardization, and exactly for a linear age curve with a constant SD,
+
+```math
+\mathrm{BrainLOSS}^{\mathrm{age}}_p = \mathrm{BrainLOSS}_p + b_p\, \mathrm{BrainAGE}, \qquad b_p = -\frac{\mu_p'}{\sigma_p}
+```
+
+Here $`b_p`$ is the normative decline of the part mean per year, in SD units. In Figure 2, the 45-year-old whose brain looks 59 has 2.7 SD less tissue than 45-year-olds. About 1.4 SD of that is what any 59-year-old brain has, and BrainAGE = +14 already reports it. BrainLOSS is the 1.3 SD that remain.
+
+BrainLOSS_age therefore overlaps with BrainAGE, while BrainLOSS hardly does. In the MCI patients of ADNI (gray matter), the Spearman correlation of BrainLOSS with BrainAGE was −0.01 for the whole brain and 0.14 for the temporal lobes. In a model that also contains BrainAGE, the two scores carry nearly the same information. On its own, BrainLOSS shows whether there is less tissue than expected for the brain age, and BrainLOSS_age whether there is less tissue than in people of the same age.
 
 In the code: `NDMBrainAge.fit` (the parts), `_part_means`, `_fit_loss`, `_loss`; the standardization is in `apply_models`.
 
@@ -136,49 +146,31 @@ In the code: `NDMBrainAge.fit` (the parts), `_part_means`, `_fit_loss`, `_loss`;
 
 Files given separately on the command line, such as `gm.mat wm.mat`, are separate models of the same subjects. Each runs Figures 3 and 4 on its own, and only their results are combined.
 
-|  | Each model *m* | → Controls of the test site | → Across the models | → Field of `NDM` in `<out>.mat` |
+|  | Each model $`m`$ | → Controls of the test site | → Across the models | → Field of `NDM` in `<out>.mat` |
 | --- | --- | --- | --- | --- |
-| Brain age | *â**m* of the whole brain and of each lobe | subtract their median BrainAGE, separately for the whole brain and each lobe (default `--correction offset`) | weighted mean Σ*m* *w**m* *â**m* with GLS weights; each lobe with its own weights | `BrainAGE_ensemble`, `BrainAGE_regional_ensemble` |
+| Brain age | $`\hat a_m`$ of the whole brain and of each lobe | subtract their median BrainAGE, separately for the whole brain and each lobe (default `--correction offset`) | weighted mean $`\sum_m w_m \hat a_m`$ with GLS weights; each lobe with its own weights | `BrainAGE_ensemble`, `BrainAGE_regional_ensemble` |
 | Non-aging deviation | normal score of each model | unchanged | mean | `Deviation_ensemble` |
-| BrainLOSS | whole brain and each lobe, at *â**m* | standardized to mean 0 and SD 1 | mean | `BrainLOSS_ensemble`, `BrainLOSS_regional_ensemble` |
-| z-maps | one map per model | *z* of every voxel set to mean 0 and SD 1 | not combined | `<out>_zmaps_<model>.mat` |
+| BrainLOSS | whole brain and each lobe, at $`\hat a_m`$; BrainLOSS_age at the chronological age | both standardized to mean 0 and SD 1 | mean | `BrainLOSS_ensemble`, `BrainLOSS_regional_ensemble`, `BrainLOSS_age_ensemble`, `BrainLOSS_age_regional_ensemble` |
+| z-maps | one map per model | $`z`$ of every voxel set to mean 0 and SD 1 | not combined | `<out>_zmaps_<model>.mat` |
 
 The GLS weights minimize the mean squared error of the combined brain age, under the constraint that they sum to one:
 
-**w** = **C**−1**1** / (**1**T**C**−1**1**), *C**mm′* = (1/*n*c) Σ*i* *e**im* *e**im′*
+```math
+\mathbf{w} = \frac{\mathbf{C}^{-1} \mathbf{1}}{\mathbf{1}^\top \mathbf{C}^{-1} \mathbf{1}}, \qquad C_{mm'} = \frac{1}{n_c} \sum_i e_{im}\, e_{im'}
+```
 
-Here *e**im* is the BrainAGE of control *i* in model *m*. The weights account for the correlation of the errors between models and can be negative. They come from the controls given with `--adjust`. Without controls, all test subjects with a known age are used, and with `--kfold` all subjects.
+Here $`e_{im}`$ is the BrainAGE of control $`i`$ in model $`m`$. The weights account for the correlation of the errors between models and can be negative. They come from the controls given with `--adjust`. Without controls, all test subjects with a known age are used, and with `--kfold` all subjects.
 
 In the code: `correct_age`, `ensemble_weights`, `_combine`, `_summarize`.
 
 ## Options that change the picture
 
---pca 0
+- `--pca 0`: NormBrainAGE models every voxel instead of component scores, with a low-rank plus diagonal $`\mathbf{R}`$ of rank 20. With `--family normal`, this voxel-wise model is shared with the z-maps.
+- `--warp`: an age-independent sinh-arcsinh transform of every voxel before the standardization and the PCA. It is off by default. BrainLOSS uses the values before the warp.
+- `--no-standardize`: PCA of the raw voxel values instead of standardized ones.
+- `--site-sd`: the training sites also enter $`\log \sigma`$ of all normative models.
+- `--train-cov`, `--test-cov`: covariates such as image quality measures enter $`\mu`$ and $`\log \sigma`$ of all normative models, and every subject is read at its own values.
+- `--test-nuisance`: nuisance effects are estimated in the controls and removed from the test data before brain age and BrainLOSS, and from the z-scores of the z-maps.
+- `--correction`: `adapt` rescales the normative models of the scores with the controls instead of subtracting an offset, `agefree` does so at the controls' estimated brain ages and then subtracts their median BrainAGE, `trend` removes a linear trend of BrainAGE on age, and `none` only estimates the ensemble weights.
 
-NormBrainAGE models every voxel instead of component scores, with a low-rank plus diagonal **R** of rank 20. With `--family normal`, this voxel-wise model is shared with the z-maps.
-
---warp
-
-An age-independent sinh-arcsinh transform of every voxel before the standardization and the PCA. It is off by default. BrainLOSS uses the values before the warp.
-
---no-standardize
-
-PCA of the raw voxel values instead of standardized ones.
-
---site-sd
-
-The training sites also enter log *σ* of all normative models.
-
---train-cov, --test-cov
-
-Covariates such as image quality measures enter *μ* and log *σ* of all normative models, and every subject is read at its own values.
-
---test-nuisance
-
-Nuisance effects are estimated in the controls and removed from the test data before brain age and BrainLOSS, and from the z-scores of the z-maps.
-
---correction
-
-`adapt` rescales the normative models of the scores with the controls instead of subtracting an offset, `agefree` does so at the controls' estimated brain ages and then subtracts their median BrainAGE, `trend` removes a linear trend of BrainAGE on age, and `none` only estimates the ensemble weights.
-
-Built from `neurogamlss.py` at commit 2d762b7, `NDM_methods.md` and `docs/models.md`. Defaults shown: `--pca 100`, `--psi-min 0.01`, `--grid-step 0.25`, `--grid-margin 5`, `--df-mu auto`, `--df-sigma auto`, `--correction offset`, `--ensemble gls`, and `--family shash` for the z-maps. Figure 2 uses simulated values.
+Built from `neurogamlss.py`, `NDM_methods.md` and `docs/models.md` as of 16 October 2026. Defaults shown: `--pca 100`, `--psi-min 0.01`, `--grid-step 0.25`, `--grid-margin 5`, `--df-mu auto`, `--df-sigma auto`, `--correction offset`, `--ensemble gls`, and `--family shash` for the z-maps. Figure 2 uses simulated values.
