@@ -9,6 +9,7 @@ NeuroGAMLSS is a single Python module, `neurogamlss.py`, with two parts. It fits
 - `README.md` is the user guide, with options and outputs.
 - `docs/models.md` describes the statistics and holds the evidence for the defaults.
 - `NDM_methods.md` is a draft methods section for NormBrainAGE.
+- `docs/NeuroGAMLSS Method Scheme.html` explains the z-maps, NormBrainAGE and BrainLOSS step by step, with figures; `docs/NeuroGAMLSS Method Scheme.md` is its Markdown version.
 - `scripts/iqm_comparison.py` compares image quality measures as covariates and site effects on the log SD on the real CAT12 samples, which live outside the repository.
 
 ## Commands
@@ -68,3 +69,4 @@ The module is organized in sections, in this order.
 - **Math in Markdown.** Use GitHub math: inline `` $`\mu`$ ``, display blocks in ` ```math ` fences, and `\lt`/`\gt` instead of `<`/`>` inside math.
 - **`NDM_methods.md`.** It is manuscript text. Values in [brackets] are placeholders, and the HTML comment at the end holds author notes that are not part of the text.
 - **`figures/NDMScheme.py`.** It draws `figures/NDMScheme.png` and does not import `neurogamlss`.
+- **`figures/method_scheme.py`.** It writes the figures of `docs/NeuroGAMLSS Method Scheme.html` as standalone SVG files to `docs/figures/method_scheme_*.svg`, with embedded subsets of the fonts. The HTML page is their source: edit a figure there, then run the script again.

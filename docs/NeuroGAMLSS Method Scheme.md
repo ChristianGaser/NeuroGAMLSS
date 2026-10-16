@@ -1,6 +1,6 @@
 # z-maps, NormBrainAGE and BrainLOSS, step by step
 
-NeuroGAMLSS · `neurogamlss.py`. The figures are in the HTML version of this page, [NeuroGAMLSS Method Scheme.html](NeuroGAMLSS%20Method%20Scheme.html).
+NeuroGAMLSS · `neurogamlss.py`. An HTML version of this page is [NeuroGAMLSS Method Scheme.html](NeuroGAMLSS%20Method%20Scheme.html). Its figures are the source of the SVG files below, which `figures/method_scheme.py` writes.
 
 All three results use the same building block, a GAMLSS normative model fitted separately to each column of a data matrix, with a natural spline of age plus sex, site and optional covariates. The results differ in what the columns are (voxels, principal component scores or the mean of a brain region) and in the age at which a test subject is compared with the model.
 
@@ -12,11 +12,15 @@ All three results use the same building block, a GAMLSS normative model fitted s
 
 One model is one input file, such as gray matter at 8 mm. Each lane reads from left to right, and the columns line up across lanes. A column shows what the three pipelines model, where PCA enters and at which age the test subject is read.
 
+![Three pipelines for one model: z-maps, NormBrainAGE and BrainLOSS](figures/method_scheme_1_overview.svg)
+
 **Figure 1.** Three pipelines for one model. Each lane fits its own normative models to the training sample. Only NormBrainAGE uses PCA, which turns the voxels of each part into $`K = 100`$ component scores, so its normative models live in the space of these scores. The z-maps model every voxel and BrainLOSS models one mean per part, both without PCA. Apart from the shared mask, the blue arrow is the only link between the lanes: it carries the global brain age from lane B to BrainLOSS. BrainLOSS_age reads the same model at the chronological age. All normative models can add covariates such as image quality measures to $`\mu`$ and $`\log \sigma`$, and `--site-sd` adds the site to $`\log \sigma`$.
 
 ## Three ways to read a normative model
 
 The difference between the three results is easiest to see in a single normative model. A z-map reads the model at the chronological age. NormBrainAGE inverts it and looks for the age that fits the data best. BrainLOSS reads its own model at that brain age.
+
+![One normative model read at the chronological age, at the best-fitting age, and the part mean at the brain age](figures/method_scheme_2_readings.svg)
 
 **Figure 2.** One normative model, read at three ages. Simulated example of a 45-year-old whose brain looks like that of a 59-year-old. The grey band is the 95% range of the training sample. **A.** At the chronological age, the value lies 2.1 SD below the mean. **B.** NormBrainAGE looks for the age at which the value is most typical, here 59 years, so BrainAGE is +14 years. With $`K`$ component scores, it is the age at which all scores together are most likely (Figure 3). **C.** BrainLOSS reads the mean of a brain part at the brain age. At the chronological age, the deficit is 2.7 SD (BrainLOSS_age = +2.7) and mixes the older-looking brain with additional loss. At the brain age, 1.3 SD remain, so BrainLOSS is +1.3.
 
@@ -67,6 +71,8 @@ In the code: `VoxelModel.fit`, `NormativeModel` with `family='shash'`, `VoxelMod
 
 NormBrainAGE does not use the voxel-wise models of the z-maps. It reduces the voxels of each part to component scores and fits its own normative models to these scores. Figure 3 follows one part through training and testing.
 
+![NormBrainAGE for one part: PCA, normative models of the scores, residual correlation and the likelihood of age](figures/method_scheme_3_brainage.svg)
+
 **Figure 3.** NormBrainAGE for one part. PCA is the boundary between voxel space and the space of the component scores, and all normative models of NormBrainAGE live in the second. Dashed lines connect what is estimated once in the training sample and saved with the model to the step where a test subject uses it. The PCA does not use age; age enters only through the normative models of the scores.
 
 ### Training sample, for every part
@@ -101,6 +107,8 @@ In the code: `NDMBrainAge._fit_pca_part`, `_pca`, `ResidualCorrelation`, `_logli
 ## Global and regional brain age, and the age BrainLOSS uses
 
 With `--parcellation`, every lobe of the atlas becomes a part of its own, next to the whole brain. Volume data have 10 lobes (frontal, parietal, occipital, temporal and subcortical/cerebellar, left and right). Surfaces have 8, because the subcortical/cerebellar regions are not on the surface.
+
+![Parts of one model: the global brain age of the whole-brain part is used for BrainLOSS of every part](figures/method_scheme_4_parts.svg)
 
 **Figure 4.** Parts of one model. Every part runs the pipeline of Figure 3 on its own voxels. The whole-brain part gives the global brain age, so the global brain age is not an average of the lobe ages. BrainLOSS of every part, the lobes included, is read at this global brain age. The regional brain ages are reported but do not enter BrainLOSS.
 
