@@ -305,6 +305,37 @@ def test_brainloss_measures_loss_beyond_the_brain_age():
     assert loaded.brainloss and np.array_equal(loaded.predict(loss.subset(te))['brainloss'], bl)
 
 
+def test_brainloss_age_includes_the_older_looking_brain():
+    """At chronological age, the tissue that an older-looking brain lacks counts as loss;
+    at the brain age it does not, and the two differ by about b * BrainAGE."""
+    rng = np.random.default_rng(15)
+    n, p = 700, 200
+    age = np.r_[rng.uniform(20, 80, 500), rng.uniform(25, 60, 200)]
+    older = np.arange(n) >= 600                         # brains that look 15 years older
+    u = (age + 15 * older - 20) / 60
+    load = rng.standard_normal((3, p))
+    Y = (np.column_stack([u, u ** 2, np.sqrt(u)]) @ load - u[:, None]   # tissue declines
+         + 0.5 * rng.standard_normal((n, p)))
+    d = NG.Data(Y.astype(np.float32), age, rng.integers(0, 2, n).astype(float),
+                np.zeros(n, int), 'sim_8mm_X.mat', res='8')
+    tr, te = np.arange(500), np.arange(500, 700)
+    est = NG.NDMBrainAge(df_mu=3, df_sigma=1, pca=10, mask_threshold=0, brainloss=True)
+    out = est.fit(d.subset(tr)).predict(d.subset(te))
+    o, ba = older[te], out['age'] - age[te]
+    bl, bla = out['brainloss'], out['brainloss_age']
+    assert ba[o].mean() > 10 and abs(ba[~o].mean()) < 2
+    assert abs(bl[o].mean() - bl[~o].mean()) < 0.5      # nothing beyond the brain age
+    assert bla[o].mean() > bla[~o].mean() + 3           # but less tissue than at their age
+    assert np.corrcoef(bla - bl, ba)[0, 1] > 0.9
+    unknown = d.subset(te[:5])
+    unknown.age = np.full(5, np.nan)
+    res = est.predict(unknown)
+    assert np.isnan(res['brainloss_age']).all() and np.isfinite(res['brainloss']).all()
+    cv = NG.cross_validate([d.subset(tr)], kfold=3, gpr=False, df_mu=3, df_sigma=1, pca=10,
+                           mask_threshold=0, brainloss=True)
+    assert cv['BrainLOSS_age'].shape == (500, 1) and np.isfinite(cv['BrainLOSS_age']).all()
+
+
 def test_select_df_brainage():
     d = simulate_brain()
     dm, ds, rec = NG.select_df_brainage(d, dict(pca=10, mask_threshold=0))
@@ -667,6 +698,12 @@ def test_ages_of_zero_or_nan(tmp_path):
     assert r.ind_control.size == 77 and not np.isin(bad, r.ind_control - 1).any()   # 3 of 1:80 unknown
     assert np.isfinite(r.BrainLOSS).all()                # at the brain age: also without age
     assert abs(np.mean(r.BrainLOSS[r.ind_control - 1])) < 1e-9   # standardized with controls
+    assert np.isnan(r.BrainLOSS_age[bad]).all()          # at chronological age: needs the age
+    assert np.isfinite(np.delete(r.BrainLOSS_age, bad)).all()
+    assert abs(np.mean(r.BrainLOSS_age[r.ind_control - 1])) < 1e-9
+    with open(out + '.csv') as f:
+        header = f.readline().strip().split(',')
+    assert 'BrainLOSS_age_ensemble' in header and 'BrainLOSS_age_s4rp1_8mm_TE_CAT12.9' in header
     with pytest.raises(SystemExit):                      # BrainLOSS needs brain age models
         NG.main(['--normative-only', '--brainloss', '--train', tr, '--save-model', out + '.npz'])
 
