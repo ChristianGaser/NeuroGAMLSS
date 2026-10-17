@@ -272,6 +272,25 @@ def test_with_df_equals_a_new_fit():
     assert np.allclose(a['age'], b['age']) and np.allclose(a['sd'], b['sd'], equal_nan=True)
 
 
+@pytest.mark.parametrize("n,p,rank", [(300, 40, 5), (300, 40, 40), (60, 150, 5)])
+def test_residual_correlation_is_the_low_rank_model(n, p, rank):
+    """z R^-1 z' from D and A is that of the explicit R = V diag(lam) V' + diag(psi), whether
+    the eigenvectors come from the p x p matrix (p <= n) or from the n x n Gram matrix."""
+    rng = np.random.default_rng(16)
+    Z = rng.standard_normal((n, 4)) @ rng.standard_normal((4, p)) + rng.standard_normal((n, p))
+    Z = (Z - Z.mean(axis=0)) / Z.std(axis=0)
+    corr = NG.ResidualCorrelation(rank, 0.01).fit(Z)
+    lam, V = np.linalg.eigh(Z.T @ Z / n)
+    k = min(rank, n - 1, p)
+    lam, V = lam[::-1][:k], V[:, ::-1][:, :k]
+    psi = np.maximum(1 - (V ** 2) @ lam, 0.01)
+    R = (V * lam) @ V.T + np.diag(psi)
+    z = rng.standard_normal((20, p))
+    explicit = np.sum((z @ np.linalg.inv(R)) * z, axis=1)
+    woodbury = (z ** 2) @ corr.D - np.sum((z @ corr.A) ** 2, axis=1)
+    assert np.allclose(corr.D, 1 / psi) and np.allclose(woodbury, explicit, rtol=1e-8)
+
+
 def test_standardized_pca_ignores_the_scale_of_voxels():
     d = simulate_brain()
     scaled = NG.Data((d.Y * np.geomspace(0.1, 10, d.Y.shape[1])).astype(np.float32), d.age,
