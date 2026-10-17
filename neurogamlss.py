@@ -1570,10 +1570,13 @@ class ResidualCorrelation:
             self.D = np.ones(p)
             self.A = np.zeros((p, 0))
             return self
-        G = Z @ Z.T / n                            # eigenvectors via the n x n Gram matrix
-        lam, U = np.linalg.eigh(G)
-        lam, U = lam[::-1][:k], np.ascontiguousarray(U[:, ::-1][:, :k])
-        V = (Z.T @ U) / np.sqrt(n * lam)           # (p, k), orthonormal columns
+        if p <= n:                                 # eigenvectors of the p x p matrix Z'Z / n
+            lam, V = np.linalg.eigh(Z.T @ Z / n)
+            lam, V = lam[::-1][:k], np.ascontiguousarray(V[:, ::-1][:, :k])
+        else:                                      # more features than subjects: n x n Gram matrix
+            lam, U = np.linalg.eigh(Z @ Z.T / n)
+            lam, U = lam[::-1][:k], np.ascontiguousarray(U[:, ::-1][:, :k])
+            V = (Z.T @ U) / np.sqrt(n * lam)       # (p, k), orthonormal columns
         psi = np.maximum(1 - (V ** 2) @ lam, self.psi_min)
         self.D = 1 / psi
         M = np.diag(1 / lam) + V.T @ (self.D[:, None] * V)
