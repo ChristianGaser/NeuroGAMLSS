@@ -799,3 +799,28 @@ def test_mask_nonconverged(tmp_path, monkeypatch):
     assert np.all(np.isfinite(zk[:, nc]))
     assert np.all(np.isnan(zm[:, nc]))
     assert np.array_equal(zk[:, conv == 1], zm[:, conv == 1])
+
+
+def test_ensemble_weights_without_adjust(tmp_path):
+    """Without --adjust the test subjects are not known to be controls: the ensembles in
+    the outputs use equal weights.  With --adjust the gls weights come from the controls."""
+    from scipy.io import loadmat
+    d = simulate_brain(n=300, p=120)
+    noise = np.random.default_rng(5).standard_normal(d.Y.shape)        # second, noisier model
+    ds = [d, NG.Data((d.Y + 0.5 * noise).astype(np.float32), d.age, d.male, d.site,
+                     'sim_8mm_X.mat', res='8')]                        # of the same subjects
+    files = [write_brain(tmp_path, f'{t}_8mm_TR', d, slice(0, 200), ds[0].age[:200])
+             for t, d in zip((1, 2), ds)]
+    tests = [write_brain(tmp_path, f'{t}_8mm_TE', d, slice(200, 300), ds[0].age[200:])
+             for t, d in zip((1, 2), ds)]
+    base = ['--train', *files, '--test', *tests, '--pca', '10', '--df-mu', '3', '--df-sigma', '2']
+    out = str(tmp_path / 'noadj')
+    NG.main(base + ['--out', out])
+    r = loadmat(out + '.mat', squeeze_me=True, struct_as_record=False)['NDM']
+    assert r.ensemble_method == 'mean' and np.allclose(r.weights, 0.5)
+    assert np.allclose(r.BrainAGE_ensemble, np.mean(r.BrainAGE, axis=1))
+    assert np.allclose(r.BrainAGE_GPR_ensemble, np.mean(r.BrainAGE_GPR, axis=1))
+    out = str(tmp_path / 'adj')
+    NG.main(base + ['--adjust', '1:60', '--out', out])
+    r = loadmat(out + '.mat', squeeze_me=True, struct_as_record=False)['NDM']
+    assert r.ensemble_method == 'gls' and not np.allclose(r.weights, 0.5)
