@@ -765,3 +765,37 @@ def test_volume_files_with_and_without_ind(tmp_path):
     with pytest.raises(ValueError):
         NG.main(['--normative-only', '--model', model, '--test',
                  write('NEW', slice(200, 300), ind + 1), '--out', out])
+
+
+def test_mask_nonconverged(tmp_path, monkeypatch):
+    """--mask-nonconverged sets exactly the non-converged features to NaN and leaves
+    the others unchanged; without it the z-scores of all features are kept."""
+    from scipy.io import loadmat
+    Y, age, male, site, _, _ = simulate_shash(n=500, p=30)
+    files = {}
+    for name, sel in (('TR', slice(0, 350)), ('TE', slice(350, 500))):
+        files[name] = str(tmp_path / f's4rp1_8mm_{name}_CAT12.9.mat')
+        savemat(files[name], dict(Y=Y[sel].astype(np.float32), age=age[sel][:, None],
+                                  male=male[sel][:, None]))
+    # too few iterations for the shape fit, so that some features do not converge
+    d = list(NG.fit_distribution.__defaults__)
+    d[3] = 5                       # 18 of 30 features do not converge with this seed
+    monkeypatch.setattr(NG.fit_distribution, '__defaults__', tuple(d))
+    model = str(tmp_path / 'norm.npz')
+    NG.main(['--normative-only', '--df-mu', '3', '--df-sigma', '2', '--train', files['TR'],
+             '--save-model', model, '--out', str(tmp_path / 'tr')])
+    monkeypatch.undo()
+    out = {}
+    for key, extra in (('keep', []), ('mask', ['--mask-nonconverged'])):
+        NG.main(['--normative-only', '--model', model, '--test', files['TE'],
+                 '--out', str(tmp_path / key)] + extra)
+        out[key] = loadmat(str(tmp_path / f'{key}_zmaps_s4rp1_8mm_TE_CAT12.9.mat'),
+                           squeeze_me=True)['NDMzmap']
+    field = lambda r, k: np.asarray(r[k].item() if r[k].dtype == object else r[k], float)
+    conv = field(out['keep'], 'converged')
+    zk, zm = field(out['keep'], 'Z'), field(out['mask'], 'Z')
+    nc = conv == 0
+    assert nc.any() and (conv == 1).any()
+    assert np.all(np.isfinite(zk[:, nc]))
+    assert np.all(np.isnan(zm[:, nc]))
+    assert np.array_equal(zk[:, conv == 1], zm[:, conv == 1])
