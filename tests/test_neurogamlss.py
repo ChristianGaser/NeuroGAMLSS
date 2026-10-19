@@ -3,6 +3,7 @@ import os
 import sys
 
 import numpy as np
+from dataclasses import replace
 import pytest
 from scipy.integrate import quad
 from scipy.io import savemat
@@ -824,3 +825,81 @@ def test_ensemble_weights_without_adjust(tmp_path):
     NG.main(base + ['--adjust', '1:60', '--out', out])
     r = loadmat(out + '.mat', squeeze_me=True, struct_as_record=False)['NDM']
     assert r.ensemble_method == 'gls' and not np.allclose(r.weights, 0.5)
+
+
+def _two_models(n=200, p=60):
+    d = simulate_brain(n=n, p=p)
+    noise = np.random.default_rng(5).standard_normal(d.Y.shape)
+    return [d, NG.Data((d.Y + 0.5 * noise).astype(np.float32), d.age, d.male, d.site,
+                       'sim_8mm_Y.mat', res='8')]
+
+
+def test_kfold_gpr_trend_and_ensemble_are_crossfitted():
+    """--kfold: the GPR trend and the ensemble weights of every fold come from the other
+    folds (in-sample, r(BrainAGE_GPR, age) was zero by construction)."""
+    ds = _two_models()
+    cv = NG.cross_validate(ds, kfold=4, gpr=True, df_mu=3, df_sigma=1, pca=10, mask_threshold=0)
+    age, fold = ds[0].age, cv['fold'] - 1
+    for j in range(2):
+        assert abs(np.corrcoef(cv['BrainAGE_GPR'][:, j], age)[0, 1]) > 1e-6
+    P = cv['PredictedAge']
+    for f in range(4):
+        te, tr = fold == f, fold != f
+        w = NG.ensemble_weights(P[tr], age[tr], 'gls')
+        assert np.allclose(cv['PredictedAge_ensemble'][te], P[te] @ w)
+
+
+def test_nuisance_share_crossfitted():
+    """The in-sample share of a null nuisance correction is positive with few controls,
+    the cross-fitted reduction is not; a real effect is found by both."""
+    d = simulate_brain(n=200, p=80)
+    rng = np.random.default_rng(3)
+    Q = rng.standard_normal((d.n, 4))
+    rec = NG.remove_nuisance(d, Q, np.arange(20))[1]
+    assert rec['explained'] > 0.05 and rec['explained_crossfit'] < 0
+    Y = d.Y + (1.5 * Q[:, :1] * rng.standard_normal((1, d.Y.shape[1]))).astype(np.float32)
+    rec = NG.remove_nuisance(replace(d, Y=Y), Q, np.arange(100))[1]
+    assert rec['explained_crossfit'] > 0.2
+
+
+def test_crossfitted_accuracy_in_controls(tmp_path):
+    from scipy.io import loadmat
+    ds = _two_models(n=300)
+    files = [write_brain(tmp_path, f'{t}_8mm_TR', d, slice(0, 200), ds[0].age[:200])
+             for t, d in zip((1, 2), ds)]
+    tests = [write_brain(tmp_path, f'{t}_8mm_TE', d, slice(200, 300), ds[0].age[200:])
+             for t, d in zip((1, 2), ds)]
+    base = ['--train', *files, '--test', *tests, '--adjust', '1:40', '--pca', '10',
+            '--df-mu', '3', '--df-sigma', '2']
+    for corr in ('none', 'offset', 'adapt'):
+        out = str(tmp_path / corr)
+        NG.main(base + ['--correction', corr, '--out', out])
+        r = loadmat(out + '.mat', squeeze_me=True, struct_as_record=False)['NDM']
+        c = r.ind_control - 1
+        others = np.setdiff1d(np.arange(100), c)
+        assert np.isfinite(r.BrainAGE_ensemble_crossfit[c]).all()
+        assert np.isnan(r.BrainAGE_ensemble_crossfit[others]).all()
+        if corr == 'none':      # no correction: single models need no fit, so equal
+            assert np.allclose(r.BrainAGE_crossfit[c], r.BrainAGE[c])
+    NG.main(base + ['--crossfit-folds', '0', '--out', str(tmp_path / 'off')])
+    r = loadmat(str(tmp_path / 'off.mat'), squeeze_me=True, struct_as_record=False)['NDM']
+    assert 'BrainAGE_crossfit' not in r._fieldnames
+
+
+def test_controls_zmaps_leave_one_out():
+    """The z-map of a control equals its z-map after adaptation to the other controls;
+    patients are unchanged; --controls-in-sample restores mean 0 / SD 1."""
+    d = simulate_brain(n=120, p=40)
+    vm = NG.VoxelModel(df_mu=3, df_sigma=2, family='normal').fit(d.subset(np.arange(80)))
+    te = d.subset(np.arange(80, 120))
+    ctrl = np.arange(15)
+    z = vm.zmaps(te, ctrl)['Z']
+    for i in (0, 7):
+        zi = vm.zmaps(te, np.delete(ctrl, i))['Z']
+        assert np.allclose(z[i], zi[i], atol=1e-4, equal_nan=True)
+    zin = vm.zmaps(te, ctrl, loo_controls=False)['Z']
+    assert np.allclose(z[15:], zin[15:], equal_nan=True)
+    v = np.isfinite(zin[ctrl]).all(axis=0)
+    assert np.allclose(np.mean(zin[ctrl][:, v], axis=0), 0, atol=1e-5)
+    assert np.allclose(np.std(zin[ctrl][:, v], axis=0, ddof=1), 1, atol=1e-4)
+    assert not np.allclose(np.mean(z[ctrl][:, v], axis=0), 0, atol=1e-3)
