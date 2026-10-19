@@ -258,7 +258,7 @@ When the training data are given, a Python replica of the GPR BrainAGE of the Br
 | `<out>_diagnostics_<model>.mat` | struct `NDMdiag`: `Q`, `p_Q` and `df_Q` (4 × features: mean, variance, skewness, kurtosis), `converged`, `age_groups`, `family`, `model`, `df_mu`, `df_sigma`, `mask_threshold`, `ind`, `dim` |
 | `<out>_wormplot_<model>.png` | worm plots |
 
-`Z` has the same feature order as `Y` in the input file, so it maps back to the image or surface like the input data. Features without a model are NaN, such as voxels outside the mask. `converged` is 1 for voxels whose fit converged, 0 for the others and NaN without a model. `ind` and `dim` are copied from the input file: the vertex index and the number of vertices of surface data, and the volume dimensions of volume data.
+`Z` has the same feature order as `Y` in the input file, so it maps back to the image or surface like the input data. Features without a model are NaN, such as voxels outside the mask. `converged` is 1 for voxels whose fit converged, 0 for the others and NaN without a model. The z-scores of non-converged voxels are kept by default. Non-convergence mostly marks heavy-tailed, strongly skewed voxels on the flat nu/tau ridge of the SHASH likelihood, where the z-scores hardly depend on the position along the ridge (on simulated data, at most 0.16 change in z after ten times more iterations). Use `--mask-nonconverged` to set them to NaN, which also removes them from `regional_z`, or apply `converged` as a mask in later analyses. `ind` and `dim` are copied from the input file: the vertex index and the number of vertices of surface data, and the volume dimensions of volume data.
 
 ## Images of the maps
 
