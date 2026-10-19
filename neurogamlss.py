@@ -3234,12 +3234,12 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         res.append(r)
         print(f"  {dte.name}: {time.time() - t0:.1f}s", flush=True)
     if adjust is None:
-        print("No --adjust given: no correction for the test site and ensemble weights "
-              "estimated on all test subjects.")
+        print("No --adjust given: no correction for the test site and equal ensemble weights.")
     else:
         print(f"Correction for the test site: {correction} ({ctrl.size} controls)")
     gpr_label = {'offset': 'offset corr.', 'trend': 'trend corr.', 'none': 'uncorrected'}[gpr_post]
-    out = _summarize(test, res, age, ok, ensemble, gpr, ctrl=ctrl, gpr_label=gpr_label)
+    out = _summarize(test, res, age, ok, ensemble, gpr, ctrl=ctrl, gpr_label=gpr_label,
+                     weights_from_data=adjust is not None)
     out['correction'] = correction
     out['offset'] = np.array([r['offset'] for r in res])  # median BrainAGE of controls before correction
     if cov_names:
@@ -3311,9 +3311,16 @@ def _check_ages(age, desc):
               "the normative models extrapolate linearly.")
 
 
-def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_label='trend corr.'):
+def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_label='trend corr.',
+               weights_from_data=True):
+    """Accuracy table and outputs.  weights_from_data=False (test data without --adjust):
+    the status of the test subjects is unknown, so the ensembles in the outputs use equal
+    weights; gls/mae weights fitted to all test subjects would include patients and
+    down-weight the models that carry the disease effect."""
     ctrl = np.flatnonzero(ok) if ctrl is None else np.intersect1d(ctrl, np.flatnonzero(ok))
     known = ctrl.size > 0              # subjects of known age for the evaluation
+    use = ensemble if weights_from_data else 'mean'     # ensemble written to the outputs
+    who = 'controls' if weights_from_data else 'all test subjects'
     rows = []
     for r in res:
         if known:
@@ -3337,22 +3344,27 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
             w = ensemble_weights(P[ctrl], age[ctrl], m)
             rows.append((f"GPR ensemble ({m}) w={np.round(w, 2)}",
                          metrics(P[ctrl] @ w - age[ctrl], age[ctrl])))
-        gpr_ens = P @ ensemble_weights(P[ctrl], age[ctrl], ensemble) - age
+        gpr_ens = P @ ensemble_weights(P[ctrl], age[ctrl], use) - age
     if known:
         print()
         _print_table(rows)
+        if use != ensemble:
+            print(f"\nNo --adjust: the test subjects are not known to be controls, so the "
+                  f"ensembles in the outputs use equal weights instead of {ensemble!r}. The "
+                  f"gls/mae rows above are fitted to all test subjects and shown for "
+                  f"information only; give --adjust to estimate the weights in controls.")
     else:
         print("\nNo subject has a valid age: the brain age is estimated, but BrainAGE, its "
               "accuracy and ensemble weights from the data are not available (equal weights).")
     if gpr and known:
-        ba_ndm = ens[ensemble]['age'] - age
-        print(f"\ncorr(NDM ensemble BrainAGE, GPR ensemble BrainAGE) in controls: "
+        ba_ndm = ens[use]['age'] - age
+        print(f"\ncorr(NDM ensemble BrainAGE, GPR ensemble BrainAGE) in {who}: "
               f"{np.corrcoef(ba_ndm[ctrl], gpr_ens[ctrl])[0, 1]:.3f}")
 
-    e = ens[ensemble]
+    e = ens[use]
     reg_names = _region_names(ATLAS_DIR)
     if e['regions'] and known:
-        print("\nRegional NDM BrainAGE (ensemble), controls: mean / MAE / r(BA, age)")
+        print(f"\nRegional NDM BrainAGE (ensemble), {who}: mean / MAE / r(BA, age)")
         for j, rid in enumerate(e['regions']):
             ba = e['regional'][ctrl, j] - age[ctrl]
             print(f"  {reg_names.get(rid, str(rid)):28s} {np.mean(ba):7.2f} "
@@ -3365,7 +3377,7 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
         PredictedAge_sd=np.column_stack([r['sd'] for r in res]),
         at_bound=np.column_stack([r['at_bound'] for r in res]),
         PredictedAge_ensemble=e['age'], BrainAGE_ensemble=e['age'] - age,
-        weights=e['weights'], ensemble_method=ensemble,
+        weights=e['weights'], ensemble_method=use,
         regions=np.array(e['regions']),
         region_names=np.array([reg_names.get(r_, str(r_)) for r_ in e['regions']], dtype=object),
         BrainAGE_regional_ensemble=e['regional'] - age[:, None] if e['regions'] else np.zeros((len(age), 0)),
@@ -3382,7 +3394,7 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
         out[name + '_ensemble'] = np.mean(out[name], axis=1)
     dev = out['Deviation_ensemble']
     if known:
-        print(f"\nNon-aging deviation (normal score, ensemble) in controls: "
+        print(f"\nNon-aging deviation (normal score, ensemble) in {who}: "
               f"mean {np.mean(dev[ctrl]):+.2f}, SD {np.std(dev[ctrl]):.2f}")
     # tissue loss beyond the brain age and, at chronological age, in total (normal scores);
     # the ensemble is the mean over models
@@ -3616,7 +3628,10 @@ def main(argv=None):
     p.add_argument('--grid-margin', type=float, default=5.0,
                    help="NDM brain age: extend age grid beyond training range [years]")
     p.add_argument('--age-range', nargs=2, type=float, default=[0, np.inf])
-    p.add_argument('--ensemble', choices=['gls', 'mae', 'mean'], default='gls')
+    p.add_argument('--ensemble', choices=['gls', 'mae', 'mean'], default='gls',
+                   help="weights of the brain age ensemble, estimated in the --adjust controls "
+                        "(in cross-validation in all subjects); without --adjust, test data "
+                        "use equal weights")
     p.add_argument('--no-gpr', action='store_true', help="skip the GPR baseline")
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--jobs', type=int, default=None,
