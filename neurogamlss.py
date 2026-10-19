@@ -2093,7 +2093,7 @@ class VoxelModel:
         return self
 
     def zmaps(self, d: Data, ctrl=None, ctrl_age=None, parcellation=False,
-              atlas_dir=ATLAS_DIR, chunk=256, nuisance=None):
+              atlas_dir=ATLAS_DIR, chunk=256, nuisance=None, mask_nonconverged=False):
         """z-maps of the subjects d at chronological age.
 
         Given the indices ctrl of control subjects of d (and their ages ctrl_age,
@@ -2107,6 +2107,11 @@ class VoxelModel:
         or NaN without a model) and, with parcellation, the lobe-wise mean z (n,
         n_regions), the region labels and their names; with nuisance also the
         median share of the variance of the controls' z-scores removed.
+        mask_nonconverged sets the z-scores of features whose fit did not converge
+        to NaN, so that they also drop out of the lobe-wise means.  Off by default:
+        non-convergence mostly marks heavy-tailed, strongly skewed features on the
+        flat nu/tau ridge of the SHASH likelihood, where the z-scores hardly depend
+        on the position along the ridge.
         """
         Y = d.Y if self.warper is None else self.warper.transform(d.Y)
         Cs = (lambda idx: None) if d.C is None else (lambda idx: d.C[idx])
@@ -2137,6 +2142,12 @@ class VoxelModel:
             if G is not None:                  # (z - nuisance - offset) / scale
                 z = z - (N[sub] @ G) / model.scale
             Z[np.ix_(sub, model.valid)] = z
+        if mask_nonconverged:
+            nc = model.valid[~np.asarray(model.converged, dtype=bool)]
+            Z[:, nc] = np.nan
+            if nc.size:
+                _note(f"{nc.size} feature(s) whose fit did not converge are set to NaN "
+                      "(--mask-nonconverged).")
         out = dict(Z=Z, converged=_full_map(model.converged[None].astype(float), model)[0])
         if G is not None:
             out['nuisance_explained'] = explained
@@ -3096,7 +3107,7 @@ def remove_nuisance(d: Data, Q, ctrl, df=1, names=None, chunk=20000):
 
 def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
                  zmaps_out=False, normative_only=False, parcellation=False,
-                 train=None, gpr=True, nuisance=None):
+                 train=None, gpr=True, nuisance=None, mask_nonconverged=False):
     """Apply fitted models (list of ModelSet) to the test inputs in the same order.
 
     adjust         : indices of the control subjects of the test sample
@@ -3165,7 +3176,8 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         zm = []
         for s, d in zip(sets, test):
             t0 = time.time()
-            z = s.voxel.zmaps(d, zc, parcellation=parcellation, nuisance=nz)
+            z = s.voxel.zmaps(d, zc, parcellation=parcellation, nuisance=nz,
+                              mask_nonconverged=mask_nonconverged)
             zm.append(dict(z, model=d.name, family=s.voxel.model.family, ind=d.ind, dim=d.dim,
                            age=age, male=d.male, df_mu=s.voxel.model.df_mu,
                            df_sigma=s.voxel.model.df_sigma,
@@ -3217,7 +3229,8 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         if zmaps_out:
             r['zmaps'] = s.voxel.zmaps(
                 draw, zc, out['age'][zc] if correction == 'agefree' else None,
-                parcellation or est.parcellation, est.atlas_dir, nuisance=nz)
+                parcellation or est.parcellation, est.atlas_dir, nuisance=nz,
+                mask_nonconverged=mask_nonconverged)
         res.append(r)
         print(f"  {dte.name}: {time.time() - t0:.1f}s", flush=True)
     if adjust is None:
@@ -3512,6 +3525,10 @@ def main(argv=None):
     p.add_argument('--zmaps', action='store_true',
                    help="also fit the voxel/vertex-wise normative models and save z-maps of "
                         "the test subjects (per voxel/vertex, independent of --pca)")
+    p.add_argument('--mask-nonconverged', action='store_true',
+                   help="set the z-scores of voxels/vertices whose normative fit did not "
+                        "converge to NaN (also excludes them from the lobe-wise means); "
+                        "by default they are kept and flagged in 'converged'")
     p.add_argument('--warp', action='store_true',
                    help="warp every voxel/vertex for the brain age models (sinh-arcsinh, "
                         "fitted jointly with a voxel-wise normative model)")
@@ -3785,7 +3802,8 @@ def main(argv=None):
         nuisance = dict(names=cols, values=values[:, [names.index(nm) for nm in cols]],
                         df=a.nuisance_df)
     out = apply_models(sets, test, adjust, a.correction, a.ensemble, a.zmaps,
-                       a.normative_only, a.parcellation, fit_train, not a.no_gpr, nuisance)
+                       a.normative_only, a.parcellation, fit_train, not a.no_gpr, nuisance,
+                       mask_nonconverged=a.mask_nonconverged)
     save_results(out, a.out)
     print(f"Total time {time.time() - t0:.0f}s")
 
