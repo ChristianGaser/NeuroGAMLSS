@@ -2093,7 +2093,8 @@ class VoxelModel:
         return self
 
     def zmaps(self, d: Data, ctrl=None, ctrl_age=None, parcellation=False,
-              atlas_dir=ATLAS_DIR, chunk=256, nuisance=None, mask_nonconverged=False):
+              atlas_dir=ATLAS_DIR, chunk=256, nuisance=None, mask_nonconverged=False,
+              loo_controls=True):
         """z-maps of the subjects d at chronological age.
 
         Given the indices ctrl of control subjects of d (and their ages ctrl_age,
@@ -2112,6 +2113,12 @@ class VoxelModel:
         non-convergence mostly marks heavy-tailed, strongly skewed features on the
         flat nu/tau ridge of the SHASH likelihood, where the z-scores hardly depend
         on the position along the ridge.
+        loo_controls: the z-maps of the controls themselves are adapted leave-one-out,
+        with the mean and SD of the other controls.  Adapted in-sample, every control
+        would enter its own adaptation: their z-scores have mean 0 and SD 1 exactly,
+        fewer extreme values than new subjects and are not comparable with those of
+        patients (e.g. counts of |z| > 1.96).  The nuisance coefficients stay those of
+        all controls.
         """
         Y = d.Y if self.warper is None else self.warper.transform(d.Y)
         Cs = (lambda idx: None) if d.C is None else (lambda idx: d.C[idx])
@@ -2127,10 +2134,14 @@ class VoxelModel:
             fin = np.all(np.isfinite(Zc), axis=0)
             G = np.zeros((N.shape[1], Zc.shape[1]))
             G[:, fin] = P @ Zc[:, fin]
+            folds = _nuisance_folds(nuisance['values'], d.age, d.male, nc,
+                                    nuisance.get('df', 1), nuisance.get('names'))
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', RuntimeWarning)
                 explained = float(np.nanmedian(np.var(N[nc] @ G, axis=0)[fin]
                                                / np.var(Zc[:, fin], axis=0)))
+                explained_cv = (float(np.nanmedian(_crossfit_share(Zc[:, fin], folds)))
+                                if folds and fin.any() else np.nan)
         if ctrl is not None:
             model.adapt(Y[ctrl], d.age[ctrl] if ctrl_age is None else ctrl_age,
                         d.male[ctrl], C=Cs(ctrl), shift=None if G is None else N[ctrl] @ G)
@@ -2142,6 +2153,8 @@ class VoxelModel:
             if G is not None:                  # (z - nuisance - offset) / scale
                 z = z - (N[sub] @ G) / model.scale
             Z[np.ix_(sub, model.valid)] = z
+        if ctrl is not None and loo_controls:
+            self._loo_controls(Z, model, Y, d, np.asarray(ctrl), ctrl_age, Cs, N, G)
         if mask_nonconverged:
             nc = model.valid[~np.asarray(model.converged, dtype=bool)]
             Z[:, nc] = np.nan
@@ -2151,6 +2164,7 @@ class VoxelModel:
         out = dict(Z=Z, converged=_full_map(model.converged[None].astype(float), model)[0])
         if G is not None:
             out['nuisance_explained'] = explained
+            out['nuisance_explained_crossfit'] = explained_cv
         if parcellation:
             atlas, regions, names = lobe_atlas(d, atlas_dir)
             with warnings.catch_warnings():
@@ -2161,6 +2175,32 @@ class VoxelModel:
             out['region_names'] = np.array(names, dtype=object)
         return out
 
+
+    def _loo_controls(self, Z, model, Y, d, ctrl, ctrl_age, Cs, N, G):
+        """Replace the z-scores of the controls ctrl in Z by leave-one-out adapted ones:
+        z_i = (w_i - o_-i) / s_-i, with o_-i and s_-i the mean and SD (ddof=1) of the
+        other controls' unadapted values w (minus the nuisance part), in closed form."""
+        raw = self.model.copy()
+        raw.offset[:], raw.scale[:] = 0, 1
+        a = d.age[ctrl] if ctrl_age is None else np.asarray(ctrl_age)
+        W = raw.zscores(Y[ctrl], a, d.male[ctrl], C=Cs(ctrl))           # adaptation values
+        Z0 = raw.zscores(Y[ctrl], d.age[ctrl], d.male[ctrl], C=Cs(ctrl))  # at true age
+        if G is not None:
+            W, Z0 = W - N[ctrl] @ G, Z0 - N[ctrl] @ G
+        fin = np.isfinite(W)
+        m = fin.sum(axis=0)                            # controls per feature
+        Wf = np.where(fin, W, 0.0)
+        m_i = m - fin                                  # others per control and feature
+        with np.errstate(invalid='ignore', divide='ignore'):
+            o = (Wf.sum(axis=0) - Wf) / m_i
+            ss = (Wf ** 2).sum(axis=0) - Wf ** 2 - m_i * o ** 2
+            sd = np.sqrt(np.maximum(ss, 0) / (m_i - 1))
+        sd[~(sd > 0)] = 1
+        o[~np.isfinite(o)] = 0
+        cur = Z[np.ix_(ctrl, model.valid)]
+        new = np.where(m_i >= 2, (Z0 - o) / sd, cur)    # too few others: keep in-sample
+        rows = np.isfinite(d.age[ctrl]) & (d.age[ctrl] > 0)
+        Z[np.ix_(ctrl[rows], model.valid)] = new[rows]
     def get_state(self):
         return dict(df_mu=self.df_mu, df_sigma=self.df_sigma, cov=asdict(self.cov),
                     site_sd=bool(self.site_sd),
@@ -2922,6 +2962,36 @@ def _combine(res, ages, ctrl, method):
     return out
 
 
+def _combine_crossfit(res, ages, ctrl, method, fold):
+    """_combine for cross-validation: the ensemble of the subjects of every fold uses
+    weights estimated on the subjects ctrl of the other folds.  'weights' are those of
+    all subjects (for display and for new data)."""
+    out = _combine(res, ages, ctrl, method)
+    pred = np.column_stack([r['age'] for r in res])
+    reg_cols = [[r['regional'][:, r['regions'].index(r_)] for r in res if r_ in r['regions']]
+                for r_ in out['regions']]
+    out['age'] = np.full(len(ages), np.nan)
+    out['regional'] = np.full((len(ages), len(out['regions'])), np.nan)
+    for f in np.unique(fold[fold >= 0]):
+        te = np.flatnonzero(fold == f)
+        tr = ctrl[fold[ctrl] != f]
+        out['age'][te] = pred[te] @ ensemble_weights(pred[tr], ages[tr], method)
+        for j, cols in enumerate(reg_cols):
+            P = np.column_stack(cols)
+            out['regional'][te, j] = P[te] @ ensemble_weights(P[tr], ages[tr], method)
+    return out
+
+
+def _crossfit_gpr_ensemble(P, ages, ctrl, method, fold):
+    """Cross-fitted ensemble of the GPR estimates P (n, m), as _combine_crossfit."""
+    out = np.full(len(ages), np.nan)
+    for f in np.unique(fold[fold >= 0]):
+        te = np.flatnonzero(fold == f)
+        tr = ctrl[fold[ctrl] != f]
+        out[te] = P[te] @ ensemble_weights(P[tr], ages[tr], method)
+    return out
+
+
 def cross_validate(datas, kfold=10, seed=0, age_range=(0, np.inf), gpr=True,
                    ensemble='gls', **kw):
     """k-fold cross-validation of the NDM brain age (and GPR baseline)."""
@@ -2975,8 +3045,15 @@ def cross_validate(datas, kfold=10, seed=0, age_range=(0, np.inf), gpr=True,
             print(f"  {d.name}: {time.time() - t0:.1f}s", flush=True)
 
     if gpr:
+        # trend of every test fold from the out-of-fold estimates of the other folds
+        # (a trend fitted on all subjects and evaluated on them was optimistic and made
+        # r(BrainAGE, age) of the GPR baseline zero by construction)
         for r in res:
-            r['gpr_ba'] = trend_correct(r['gpr'], d0.age, np.flatnonzero(ok))
+            r['gpr_ba'] = np.full(n, np.nan)
+            for f in range(kfold):
+                te = np.flatnonzero(fold == f)
+                tr = np.flatnonzero((fold != f) & ok & np.isfinite(r['gpr']))
+                r['gpr_ba'][te] = trend_correct(r['gpr'], d0.age, tr)[te]
     return _summarize(datas, res, d0.age, ok, ensemble, gpr, fold=fold)
 
 
@@ -3072,6 +3149,46 @@ def nuisance_design(Q, age, male, ctrl, df=1, names=None):
     return N, np.linalg.pinv(D)[-N.shape[1]:], used, age_df
 
 
+def _nuisance_folds(Q, age, male, ctrl, df=1, names=None, k=5, seed=0):
+    """Designs of a k-fold cross-fit of the nuisance correction over the controls:
+    list of (held-out, training) positions in ctrl with the bases N of the held-out
+    controls and the rows P fitted on the training controls (nuisance_design).
+    Empty if the training folds are too small for the regression."""
+    ctrl = np.asarray(ctrl)
+    k = min(k, ctrl.size)
+    if k < 2:
+        return []
+    f = np.random.default_rng(seed).permutation(np.arange(ctrl.size) % k)
+    folds = []
+    for j in range(k):
+        te, tr = np.flatnonzero(f == j), np.flatnonzero(f != j)
+        try:
+            N, P, _, _ = nuisance_design(Q, age, male, ctrl[tr], df, names)
+        except ValueError:
+            return []
+        folds.append((te, tr, N[ctrl[te]], P))
+    return folds
+
+
+def _crossfit_share(Yc, folds):
+    """Held-out reduction of the controls' variance by the nuisance correction per
+    feature, 1 - var(Yc - R) / var(Yc), where R of every control comes from the
+    coefficients of the other folds.  Negative values mean that removing the fitted
+    nuisance part adds variance to new subjects, i.e. the correction does not help."""
+    R = np.full(Yc.shape, np.nan)
+    for te, tr, Nte, P in folds:
+        R[te] = Nte @ (P @ Yc[tr])
+    v0 = np.var(Yc, axis=0)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        return np.where(v0 > 0, 1 - np.var(Yc - R, axis=0) / v0, np.nan)
+
+
+def nuisance_terms(Q, age, male, ctrl, df=1, names=None):
+    """Number of regression terms of the nuisance correction (as nuisance_design)."""
+    N, _, _, age_df = nuisance_design(Q, age, male, ctrl, df, names)
+    return 1 + age_df + int(np.unique(np.asarray(male)[ctrl]).size > 1) + N.shape[1]
+
+
 def remove_nuisance(d: Data, Q, ctrl, df=1, names=None, chunk=20000):
     """Test data d without the effects of nuisance variables Q (n, k), such as image
     quality measures, estimated in the control subjects ctrl of the test sample.
@@ -3086,12 +3203,15 @@ def remove_nuisance(d: Data, Q, ctrl, df=1, names=None, chunk=20000):
     the controls do not have.  Values outside the range of the controls are
     extrapolated linearly, and missing values are set to the mean of the controls (no
     correction).  Returns the corrected data and a record with the share of the
-    controls' variance removed (median over voxels/vertices).
+    controls' variance removed (median over voxels/vertices; in-sample, optimistic)
+    and its 5-fold cross-fitted counterpart explained_crossfit (_crossfit_share).
     """
     ctrl = np.asarray(ctrl)
     N, P, used, age_df = nuisance_design(Q, d.age, d.male, ctrl, df, names)
+    folds = _nuisance_folds(Q, d.age, d.male, ctrl, df, names)
     Y = np.array(d.Y, dtype=np.float32)
     share = np.full(Y.shape[1], np.nan)
+    share_cv = np.full(Y.shape[1], np.nan)
     idx = np.flatnonzero(np.all(np.isfinite(Y[ctrl]), axis=0))
     for c0 in range(0, idx.size, chunk):
         f = idx[c0:c0 + chunk]
@@ -3100,14 +3220,20 @@ def remove_nuisance(d: Data, Q, ctrl, df=1, names=None, chunk=20000):
         Y[:, f] = Y[:, f] - R
         vy, vr = np.var(Yc, axis=0), np.var(R[ctrl], axis=0)
         share[f] = np.where(vy > 0, vr / np.where(vy > 0, vy, 1), np.nan)
-    rec = dict(names=used, n_controls=int(ctrl.size), df=int(df), age_df=int(age_df),
-               explained=float(np.nanmedian(share)) if idx.size else np.nan)
+        if folds:
+            share_cv[f] = _crossfit_share(Yc, folds)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        rec = dict(names=used, n_controls=int(ctrl.size), df=int(df), age_df=int(age_df),
+                   explained=float(np.nanmedian(share)) if idx.size else np.nan,
+                   explained_crossfit=float(np.nanmedian(share_cv)) if idx.size else np.nan)
     return replace(d, Y=Y), rec
 
 
 def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
                  zmaps_out=False, normative_only=False, parcellation=False,
-                 train=None, gpr=True, nuisance=None, mask_nonconverged=False):
+                 train=None, gpr=True, nuisance=None, mask_nonconverged=False,
+                 crossfit_folds=5, controls_in_sample=False):
     """Apply fitted models (list of ModelSet) to the test inputs in the same order.
 
     adjust         : indices of the control subjects of the test sample
@@ -3130,6 +3256,12 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
                      subjects, such as image quality measures, whose effects are
                      estimated in the controls (adjust) and removed from the test data
                      before the models are applied (remove_nuisance)
+    crossfit_folds : with adjust, the accuracy in the controls is also estimated by
+                     k-fold cross-fitting over the controls (correction, nuisance
+                     correction and ensemble weights from the other folds), because the
+                     in-sample table evaluates the controls that estimated them; 0 skips
+    controls_in_sample : adapt the controls' own z-maps with all controls (former
+                     behaviour) instead of leave-one-out
     """
     _check_same_subjects(test)
     if len(sets) != len(test):
@@ -3160,15 +3292,28 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         nz = dict(nuisance, ctrl=ctrl)
         names = nuisance_design(nuisance['values'], age, test[0].male, ctrl,
                                 nuisance.get('df', 1), nuisance['names'])[2]
-        nuis = dict(names=names, explained=[])
+        nuis = dict(names=names, explained=[], explained_crossfit=[])
+        n_terms = nuisance_terms(nuisance['values'], age, test[0].male, ctrl,
+                                 nuisance.get('df', 1), nuisance['names'])
         if not normative_only:
             res = [remove_nuisance(d, nuisance['values'], ctrl, nuisance.get('df', 1),
                                    nuisance['names']) for d in test]
             test_ba = [r[0] for r in res]
             nuis['explained'] = [r[1]['explained'] for r in res]
+            nuis['explained_crossfit'] = [r[1]['explained_crossfit'] for r in res]
         print(f"Nuisance variables {', '.join(names)}: effects estimated in {ctrl.size} "
               "controls and removed from the test data (brain age) and z-scores (z-maps)",
               flush=True)
+        if ctrl.size < 10 * n_terms:
+            _note(f"The nuisance correction has {n_terms} regression terms for {ctrl.size} "
+                  f"controls (fewer than 10 per term): its coefficients are noisy, and the "
+                  f"correction can add more variance to new subjects than it removes.")
+        for d, sh, cv in zip(test, nuis['explained'], nuis['explained_crossfit']):
+            print(f"  {d.name}: share of the controls' variance removed {sh:.3f} (in-sample), "
+                  f"held-out reduction {cv:+.3f} (5-fold cross-fitted)")
+            if np.isfinite(cv) and cv <= 0:
+                _note(f"{d.name}: removing the nuisance effects does not reduce the variance "
+                      f"of held-out controls; the correction probably does not help.")
 
     if normative_only:
         if correction == 'agefree':
@@ -3177,7 +3322,8 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         for s, d in zip(sets, test):
             t0 = time.time()
             z = s.voxel.zmaps(d, zc, parcellation=parcellation, nuisance=nz,
-                              mask_nonconverged=mask_nonconverged)
+                              mask_nonconverged=mask_nonconverged,
+                              loo_controls=not controls_in_sample)
             zm.append(dict(z, model=d.name, family=s.voxel.model.family, ind=d.ind, dim=d.dim,
                            age=age, male=d.male, df_mu=s.voxel.model.df_mu,
                            df_sigma=s.voxel.model.df_sigma,
@@ -3209,7 +3355,7 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         elif correction == 'agefree':
             est.adapt_agefree(dte.subset(ctrl))
         out = est.predict(dte)
-        r = dict(name=dte.name, age=correct_age(out['age'], age, ctrl, post),
+        r = dict(name=dte.name, age_raw=out['age'], age=correct_age(out['age'], age, ctrl, post),
                  sd=out['sd'], at_bound=out['at_bound'], df_mu=est.df_mu, df_sigma=est.df_sigma,
                  mask_threshold=(est.mask_info or {}).get('threshold', np.nan),
                  regional=correct_age(out['regional'], age, ctrl, post), regions=est.regions,
@@ -3230,7 +3376,7 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
             r['zmaps'] = s.voxel.zmaps(
                 draw, zc, out['age'][zc] if correction == 'agefree' else None,
                 parcellation or est.parcellation, est.atlas_dir, nuisance=nz,
-                mask_nonconverged=mask_nonconverged)
+                mask_nonconverged=mask_nonconverged, loo_controls=not controls_in_sample)
         res.append(r)
         print(f"  {dte.name}: {time.time() - t0:.1f}s", flush=True)
     if adjust is None:
@@ -3238,8 +3384,22 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
     else:
         print(f"Correction for the test site: {correction} ({ctrl.size} controls)")
     gpr_label = {'offset': 'offset corr.', 'trend': 'trend corr.', 'none': 'uncorrected'}[gpr_post]
+    title = ("Accuracy in all test subjects (their status is unknown; no --adjust)"
+             if adjust is None else
+             f"In-sample accuracy in the {ctrl.size} controls: the correction and the ensemble "
+             f"weights were estimated in these controls (optimistic"
+             f"{'; mean_BA and r_BA_age are fixed by construction' if post != 'none' else ''})")
     out = _summarize(test, res, age, ok, ensemble, gpr, ctrl=ctrl, gpr_label=gpr_label,
-                     weights_from_data=adjust is not None)
+                     weights_from_data=adjust is not None, table_title=title)
+    if adjust is not None and crossfit_folds:
+        try:
+            cv = _crossfit_accuracy(sets, test, ctrl, age, correction, ensemble, gpr, train,
+                                    nuisance, res, k=crossfit_folds)
+        except (ValueError, np.linalg.LinAlgError) as err:   # e.g. too few controls per fold
+            _note(f"No cross-fitted accuracy: {err}")
+            cv = None
+        if cv is not None:
+            out.update(cv)
     out['correction'] = correction
     out['offset'] = np.array([r['offset'] for r in res])  # median BrainAGE of controls before correction
     if cov_names:
@@ -3254,6 +3414,76 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
     return out
 
 
+def _crossfit_accuracy(sets, test, ctrl, age, correction, ensemble, gpr, train, nuisance, res,
+                       k=5, seed=0):
+    """Accuracy of the brain age in the controls ctrl by k-fold cross-fitting over them.
+
+    For every fold, the site correction (offset, trend, adapt, agefree), the nuisance
+    correction and the ensemble weights are estimated in the controls of the other
+    folds and applied to the held-out controls, so that no control is evaluated with
+    an estimate it entered.  Prints the table and returns the cross-fitted BrainAGE of
+    the controls (NaN for the other subjects).
+    """
+    n, nc, M = len(age), ctrl.size, len(res)
+    k = min(k, nc // 5)
+    if k < 2:
+        _note(f"{nc} controls are too few for a cross-fitted accuracy (at least 10).")
+        return None
+    post = {'offset': 'offset', 'trend': 'trend', 'agefree': 'offset'}.get(correction, 'none')
+    gpr_post = 'offset' if correction in ('adapt', 'agefree') else post
+    refit = correction in ('adapt', 'agefree') or nuisance is not None
+    ac = age[ctrl]
+    f = np.random.default_rng(seed).permutation(np.arange(nc) % k)
+    B = np.full((nc, M), np.nan)
+    Bg = np.full((nc, M), np.nan)
+    e, eg = np.full(nc, np.nan), np.full(nc, np.nan)
+    for j in range(k):
+        tr, te = np.flatnonzero(f != j), np.flatnonzero(f == j)
+        P, Pg = np.full((nc, M), np.nan), np.full((nc, M), np.nan)
+        for i, (s, d, r) in enumerate(zip(sets, test, res)):
+            if refit:
+                dc = d.subset(ctrl)
+                if nuisance is not None:
+                    dc = remove_nuisance(dc, nuisance['values'][ctrl], tr,
+                                         nuisance.get('df', 1), nuisance['names'])[0]
+                est = s.brainage.copy()
+                if correction == 'adapt':
+                    est.adapt(dc.subset(tr))
+                elif correction == 'agefree':
+                    est.adapt_agefree(dc.subset(tr))
+                pa = est.predict(dc)['age']
+                pg = (gpr_baseline(train[i].Y, train[i].age, dc.Y)
+                      if gpr and nuisance is not None else (r['gpr'][ctrl] if gpr else None))
+            else:
+                pa, pg = r['age_raw'][ctrl], (r['gpr'][ctrl] if gpr else None)
+            P[:, i] = correct_age(pa, ac, tr, post)
+            if gpr:
+                Pg[:, i] = correct_age(pg, ac, tr, gpr_post)
+        B[te] = P[te] - ac[te, None]
+        e[te] = P[te] @ ensemble_weights(P[tr], ac[tr], ensemble) - ac[te]
+        if gpr:
+            Bg[te] = Pg[te] - ac[te, None]
+            eg[te] = Pg[te] @ ensemble_weights(Pg[tr], ac[tr], ensemble) - ac[te]
+    rows = [(f"NDM {r['name']}", metrics(B[:, i], ac)) for i, r in enumerate(res)]
+    rows.append((f"NDM ensemble ({ensemble})", metrics(e, ac)))
+    if gpr:
+        rows += [(f"GPR {r['name']}", metrics(Bg[:, i], ac)) for i, r in enumerate(res)]
+        rows.append((f"GPR ensemble ({ensemble})", metrics(eg, ac)))
+    print(f"\nAccuracy in held-out controls ({k}-fold cross-fitted over the {nc} controls: "
+          f"correction, nuisance correction and ensemble weights from the other folds)")
+    _print_table(rows)
+
+    def full(x):
+        out = np.full((n,) + x.shape[1:], np.nan)
+        out[ctrl] = x
+        return out
+    cv = dict(BrainAGE_crossfit=full(B), BrainAGE_ensemble_crossfit=full(e),
+              crossfit_folds=k)
+    if gpr:
+        cv.update(BrainAGE_GPR_crossfit=full(Bg), BrainAGE_GPR_ensemble_crossfit=full(eg))
+    return cv
+
+
 def _add_nuisance(out, nuis):
     """Record of the nuisance correction in the results and z-maps: the names and the
     median share of the controls' variance removed (brain age data per model; the
@@ -3263,6 +3493,8 @@ def _add_nuisance(out, nuis):
     out['nuisance'] = np.array(nuis['names'], dtype=object)
     if nuis['explained']:
         out['nuisance_explained'] = np.array(nuis['explained'], dtype=np.float64)
+        out['nuisance_explained_crossfit'] = np.array(nuis['explained_crossfit'],
+                                                      dtype=np.float64)
     for z in out.get('zmaps') or []:
         z['nuisance'] = out['nuisance']
 
@@ -3312,7 +3544,7 @@ def _check_ages(age, desc):
 
 
 def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_label='trend corr.',
-               weights_from_data=True):
+               weights_from_data=True, table_title=None):
     """Accuracy table and outputs.  weights_from_data=False (test data without --adjust):
     the status of the test subjects is unknown, so the ensembles in the outputs use equal
     weights; gls/mae weights fitted to all test subjects would include patients and
@@ -3329,7 +3561,10 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
         nb = int(np.sum(r['at_bound'][ctrl]))
         if nb:
             print(f"{r['name']}: {nb} estimate(s) at the boundary of the age grid")
-    ens = {m: _combine(res, age, ctrl, m) for m in ('mean', 'mae', 'gls')}
+    if fold is not None:        # cross-validation: weights of every fold from the other folds
+        ens = {m: _combine_crossfit(res, age, ctrl, m, fold) for m in ('mean', 'mae', 'gls')}
+    else:
+        ens = {m: _combine(res, age, ctrl, m) for m in ('mean', 'mae', 'gls')}
     for m in ('mean', 'mae', 'gls') if known else ():
         rows.append((f"NDM ensemble ({m}) w={np.round(ens[m]['weights'], 2)}",
                      metrics(ens[m]['age'][ctrl] - age[ctrl], age[ctrl])))
@@ -3340,13 +3575,22 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
 
         # ensemble of the trend-corrected GPR predictions (as BA_gpr_ui.m)
         P = np.column_stack([r['gpr_ba'] + age for r in res])
+        def gpr_combined(m):
+            if fold is not None:
+                return _crossfit_gpr_ensemble(P, age, ctrl, m, fold)
+            return P @ ensemble_weights(P[ctrl], age[ctrl], m)
         for m in ('mae', 'gls') if known else ():
             w = ensemble_weights(P[ctrl], age[ctrl], m)
             rows.append((f"GPR ensemble ({m}) w={np.round(w, 2)}",
-                         metrics(P[ctrl] @ w - age[ctrl], age[ctrl])))
-        gpr_ens = P @ ensemble_weights(P[ctrl], age[ctrl], use) - age
+                         metrics(gpr_combined(m)[ctrl] - age[ctrl], age[ctrl])))
+        gpr_ens = gpr_combined(use) - age
     if known:
         print()
+        if table_title is None and fold is not None:
+            table_title = ("Out-of-fold accuracy (cross-validation; GPR trend and ensemble "
+                           "weights of every fold from the other folds)")
+        if table_title:
+            print(table_title)
         _print_table(rows)
         if use != ensemble:
             print(f"\nNo --adjust: the test subjects are not known to be controls, so the "
@@ -3537,6 +3781,12 @@ def main(argv=None):
     p.add_argument('--zmaps', action='store_true',
                    help="also fit the voxel/vertex-wise normative models and save z-maps of "
                         "the test subjects (per voxel/vertex, independent of --pca)")
+    p.add_argument('--crossfit-folds', type=int, default=5,
+                   help="with --adjust, folds of the cross-fitted accuracy in the controls "
+                        "(correction and ensemble weights from the other folds; 0 = off)")
+    p.add_argument('--controls-in-sample', action='store_true',
+                   help="adapt the z-maps of the --adjust controls with all controls "
+                        "(former behaviour) instead of leave-one-out")
     p.add_argument('--mask-nonconverged', action='store_true',
                    help="set the z-scores of voxels/vertices whose normative fit did not "
                         "converge to NaN (also excludes them from the lobe-wise means); "
@@ -3818,7 +4068,8 @@ def main(argv=None):
                         df=a.nuisance_df)
     out = apply_models(sets, test, adjust, a.correction, a.ensemble, a.zmaps,
                        a.normative_only, a.parcellation, fit_train, not a.no_gpr, nuisance,
-                       mask_nonconverged=a.mask_nonconverged)
+                       mask_nonconverged=a.mask_nonconverged, crossfit_folds=a.crossfit_folds,
+                       controls_in_sample=a.controls_in_sample)
     save_results(out, a.out)
     print(f"Total time {time.time() - t0:.0f}s")
 
