@@ -225,7 +225,7 @@ NormBrainAGE standardizes every voxel or vertex of the training data to unit var
 - **A non-aging deviation,** the normal score of the Mahalanobis distance of the subject's z-scores at its brain age. It measures the atypicality that an older or younger brain does not explain.
 - **BrainLOSS** with `--brainloss`, for Loss Of Substance beyond Senescence. It is the tissue loss that the brain age does not explain: the normal score of the mean of the whole brain, and with `--parcellation` of each lobe, below its normative value at the subject's brain age. Positive values mean less tissue than expected. With `--adjust`, it is standardized with the controls.
 - **BrainLOSS_age** with `--brainloss`, the same normal score at chronological age. It is the total tissue loss for the subject's age, including the part that an older-looking brain explains.
-- **An ensemble** of all models, weighted by generalized least squares (`--ensemble`).
+- **An ensemble** of all models, weighted by generalized least squares (`--ensemble`). The weights are estimated in the `--adjust` controls. Without `--adjust`, test data use equal weights: the status of the test subjects is unknown, and weights fitted to patients down-weight the models that carry the disease effect.
 
 PCA is used only for brain age. The voxel-wise normative models of the z-maps never use it. `--pca 0` fits brain age to every voxel with a low-rank residual correlation instead. This is less accurate and gives standard errors that are too small.
 
@@ -323,7 +323,7 @@ python mat2image.py adni_gm4_zmaps_s4rp1_4mm_ADNI_CAT12.9.mat --subjects 1:10 --
 | `--no-standardize` | off | NormBrainAGE only: PCA of the raw values instead of voxels or vertices standardized to unit variance |
 | `--kfold` | 10 | folds of the cross-validation without `--test`, 0 with `--save-model` |
 | `--age-range MIN MAX` | all | age range of the training subjects |
-| `--ensemble` | `gls` | weights of the brain age ensemble: `gls`, `mae` or `mean` |
+| `--ensemble` | `gls` | weights of the brain age ensemble: `gls`, `mae` or `mean`; estimated in the `--adjust` controls, equal weights for test data without `--adjust` |
 | `--no-gpr` | off | skip the GPR comparison |
 | `--jobs` | half the CPU count | threads for fitting the voxel- and vertex-wise models; the results do not depend on it |
 | `--out` | `neurogamlss_results` | prefix of the output files |
