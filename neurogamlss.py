@@ -538,7 +538,7 @@ def lobe_atlas(d: Data, atlas_dir=ATLAS_DIR):
 
 
 # ---------------------------------------------------------------------------
-# Normative model
+# Normative model: splines, layouts and the fit of the normal family
 # ---------------------------------------------------------------------------
 
 class NaturalSpline:
@@ -658,19 +658,20 @@ class _Arrow:
     the L sites, because two site columns are never nonzero in the same row.  Solves,
     the modified Newton step and the parts of the inverse that the smoothing
     parameters need go through the site blocks and the q x q Schur complement
-    S = D - C E^-1 C' (the full matrix is never formed)."""
+    S = D - C E^-1 C' (the full matrix is never formed).  As for (m, k, k) arrays,
+    A[cols] selects the matrices of columns and A[cols] = B replaces them."""
 
     def __init__(self, D, C, E):
         self.D, self.C, self.E = D, C, E
         self.Ei = self.CEi = self.S = None
 
-    def take(self, cols):
+    def __getitem__(self, cols):
         new = _Arrow(self.D[cols], self.C[cols], self.E[cols])
         if self.S is not None:
             new.Ei, new.CEi, new.S = self.Ei[cols], self.CEi[cols], self.S[cols]
         return new
 
-    def put(self, cols, other):
+    def __setitem__(self, cols, other):
         self.D[cols], self.C[cols], self.E[cols] = other.D, other.C, other.E
 
     def diag(self):
@@ -730,89 +731,173 @@ def _site_layout(code, n_cols):
 
 
 class _Cross:
-    """Weighted cross-products M' diag(w) M plus penalties of a design M for the
-    penalized RS steps of fit_location_scale, with their solves and the traces for the
-    smoothing parameters.  Given its site columns scols and the site column of every
-    row (code), in the arrowhead layout (_Arrow with r = 1): sums per site instead of
-    products of all columns.  Constant weights w (rows, 1) are summed once (system
-    with w=None)."""
+    """Weighted cross-products sum_ij D_i' diag(v_ij) D_j of the designs D_b of several
+    parameter blocks for m columns, plus quadratic penalties, with their solves and the
+    traces that the smoothing parameters need: the Hessians of fit_distribution (v_ij:
+    second derivatives by the linear predictors) and M' diag(w) M of one design M in
+    fit_location_scale.  The coefficients are those of the blocks in order; pens are
+    the penalties (cols, S) of the coefficients cols.
 
-    def __init__(self, M, pens, code=None, scols=None, w=None):
-        self.k, self.pens = M.shape[1], list(pens)
-        self.P, self.rank, self.ncol = _penalty_stack(pens, self.k)
-        self.layout = (None if scols is None or len(scols) == 0
-                       else _site_layout(np.asarray(code), len(scols)))
+    The matrices are dense (m, k, k) or, given the site columns of some blocks (sites:
+    dict(code=site column of every row (-1: none), cols={block: its site columns}),
+    one-hot with one column per site in each of these blocks), in the arrowhead layout
+    (_Arrow): the dense coefficients, then per site the site effects of these blocks,
+    whose cross-products are sums per site.  A site column without rows gives the dense
+    layout.  Penalties are on dense coefficients or the identity on the site effects
+    of a block (random effects).
+    """
+
+    def __init__(self, designs, pens=(), sites=None):
+        n, nb = len(designs[0]), len(designs)
+        self.ks = [D.shape[1] for D in designs]
+        self.off = off = np.concatenate([[0], np.cumsum(self.ks)]).astype(int)
+        self.k = k = int(off[-1])
+        self.pairs = [(i, j) for i in range(nb) for j in range(i, nb)]
+        self.pens = list(pens)
+        self.P, self.rank, self.ncol = _penalty_stack(self.pens, k)
+        self.layout = None
+        if sites is not None and sites['cols']:
+            sb = sorted(sites['cols'])
+            self.rpos = {b: i for i, b in enumerate(sb)}
+            self.scol = np.stack([off[b] + np.asarray(sites['cols'][b]) for b in sb], axis=1)
+            self.layout = _site_layout(np.asarray(sites['code']), len(self.scol))
         if self.layout is None:
-            self.MM = (M[:, :, None] * M[:, None, :]).reshape(len(M), -1)
-        else:
-            dense = np.setdiff1d(np.arange(self.k), scols)
-            self.perm = np.concatenate([dense, scols])
-            self.Md = M[:, dense]
-            self.MMd = (self.Md[:, :, None] * self.Md[:, None, :]).reshape(len(M), -1)
-            self.drow, self.srow, pen_d = [], [], []
-            for j, (cols, S) in enumerate(pens):
-                if (np.array_equal(np.sort(cols), np.sort(scols))
-                        and np.allclose(S, np.eye(len(cols)))):
-                    self.srow.append(j)
-                else:
-                    pc = np.searchsorted(dense, cols)
-                    Mj = np.zeros((dense.size, dense.size))
-                    Mj[np.ix_(pc, pc)] = S
-                    self.drow.append(j)
-                    pen_d.append(Mj)
-            self.pen_d = np.array(pen_d).reshape(-1, dense.size, dense.size)
-            self.trace_rows = np.argsort(self.drow + self.srow)
-        self.base = None if w is None else self._cross(w)
+            self.OD = {(i, j): (designs[i][:, :, None] * designs[j][:, None, :]).reshape(n, -1)
+                       for i, j in self.pairs}
+            return
+        isdense = np.ones(k, dtype=bool)
+        isdense[self.scol.ravel()] = False
+        self.didx = np.flatnonzero(isdense)
+        self.perm = np.concatenate([self.didx, self.scol.ravel()])   # arrowhead order
+        q = self.didx.size
+        dcols = [np.flatnonzero(isdense[off[b]:off[b + 1]]) for b in range(nb)]
+        self.dpos = [np.searchsorted(self.didx, off[b] + dcols[b]) for b in range(nb)]
+        self.Xd = [designs[b][:, dcols[b]] for b in range(nb)]
+        self.ODd = {(i, j): (self.Xd[i][:, :, None] * self.Xd[j][:, None, :]).reshape(n, -1)
+                    for i, j in self.pairs}
+        self.drow, self.srow, pen_d = [], [], []   # penalties of dense coefficients (q, q)
+        for j, (cols, S) in enumerate(self.pens):  # and the identity on site effects
+            hit = [b for b in sb
+                   if np.array_equal(np.sort(cols), np.sort(self.scol[:, self.rpos[b]]))]
+            if hit and np.allclose(S, np.eye(len(cols))):
+                self.srow.append((j, self.rpos[hit[0]]))
+            elif np.all(isdense[cols]):
+                M = np.zeros((q, q))
+                pc = np.searchsorted(self.didx, cols)
+                M[np.ix_(pc, pc)] = S
+                self.drow.append(j)
+                pen_d.append(M)
+            else:
+                raise ValueError("A penalty mixes dense coefficients and site effects.")
+        self.pen_d = np.array(pen_d).reshape(-1, q, q)
+        self.trace_rows = np.argsort(self.drow + [j for j, _ in self.srow])
 
     def _sums(self, v):
+        """Sums (L, m) of the rows of v (n, m) over the rows of every site column."""
         order, starts = self.layout
         return np.add.reduceat(v[order], starts, axis=0)
 
-    def _cross(self, w):
-        """M' diag(w) M for the weights w (rows, m): (m, k, k) or _Arrow."""
-        m = w.shape[1]
+    def assemble(self, V, m):
+        """Cross-products of the weights V = {(i, j): (n, m)} of pairs of blocks i <= j
+        (pairs not in V are zero): (m, k, k) or _Arrow."""
+        off = self.off
         if self.layout is None:
-            return (self.MM.T @ w).T.reshape(m, self.k, self.k)
-        q = self.Md.shape[1]
-        C = np.stack([self._sums(w * self.Md[:, a:a + 1]).T for a in range(q)], axis=1)
-        return _Arrow((self.MMd.T @ w).T.reshape(m, q, q), C[..., None],
-                      self._sums(w).T[:, :, None, None])
+            M = np.zeros((m, self.k, self.k))
+            for (i, j), v in V.items():
+                h = (self.OD[(i, j)].T @ v).reshape(self.ks[i], self.ks[j], -1).transpose(2, 0, 1)
+                M[:, off[i]:off[i + 1], off[j]:off[j + 1]] = h
+                if i != j:
+                    M[:, off[j]:off[j + 1], off[i]:off[i + 1]] = h.transpose(0, 2, 1)
+            return M
+        rpos, dpos = self.rpos, self.dpos
+        q, (L, r) = self.didx.size, self.scol.shape
+        D, C, E = np.zeros((m, q, q)), np.zeros((m, q, L, r)), np.zeros((m, L, r, r))
+        for (i, j), v in V.items():
+            h = (self.ODd[(i, j)].T @ v).reshape(dpos[i].size, dpos[j].size, -1).transpose(2, 0, 1)
+            D[:, dpos[i][:, None], dpos[j]] = h
+            if i != j:
+                D[:, dpos[j][:, None], dpos[i]] = h.transpose(0, 2, 1)
+            for a, b in ((i, j), (j, i)) if i != j else ((i, j),):
+                if b in rpos:           # dense coefficients of a with the site effects of b
+                    for c, pos in enumerate(dpos[a]):
+                        C[:, pos, :, rpos[b]] = self._sums(v * self.Xd[a][:, c:c + 1]).T
+            if i in rpos and j in rpos:
+                E[:, :, rpos[i], rpos[j]] = E[:, :, rpos[j], rpos[i]] = self._sums(v).T
+        return _Arrow(D, C, E)
 
-    def system(self, w, sp):
-        """M' diag(w) M + sum_j sp_j P_j for the weights w (rows, m), or the constant
-        weights of the constructor (w=None); sp (n_pen, m)."""
-        m = sp.shape[1]
-        if w is not None:
-            A = self._cross(w)
-        elif self.layout is None:
-            A = np.repeat(self.base, m, axis=0)
-        else:
-            A = _Arrow(*(np.repeat(x, m, axis=0) for x in (self.base.D, self.base.C,
-                                                          self.base.E)))
+    def diag(self, A):
+        """Diagonals (k, m) of the matrices A, in the order of the coefficients."""
         if self.layout is None:
-            return A + np.einsum('jm,jab->mab', sp, self.P) if len(self.P) else A
-        scl = np.max(np.abs(A.diag()), axis=1) + 1e-12      # without the penalties
+            return np.diagonal(A, axis1=1, axis2=2).T
+        out = np.empty((self.k, A.D.shape[0]))
+        out[self.perm] = A.diag().T
+        return out
+
+    def negative(self, H, prior):
+        """-H plus the prior precisions prior (k,) on the diagonal (site effects have
+        none), with non-finite elements set to 0, for the Hessians H (assemble)."""
+        if self.layout is None:
+            A = -H
+            d = np.arange(self.k)
+            A[:, d, d] += prior
+            return np.where(np.isfinite(A), A, 0)
+        A = _Arrow(-H.D, -H.C, -H.E)
+        d = np.arange(self.didx.size)
+        A.D[:, d, d] += prior[self.didx]
+        for M in (A.D, A.C, A.E):
+            M[~np.isfinite(M)] = 0
+        return A
+
+    def system(self, A, sp, positive=False):
+        """A + sum_j sp_j P_j for the matrices A (assemble, negative; changed in place)
+        and the smoothing parameters sp (n_pen, m), for solve and traces.  With
+        positive, matrices that are not positive definite get the absolute values of
+        their eigenvalues (modified Newton, _positive), judged on the scale of A
+        without the penalties, whose large values would hide small curvatures.  The
+        factorization of the arrowhead layout always does this (_Arrow.factor)."""
+        if self.layout is None:
+            if positive:
+                d = np.arange(self.k)
+                scl = np.max(np.abs(A[:, d, d]), axis=1) + 1e-12
+            if len(self.P):
+                A = A + np.einsum('jm,jab->mab', sp, self.P)
+            if positive:
+                _positive(A, scl)
+            return A
+        scl = np.max(np.abs(A.diag()), axis=1) + 1e-12
         if self.drow:
             A.D += np.einsum('jm,jab->mab', sp[self.drow], self.pen_d)
-        for j in self.srow:
-            A.E[:, :, 0, 0] += sp[j][:, None]
+        for j, rb in self.srow:
+            A.E[:, :, rb, rb] += sp[j][:, None]
         A.factor(scl)
         return A
 
-    def solve(self, A, rhs):
-        """x (k, m) with A x = rhs (k, m)."""
+    def solve(self, A, g, extra=None, block=None):
+        """x (k, m) with A x = g (k, m) for the matrices A of system; extra (m, k_b, k_b)
+        is added to the coefficients of a block without site effects."""
+        off = self.off
         if self.layout is None:
-            return np.linalg.solve(A, rhs.T[..., None])[..., 0].T
-        x = A.solve(rhs.T[:, self.perm])
+            if extra is not None:
+                sl = slice(off[block], off[block + 1])
+                A = A.copy()
+                A[:, sl, sl] += extra
+            return np.linalg.solve(A, g.T[..., None])[..., 0].T
+        ex = None
+        if extra is not None:
+            q = self.didx.size
+            pos = np.searchsorted(self.didx, np.arange(off[block], off[block + 1]))
+            ex = np.zeros((g.shape[1], q, q))
+            ex[:, pos[:, None], pos] = extra
+        x = A.solve(g.T[:, self.perm], ex)
         out = np.empty_like(x)
         out[:, self.perm] = x
         return out.T
 
     def traces(self, A):
-        """tr(A^-1 P_j) (n_pen, m)."""
+        """tr(A^-1 P_j) of the penalties (n_pen, m) for the matrices A of system."""
         if self.layout is None:
             return np.einsum('mab,jba->jm', np.linalg.inv(A), self.P)
-        return A.traces(self.pen_d, [0] * len(self.srow))[self.trace_rows]
+        return A.traces(self.pen_d, [rb for _, rb in self.srow])[self.trace_rows]
 
 
 def _pen_quad(pens, B):
@@ -845,6 +930,33 @@ def _efs_update(sp, tr, quad, rank, lo, hi):
         new = (rank[:, None] - sp * tr) / quad
     new = np.clip(np.where(np.isfinite(new), new, hi), lo, hi)
     return new, sp * tr
+
+
+class _Smoothing:
+    """Smoothing parameters sp (n_pen, m) of the penalties of m columns and the effective
+    df edf of the penalized coefficients, estimated by the extended Fellner-Schall
+    update (_efs_update).  scale (n_pen, m) is the information of the penalized
+    coefficients per unit of penalty at the start; sp starts there or at the given
+    values and stays within SP_RANGE of it.  rank and ncol are the ranks of the
+    penalties and the numbers of their coefficients (_penalty_stack)."""
+
+    def __init__(self, scale, rank, ncol, sp=None):
+        self.lo, self.hi = SP_RANGE[0] * scale, SP_RANGE[1] * scale
+        self.sp = (scale.copy() if sp is None
+                   else np.clip(np.array(sp, np.float64), self.lo, self.hi))
+        self.edf = np.full(self.sp.shape, np.nan)
+        self.rank, self.ncol = rank, ncol
+
+    def update(self, cols, tr, quad):
+        """EFS update of the columns cols given tr(A^-1 P_j) and the quadratic forms
+        B' P_j B of their coefficients (n_pen, len(cols)); returns for each of them
+        whether its effective df changed by less than EDF_TOL (converged)."""
+        new, removed = _efs_update(self.sp[:, cols], tr, quad, self.rank,
+                                   self.lo[:, cols], self.hi[:, cols])
+        prev = self.edf[:, cols]
+        self.sp[:, cols] = new
+        self.edf[:, cols] = self.ncol[:, None] - removed
+        return np.max(np.abs(self.edf[:, cols] - prev), axis=0) < EDF_TOL
 
 
 def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000, init=None,
@@ -904,14 +1016,30 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000,
     pen_x, pen_w = penalties if penalties is not None else ((), ())
     npx, npw = len(pen_x), len(pen_w)
     scols = {} if sites is None else sites['cols']
-    cx = _Cross(X, pen_x, code, scols.get(0)) if npx or 0 in scols else None
+
+    def layout(M, pens, b):
+        """_Cross of the design M with its penalties and the site columns of block b of
+        sites; None without either (plain least squares)."""
+        if not pens and b not in scols:
+            return None
+        return _Cross([M], pens, dict(code=code, cols={0: scols[b]}) if b in scols else None)
+
+    def system(c, w, spc):
+        """M' diag(w) M plus the penalties with the smoothing parameters spc of the
+        _Cross c of a design M."""
+        return c.system(c.assemble({(0, 0): w}, w.shape[1]), spc)
+
+    cx, cw = layout(X, pen_x, 0), layout(W, pen_w, 1)
     w2 = 2 * (np.ones((len(W), 1)) if size is None else size)   # information of theta
-    cw = _Cross(W, pen_w, code, scols.get(1), w2) if npw or 1 in scols else None
+    if cw is not None:
+        info_w = cw.assemble({(0, 0): w2}, 1)                      # the same for all columns
     if npx + npw:
         sp_out = np.full((npx + npw, p), np.nan)
         edf_out = np.full((npx + npw, p), np.nan)
         hw = (W ** 2).T @ w2[:, 0]
         trS = np.array([np.trace(S) for _, S in list(pen_x) + list(pen_w)])
+        rank = np.concatenate([cx.rank if npx else [], cw.rank if npw else []])
+        ncol = np.concatenate([cx.ncol if npx else [], cw.ncol if npw else []])
 
     step = max(1, max_elements // n)
 
@@ -919,10 +1047,6 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000,
         """Sums of the squared residuals of the subjects of every row from the
         residuals r of the row means and the sums of squares Q within the cells."""
         return r ** 2 if Q is None else size * r ** 2 + Q
-
-    def penalty(c, spc, tt):
-        """Gradient (k, m) and value (m,) of sum_j sp_j tt'P_j tt / 2 of _Cross c."""
-        return _pen_terms(c.pens, tt, spc)
 
     def run(start):
         y_all = np.asarray(Y[:, start:start + step], dtype=np.float64)
@@ -942,19 +1066,17 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000,
             t_all = np.zeros((kw, y_all.shape[1]))
             t_all[0] = 0.5 * np.log(np.sum(squares(y_all - X @ b_all, Q_all), axis=0) / n)
         m_all = y_all.shape[1]
-        sp_all = np.zeros((npx + npw, m_all))
+        sp_all = np.zeros((0, m_all))
         if npx + npw:
             # scale of the smoothing parameters: information of the penalized
-            # coefficients per unit of penalty at the start, within SP_RANGE of it
+            # coefficients per unit of penalty at the start
             sw0 = np.exp(-2 * (W @ t_all)) * (1 if size is None else size)
             hx = (X ** 2).T @ sw0
             scale = np.vstack([hx[cols].sum(axis=0) for cols, _ in pen_x]
                               + [np.full(m_all, hw[cols].sum()) for cols, _ in pen_w])
-            scale = scale / trS[:, None]
-            lo, hi = SP_RANGE[0] * scale, SP_RANGE[1] * scale
-            sp_all = (scale.copy() if sp is None
-                      else np.clip(np.array(sp[:, start:start + step], np.float64), lo, hi))
-            edf_all = np.full(sp_all.shape, np.nan)
+            smooth = _Smoothing(scale / trS[:, None], rank, ncol,
+                                None if sp is None else sp[:, start:start + step])
+            sp_all = smooth.sp                     # updated in place
 
         active = np.arange(m_all)
         for _ in range(max_iter):
@@ -971,7 +1093,7 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000,
                 rhs = (X.T @ (sw * y)).T[..., None]
                 b_new = np.linalg.solve(A, rhs)[..., 0].T
             else:
-                b_new = cx.solve(cx.system(sw, spx), X.T @ (sw * y))
+                b_new = cx.solve(system(cx, sw, spx), X.T @ (sw * y))
             d_mu = np.max(np.abs(X @ (b_new - b)) * np.exp(-eta), axis=0)
             S = squares(y - X @ b_new, Q)
 
@@ -980,17 +1102,17 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000,
             if cw is None:
                 d_t = W_pinv @ (0.5 * (S * w - (1 if size is None else size)))
             else:                                  # with the penalty: 2 W'W + S_sp
-                Aw = cw.system(None, spw)
+                Aw = cw.system(info_w[np.zeros(t.shape[1], dtype=int)], spw)
                 score = W.T @ (S * w - (1 if size is None else size))
                 if npw:
-                    pg, pv = penalty(cw, spw, t)
+                    pg, pv = _pen_terms(pen_w, t, spw)
                     score, dev_old = score - pg, dev_old + 2 * pv
                 d_t = cw.solve(Aw, score)
             t_new = t + d_t
             eta_new = W @ t_new
             dev_new = _deviance(S, eta_new, size)
             if npw:
-                dev_new = dev_new + 2 * penalty(cw, spw, t_new)[1]
+                dev_new = dev_new + 2 * _pen_terms(pen_w, t_new, spw)[1]
             for _ in range(20):                    # step halving (gamlss autostep)
                 worse = dev_new > dev_old
                 if not np.any(worse):
@@ -1000,29 +1122,22 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000,
                 eta_new[:, worse] = W @ t_new[:, worse]
                 dev_new[worse] = _deviance(S[:, worse], eta_new[:, worse], size)
                 if npw:
-                    dev_new[worse] += 2 * penalty(cw, spw[:, worse], t_new[:, worse])[1]
+                    dev_new[worse] += 2 * _pen_terms(pen_w, t_new[:, worse], spw[:, worse])[1]
             d_theta = np.max(np.abs(t_new - t), axis=0)
 
             b_all[:, active] = b_new
             t_all[:, active] = t_new
             done = (d_mu < tol) & (d_theta < tol)
             if npx + npw:                          # smoothing parameters (EFS)
-                old = sp_all[:, active]
-                new, removed = old.copy(), np.empty_like(old)
+                tr, quad = [], []
                 if npx:
                     sw = np.exp(-2 * eta_new) * (1 if size is None else size)
-                    new[:npx], removed[:npx] = _efs_update(
-                        spx, cx.traces(cx.system(sw, spx)), _pen_quad(pen_x, b_new), cx.rank,
-                        lo[:npx, active], hi[:npx, active])
+                    tr.append(cx.traces(system(cx, sw, spx)))
+                    quad.append(_pen_quad(pen_x, b_new))
                 if npw:
-                    new[npx:], removed[npx:] = _efs_update(
-                        spw, cw.traces(Aw), _pen_quad(pen_w, t_new), cw.rank,
-                        lo[npx:, active], hi[npx:, active])
-                prev = edf_all[:, active]
-                sp_all[:, active] = new
-                ncol = np.concatenate([cx.ncol if npx else [], cw.ncol if npw else []])
-                edf_all[:, active] = ncol[:, None] - removed
-                done &= np.max(np.abs(edf_all[:, active] - prev), axis=0) < EDF_TOL
+                    tr.append(cw.traces(Aw))
+                    quad.append(_pen_quad(pen_w, t_new))
+                done &= smooth.update(active, np.vstack(tr), np.vstack(quad))
             converged[start + active[done]] = True
             active = active[~done]
             if active.size == 0:
@@ -1031,8 +1146,8 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000,
         beta[:, start:start + step] = b_all
         theta[:, start:start + step] = t_all
         if npx + npw:
-            sp_out[:, start:start + step] = sp_all
-            edf_out[:, start:start + step] = edf_all
+            sp_out[:, start:start + step] = smooth.sp
+            edf_out[:, start:start + step] = smooth.edf
 
     _map(run, range(0, p, step), jobs)
     if npx + npw:
@@ -1047,7 +1162,7 @@ def _rank(M, rtol=1e-8):
 
 
 # ---------------------------------------------------------------------------
-# Distribution families of the voxel/vertex-wise normative models
+# Normative model: distribution families (shash, gg) and their fit
 # ---------------------------------------------------------------------------
 
 def shash_terms(y, a, s, n, e, order=2):
@@ -1250,26 +1365,19 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
     ks = [D.shape[1] for D in designs]
     off = np.concatenate([[0], np.cumsum(ks)]).astype(int)
     k, nb = int(off[-1]), len(designs)
-    pairs = [(i, j) for i in range(nb) for j in range(i, nb)]
-    OD = {(i, j): (designs[i][:, :, None] * designs[j][:, None, :]).reshape(n, -1)
-          for i, j in pairs}
     const = [D.shape[1] == 1 and bool(np.all(D == 1)) for D in designs]
     prior = np.zeros(k)
     for b in shape_blocks:
         prior[off[b]:off[b + 1]] = 1 / prior_sd ** 2
-    diag = np.arange(k)
     coef = np.vstack([np.asarray(c, np.float64) for c in init])
     loglik, conv = np.full(p, np.nan), np.zeros(p, dtype=bool)
     pens = [(off[b] + np.asarray(cols), S) for b, cols, S in penalties]
-    P, rank_p, ncol_p = _penalty_stack(pens, k)
     npen = len(pens)
     if npen:
         sp_out, edf_out = np.full((npen, p), np.nan), np.full((npen, p), np.nan)
         trS = np.array([np.trace(S) for _, S in pens])
-
-    def pen_terms(B, spa):
-        """Gradient (k, m) and value (m,) of the smoothing penalties 0.5 sum_j sp_j B'P_jB."""
-        return _pen_terms(pens, B, spa)
+    # Hessians, their systems, solves and traces; in the arrowhead layout with sites
+    cr = _Cross(designs, pens, sites if rs_iter == 0 else None)
 
     def evaluate(B, y, order):
         """Penalized log-likelihood, log-likelihood and the derivatives up to order."""
@@ -1294,154 +1402,16 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
     def gradient(B, d1):
         return np.vstack([designs[i].T @ d1[i] for i in range(nb)]) - prior[:, None] * B
 
-    def blocks(D, m):
-        """Symmetric (m, k, k) with the blocks designs[i]' diag(D[(i, j)]) designs[j]
-        summed over observations, and zero blocks for the pairs not in D."""
-        M = np.zeros((m, k, k))
-        for (i, j), v in D.items():
-            h = (OD[(i, j)].T @ v).reshape(ks[i], ks[j], -1).transpose(2, 0, 1)
-            M[:, off[i]:off[i + 1], off[j]:off[j + 1]] = h
-            if i != j:
-                M[:, off[j]:off[j + 1], off[i]:off[i + 1]] = h.transpose(0, 2, 1)
-        return M
-
-    # site effects (sites) in the arrowhead layout (_Arrow): the dense coefficients,
-    # then per site column those of the blocks with site effects
-    arrow = sites is not None and rs_iter == 0
-    if arrow:
-        code = np.asarray(sites['code'])
-        sb = sorted(sites['cols'])
-        rpos = {b: i for i, b in enumerate(sb)}
-        scol = np.stack([off[b] + np.asarray(sites['cols'][b]) for b in sb], axis=1)
-        Lc, r = scol.shape
-        counts = np.bincount(code[code >= 0], minlength=Lc)
-        arrow = bool(np.all(counts > 0))
-    if arrow:
-        isdense = np.ones(k, dtype=bool)
-        isdense[scol.ravel()] = False
-        didx = np.flatnonzero(isdense)
-        perm = np.concatenate([didx, scol.ravel()])       # coefficients in arrowhead order
-        q = didx.size
-        dcols = [np.flatnonzero(isdense[off[b]:off[b + 1]]) for b in range(nb)]
-        dpos = [np.searchsorted(didx, off[b] + dcols[b]) for b in range(nb)]
-        Xd = [designs[b][:, dcols[b]] for b in range(nb)]
-        ODd = {(i, j): (Xd[i][:, :, None] * Xd[j][:, None, :]).reshape(n, -1) for i, j in pairs}
-        order = np.flatnonzero(code >= 0)
-        order = order[np.argsort(code[order], kind='stable')]
-        starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
-        dprior, ddiag = prior[didx], np.arange(q)
-        drow, srow, pen_d = [], [], []          # penalties of dense coefficients (q, q)
-        for j, (cols, S) in enumerate(pens):    # and the identity on site effects
-            hit = [b for b in sb if np.array_equal(np.sort(cols), np.sort(scol[:, rpos[b]]))]
-            if hit and np.allclose(S, np.eye(len(cols))):
-                srow.append((j, rpos[hit[0]]))
-            elif np.all(isdense[cols]):
-                M = np.zeros((q, q))
-                pc = np.searchsorted(didx, cols)
-                M[np.ix_(pc, pc)] = S
-                drow.append(j)
-                pen_d.append(M)
-            else:
-                raise ValueError("A penalty mixes dense coefficients and site effects.")
-        pen_d = np.array(pen_d).reshape(-1, q, q)
-        trace_rows = np.argsort(drow + [j for j, _ in srow])
-
-    def site_sum(v):
-        """Sums (L, m) of the rows of v (n, m) over the observations of every site column."""
-        return np.add.reduceat(v[order], starts, axis=0)
-
-    def hessian(D2, m):
-        """Hessian of the log-likelihood of m columns from the second derivatives D2:
-        dense (m, k, k) or in the arrowhead layout (_Arrow, assembled by sums per site)."""
-        if not arrow:
-            return blocks(D2, m)
-        D, C, E = np.zeros((m, q, q)), np.zeros((m, q, Lc, r)), np.zeros((m, Lc, r, r))
-        for (i, j), v in D2.items():
-            h = (ODd[(i, j)].T @ v).reshape(len(dcols[i]), len(dcols[j]), -1).transpose(2, 0, 1)
-            D[:, dpos[i][:, None], dpos[j]] = h
-            if i != j:
-                D[:, dpos[j][:, None], dpos[i]] = h.transpose(0, 2, 1)
-            for a, b in ((i, j), (j, i)) if i != j else ((i, j),):
-                if b in rpos:           # dense coefficients of a with the site effects of b
-                    for c, pos in enumerate(dpos[a]):
-                        C[:, pos, :, rpos[b]] = site_sum(v * Xd[a][:, c:c + 1]).T
-            if i in rpos and j in rpos:
-                E[:, :, rpos[i], rpos[j]] = E[:, :, rpos[j], rpos[i]] = site_sum(v).T
-        return _Arrow(D, C, E)
-
-    def take(H, cols):
-        return H.take(cols) if arrow else H[cols]
-
-    def put(H, cols, Hn):
-        if arrow:
-            H.put(cols, Hn)
-        else:
-            H[cols] = Hn
-
-    def info_diag(H):
-        """|diagonal| of the Hessians (k, m)."""
-        if not arrow:
-            return np.abs(np.diagonal(H, axis1=1, axis2=2)).T
-        out = np.empty((k, H.D.shape[0]))
-        out[perm] = np.abs(H.diag()).T
-        return out
-
     def system(H, spa, it):
         """Negative Hessians of the penalized log-likelihood with the smoothing parameters
-        spa, made positive definite (modified Newton); the scale of the definiteness
-        test excludes the smoothing penalties, whose large values would hide small
-        curvatures."""
-        if arrow:
-            A = _Arrow(-H.D, -H.C, -H.E)
-            A.D[:, ddiag, ddiag] += dprior
-            for M in (A.D, A.C, A.E):
-                M[~np.isfinite(M)] = 0
-            scl = np.max(np.abs(A.diag()), axis=1) + 1e-12
-            if npen:
-                if drow:
-                    A.D += np.einsum('jm,jab->mab', spa[drow], pen_d)
-                for j, rb in srow:
-                    A.E[:, :, rb, rb] += spa[j][:, None]
-            A.factor(scl)
-            return A
-        A = -H
+        spa, made positive definite (modified Newton, _Cross.system)."""
+        A = cr.negative(H, prior)
         if it < rs_iter:                          # RS: no cross-derivatives
-            for i, j in pairs:
+            for i, j in cr.pairs:
                 if i != j:
                     A[:, off[i]:off[i + 1], off[j]:off[j + 1]] = 0
                     A[:, off[j]:off[j + 1], off[i]:off[i + 1]] = 0
-        A[:, diag, diag] += prior
-        A = np.where(np.isfinite(A), A, 0)
-        scl = np.max(np.abs(A[:, diag, diag]), axis=1) + 1e-12
-        if npen:
-            A += np.einsum('jm,jab->mab', spa, P)
-        _positive(A, scl)
-        return A
-
-    def solve(A, g, extra=None):
-        """Steps (k, m) for the gradients g (k, m); extra (m, k_b, k_b) is added for the
-        coefficients of the bounded block (bound_step)."""
-        if arrow:
-            ex = None
-            if extra is not None:
-                bpos = np.searchsorted(didx, np.arange(off[bound[0]], off[bound[0] + 1]))
-                ex = np.zeros((g.shape[1], q, q))
-                ex[:, bpos[:, None], bpos] = extra
-            x = A.solve(g.T[:, perm], ex)
-            out = np.empty_like(x)
-            out[:, perm] = x
-            return out.T
-        if extra is not None:
-            sl = slice(off[bound[0]], off[bound[0] + 1])
-            A = A.copy()
-            A[:, sl, sl] += extra
-        return np.linalg.solve(A, g.T[..., None])[..., 0].T
-
-    def traces(A):
-        """tr(A^-1 P_j) of the penalties (n_pen, m)."""
-        if arrow:
-            return A.traces(pen_d, [rb for _, rb in srow])[trace_rows]
-        return np.einsum('mab,jba->jm', np.linalg.inv(A), P)
+        return cr.system(A, spa, positive=True)
 
     # the bounded predictor is the same for all observations (constant shape), so that
     # its steps across the bound can be corrected (bound_step)
@@ -1461,7 +1431,7 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
         gc[sl] += rho * n * v[:, None] * (np.where(up, hi, lo) - e0)[cross]
         extra = np.broadcast_to(rho * n * np.outer(v, v), (int(cross.sum()), v.size, v.size))
         delta = delta.copy()
-        delta[:, cross] = solve(take(A, cross), gc, extra)
+        delta[:, cross] = cr.solve(A[cross], gc, extra, b)
         return delta
 
     step = max(1, int(max_elements // n))
@@ -1471,32 +1441,30 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
         B = coef[:, c0:c0 + step].copy()
         pc = B.shape[1]
         f_all, l_all, d1, d2 = evaluate(B, y, 2)
-        G, H = gradient(B, d1), hessian(d2, pc)       # at B, for every column
+        G, H = gradient(B, d1), cr.assemble(d2, pc)   # at B, for every column
         del d1, d2
         if npen:                # smoothing parameters, scaled to the information at the start
-            info = info_diag(H)
-            scale = np.vstack([info[cols].sum(axis=0) for cols, _ in pens]) / trS[:, None]
-            sp_lo, sp_hi = SP_RANGE[0] * scale, SP_RANGE[1] * scale
-            spc = (scale.copy() if sp is None
-                   else np.clip(np.array(sp[:, c0:c0 + step], np.float64), sp_lo, sp_hi))
-            edfc = np.full(spc.shape, np.nan)
+            info = np.abs(cr.diag(H))
+            smooth = _Smoothing(
+                np.vstack([info[cols].sum(axis=0) for cols, _ in pens]) / trS[:, None],
+                cr.rank, cr.ncol, None if sp is None else sp[:, c0:c0 + step])
         active, done_ok = np.arange(pc), np.zeros(pc, dtype=bool)
         for it in range(max_iter):
             if not active.size:
                 break
             Ba = B[:, active]
-            spa = spc[:, active] if npen else None
-            A = system(take(H, active), spa, it)
+            spa = smooth.sp[:, active] if npen else None
+            A = system(H[active], spa, it)
             Ga = G[:, active]
             if npen:
-                pg, pv = pen_terms(Ba, spa)
+                pg, pv = _pen_terms(pens, Ba, spa)
                 Ga = Ga - pg
 
             def newton(A, cols):
                 """Newton steps and decrements of the columns cols (positions in active)
                 with their systems A."""
                 g = np.where(np.isfinite(Ga[:, cols]), Ga[:, cols], 0)
-                d = solve(A, g)
+                d = cr.solve(A, g)
                 if shared:
                     d = bound_step(Ba[:, cols], A, g, d)
                 return d, np.sum(g * d, axis=0)
@@ -1506,18 +1474,12 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
                 # smoothing parameters at the optimum for the current ones (EFS); where
                 # they still change, the iteration continues with the new values
                 cols = np.flatnonzero(small)
-                old, Bc = spc[:, active[cols]], Ba[:, cols]
-                new, removed = _efs_update(old, traces(take(A, cols)), _pen_quad(pens, Bc),
-                                           rank_p, sp_lo[:, active[cols]],
-                                           sp_hi[:, active[cols]])
-                prev = edfc[:, active[cols]]
-                spc[:, active[cols]] = new
-                edfc[:, active[cols]] = ncol_p[:, None] - removed
-                cols = cols[~(np.max(np.abs(edfc[:, active[cols]] - prev), axis=0) < EDF_TOL)]
+                cols = cols[~smooth.update(active[cols], cr.traces(A[cols]),
+                                           _pen_quad(pens, Ba[:, cols]))]
                 if cols.size:
-                    spa = spc[:, active]
-                    Ac = system(take(H, active[cols]), spa[:, cols], it)
-                    pgc, pv[cols] = pen_terms(Ba[:, cols], spa[:, cols])
+                    spa = smooth.sp[:, active]
+                    Ac = system(H[active[cols]], spa[:, cols], it)
+                    pgc, pv[cols] = _pen_terms(pens, Ba[:, cols], spa[:, cols])
                     Ga[:, cols] = G[:, active[cols]] - pgc
                     delta[:, cols], decr[cols] = newton(Ac, cols)
                     small[cols] = False
@@ -1525,19 +1487,19 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
             if npen:                # penalized objective with the current smoothing parameters
                 f0 = f0 - pv
             Bnew, todo, fac = Ba.copy(), np.flatnonzero(~small), np.ones(active.size)
-            Gnew, Hnew = G[:, active], take(H, active)
+            Gnew, Hnew = G[:, active], H[active]
             for _ in range(30):                 # backtracking, trial steps with derivatives
                 if not todo.size:
                     break
                 cand = Ba[:, todo] + fac[todo] * delta[:, todo]
                 fc, lc, d1, d2 = evaluate(cand, y[:, active[todo]], 2)
-                fp = fc - pen_terms(cand, spa[:, todo])[1] if npen else fc
+                fp = fc - _pen_terms(pens, cand, spa[:, todo])[1] if npen else fc
                 good = fp >= f0[todo] - 1e-12 * np.abs(f0[todo])
                 if np.any(good):
                     acc = todo[good]
                     Bnew[:, acc], fnew[acc], lnew[acc] = cand[:, good], fc[good], lc[good]
                     Gnew[:, acc] = gradient(cand, d1)[:, good]
-                    put(Hnew, acc, take(hessian(d2, todo.size), good))
+                    Hnew[acc] = cr.assemble(d2, todo.size)[good]
                 del d1, d2
                 fp, todo = fp[~good], todo[~good]
                 a, s = fac[todo], decr[todo]
@@ -1546,7 +1508,7 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
                 fac[todo] = np.clip(np.where(np.isfinite(t), t, 0.1 * a), 0.1 * a, 0.5 * a)
             B[:, active], f_all[active], l_all[active] = Bnew, fnew, lnew
             G[:, active] = Gnew
-            put(H, active, Hnew)
+            H[active] = Hnew
             stop = small | np.isin(np.arange(active.size), todo)
             done_ok[active[small]] = True
             active = active[~stop]
@@ -1554,7 +1516,7 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
         loglik[c0:c0 + step] = l_all
         conv[c0:c0 + step] = done_ok
         if npen:
-            sp_out[:, c0:c0 + step], edf_out[:, c0:c0 + step] = spc, edfc
+            sp_out[:, c0:c0 + step], edf_out[:, c0:c0 + step] = smooth.sp, smooth.edf
 
     _map(run, range(0, p, step), jobs)
     coefs = [coef[off[i]:off[i + 1]] for i in range(nb)]
@@ -1562,6 +1524,10 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
         return coefs, loglik, conv, sp_out, edf_out
     return coefs, loglik, conv
 
+
+# ---------------------------------------------------------------------------
+# Normative model of every feature (NormativeModel)
+# ---------------------------------------------------------------------------
 
 class NormativeModel:
     """Normative model (GAMLSS) for every feature.
@@ -1997,6 +1963,10 @@ class NormativeModel:
                                 else NaturalSpline.from_state(s['basis_shape']))
         return self
 
+
+# ---------------------------------------------------------------------------
+# NormBrainAGE: brain age from inverted normative models (NDMBrainAge)
+# ---------------------------------------------------------------------------
 
 def _affine_profile(w, mu, sd):
     """Maximum likelihood a, b (per column) of w ~ N(a + b mu, (b sd)^2)."""
@@ -2733,6 +2703,10 @@ class NDMBrainAge:
         self.grid = np.asarray(s['grid'], dtype=np.float64).ravel()
         return self
 
+
+# ---------------------------------------------------------------------------
+# Voxel/vertex-wise normative models and z-maps (VoxelModel)
+# ---------------------------------------------------------------------------
 
 class VoxelModel:
     """Voxel/vertex-wise normative model: a GAMLSS for every voxel/vertex without PCA
@@ -4445,7 +4419,8 @@ def _df_arg(value):
     return df
 
 
-def main(argv=None):
+def _parser():
+    """Parser of the command-line options of main."""
     p = argparse.ArgumentParser(
         description="NeuroGAMLSS: vectorized GAMLSS normative models for brain MRI "
                     "and NormBrainAGE.",
@@ -4597,12 +4572,13 @@ def main(argv=None):
                    help="threads for fitting the voxel/vertex-wise models (default: half "
                         f"the CPU count, here {_jobs()}); the results do not depend on it")
     p.add_argument('--out', default='neurogamlss_results', help="output prefix")
-    a = p.parse_args(argv)
-    global JOBS
-    if a.jobs is not None and a.jobs < 1:
-        p.error("--jobs needs a positive number.")
-    JOBS = a.jobs
+    return p
 
+
+def _check_args(p, a):
+    """Stop with an error of the parser p if the options a do not fit together; return
+    the folds of the cross-validation and whether brain age and voxel/vertex-wise
+    models are used."""
     if bool(a.train) == bool(a.model):
         p.error("give either --train or --model.")
     if a.model and not a.test:
@@ -4635,6 +4611,17 @@ def main(argv=None):
     if a.diagnostics and not (a.train and voxel):
         p.error("--diagnostics needs --train and voxel/vertex-wise models "
                 "(--normative-only or --zmaps).")
+    return kfold, brainage, voxel
+
+
+def main(argv=None):
+    p = _parser()
+    a = p.parse_args(argv)
+    global JOBS
+    if a.jobs is not None and a.jobs < 1:
+        p.error("--jobs needs a positive number.")
+    JOBS = a.jobs
+    kfold, brainage, voxel = _check_args(p, a)
     vkw = dict(family=a.family, shape_df=a.shape_df, tau_max=a.tau_max,
                shape_prior=a.shape_prior, mask_threshold=a.mask_threshold)
     t0 = time.time()
