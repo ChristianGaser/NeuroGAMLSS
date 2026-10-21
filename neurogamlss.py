@@ -870,14 +870,21 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
     the first rs_iter iterations can ignore the cross-derivatives between parameter
     blocks (RS: every parameter with its own curvature) before the full Hessian is
     used (CG); for SHASH this was slower without better fits, hence rs_iter=0 by
-    default.  Where the Hessian is not negative definite, the outer
-    product of the scores is used instead, which is always an ascent direction (the
-    squared-score weights of gamlss).  Steps are halved until the penalized
-    log-likelihood increases (the autostep of gamlss); every trial step is evaluated
-    with its derivatives, so that an accepted step is not evaluated again.  Columns
-    stop when the Newton decrement falls below tol per observation.  Columns are
-    processed in chunks of max_elements values, in parallel threads (jobs, see
-    _jobs); the chunks do not depend on jobs, so the results do not either.
+    default.  Where the Hessian is not negative definite, its eigenvalues are
+    replaced by their absolute values (modified Newton), which gives an ascent
+    direction with the curvature of the likelihood; the outer product of the scores
+    (BHHH), used before, needed several times more steps in skewed voxels.  If the
+    bounded predictor is the same for all observations (constant shape), a step that
+    moves it across the bound is replaced by the Newton step of the model with the
+    penalty, which the plain step overshoots by far; with age-dependent shape, this
+    led to lower local maxima.  Steps are shortened until the penalized
+    log-likelihood increases (the autostep of gamlss), to the maximum of the
+    quadratic through the rejected value, within 0.1 to 0.5 of the last length;
+    every trial step is evaluated with its derivatives, so that an accepted step is
+    not evaluated again.  Columns stop when the Newton decrement falls below tol per
+    observation.  Columns are processed in chunks of max_elements values, in
+    parallel threads (jobs, see _jobs); the chunks do not depend on jobs, so the
+    results do not either.
 
     shape_blocks : blocks whose coefficients get N(0, prior_sd^2) priors, which shrink
                    the shape parameters toward the normal distribution
@@ -936,6 +943,27 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
                 M[:, off[j]:off[j + 1], off[i]:off[i + 1]] = h.transpose(0, 2, 1)
         return M
 
+    # the bounded predictor is the same for all observations (constant shape), so that
+    # its steps across the bound can be corrected (bound_step)
+    shared = bound is not None and bool(np.all(designs[bound[0]] == designs[bound[0]][0]))
+
+    def bound_step(B, A, gt, delta):
+        """Newton steps delta (k, m) at B, for the columns in which the shared bounded
+        predictor crosses its bound: with the penalty beyond the bound."""
+        b, lo, hi = bound
+        sl, v = slice(off[b], off[b + 1]), designs[b][0]
+        e0, e1 = v @ B[sl], v @ (B[sl] + delta[sl])
+        up, down = (e0 <= hi) & (e1 > hi), (e0 >= lo) & (e1 < lo)
+        cross = up | down
+        if not np.any(cross):
+            return delta
+        Ac, gc = A[cross], gt[cross]
+        Ac[:, sl, sl] += rho * n * np.outer(v, v)
+        gc[:, sl, 0] += rho * n * (np.where(up, hi, lo) - e0)[cross, None] * v
+        delta = delta.copy()
+        delta[:, cross] = np.linalg.solve(Ac, gc)[..., 0].T
+        return delta
+
     step = max(1, int(max_elements // n))
 
     def run(c0):
@@ -960,22 +988,20 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
             A = np.where(np.isfinite(A), A, 0)
             scl = np.max(np.abs(A[:, diag, diag]), axis=1) + 1e-12
             bad = ~(np.linalg.eigvalsh(A)[:, 0] > 1e-10 * scl)
-            if np.any(bad):                   # outer product of the scores
-                cols = active[bad]
-                sc = [np.where(np.isfinite(d), d, 0)
-                      for d in evaluate(B[:, cols], y[:, cols], 1)[2]]
-                A[bad] = blocks({(i, j): sc[i] * sc[j] for i, j in pairs
-                                 if i == j or it >= rs_iter}, cols.size)
-                bi = np.flatnonzero(bad)[:, None]
-                A[bi, diag, diag] += prior + 1e-8 * scl[bi]
+            if np.any(bad):                   # modified Newton: absolute eigenvalues
+                lam, V = np.linalg.eigh(A[bad])
+                lam = np.maximum(np.abs(lam), 1e-8 * scl[bad, None])
+                A[bad] = (V * lam[:, None, :]) @ V.transpose(0, 2, 1)
             gt = np.where(np.isfinite(G[:, active]), G[:, active], 0).T[..., None]
             delta = np.linalg.solve(A, gt)[..., 0].T
+            if shared:
+                delta = bound_step(Ba, A, gt, delta)
             decr = np.sum(gt[..., 0].T * delta, axis=0)          # Newton decrement
             small = (0.5 * decr < tol * n) & (it >= rs_iter)
             f0, fnew, lnew = f_all[active], f_all[active].copy(), l_all[active].copy()
             Bnew, todo, fac = Ba.copy(), np.flatnonzero(~small), np.ones(active.size)
             Gnew, Hnew = G[:, active], H[active]
-            for _ in range(30):                 # step halving, trial steps with derivatives
+            for _ in range(30):                 # backtracking, trial steps with derivatives
                 if not todo.size:
                     break
                 cand = Ba[:, todo] + fac[todo] * delta[:, todo]
@@ -987,8 +1013,11 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
                     Gnew[:, acc] = gradient(cand, d1)[:, good]
                     Hnew[acc] = blocks(d2, todo.size)[good]
                 del d1, d2
-                todo = todo[~good]
-                fac[todo] *= 0.5
+                fc, todo = fc[~good], todo[~good]
+                a, s = fac[todo], decr[todo]
+                with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
+                    t = 0.5 * s * a * a / (f0[todo] + s * a - fc)   # maximum of the quadratic
+                fac[todo] = np.clip(np.where(np.isfinite(t), t, 0.1 * a), 0.1 * a, 0.5 * a)
             B[:, active], f_all[active], l_all[active] = Bnew, fnew, lnew
             G[:, active], H[active] = Gnew, Hnew
             stop = small | np.isin(np.arange(active.size), todo)
