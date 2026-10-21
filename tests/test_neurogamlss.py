@@ -644,6 +644,147 @@ def test_command_line_site_sd(tmp_path):
         NG.main(['--normative-only', '--model', model, '--site-sd', '--test', files[0]])
 
 
+def test_spline_penalty_is_the_integrated_curvature():
+    rng = np.random.default_rng(41)
+    b = NG.NaturalSpline(rng.uniform(20, 80, 500), 8)
+    S = b.penalty()
+    c = rng.standard_normal(b.df)
+    t = np.linspace(-0.3, 1.3, 160001)                  # also outside the boundary knots
+    f = b(b.lo + t * (b.hi - b.lo)) @ c
+    h = t[1] - t[0]
+    assert np.isclose(c @ S @ c, np.sum((np.diff(f, 2) / h ** 2) ** 2) * h, rtol=1e-5)
+    assert np.allclose(S[0], 0) and np.linalg.matrix_rank(S) == b.df - 1   # linear: free
+
+
+def simulate_curves(n=1500, seed=42):
+    """Normal data with a linear and a wiggly age curve of the mean (two features)."""
+    rng = np.random.default_rng(seed)
+    age = rng.uniform(20, 80, n)
+    male = rng.integers(0, 2, n).astype(float)
+    u = (age - 20) / 60
+    truth = np.column_stack([1 + 0.5 * u, 1 + 0.3 * np.sin(6 * u)])
+    return truth + 0.1 * rng.standard_normal((n, 2)), age, male, truth
+
+
+@pytest.mark.parametrize("family", ['normal', 'shash'])
+def test_penalized_splines_choose_the_smoothness(family):
+    """The effective df of the age curve follow the curvature of the truth: about 1
+    (linear) for the linear curve and many for the wiggly one; the penalized curves
+    are closer to the truth than unpenalized ones with the same basis."""
+    Y, age, male, truth = simulate_curves()
+    m = NG.NormativeModel(10, 6, family=family, penalized=True).fit(Y, age, male)
+    free = NG.NormativeModel(10, 6, family=family).fit(Y, age, male)
+    assert np.all(m.converged) and m.sp_names == ['mu age', 'sigma age']
+    assert m.edf[0, 0] < 1.5 and m.edf[0, 1] > 5
+    assert m.edf[1, 0] < 1.5 and m.edf[1, 1] < 4        # constant sigma
+    X, _ = m._design(age, male)
+    err = [np.sqrt(np.mean((X @ fit.beta - truth) ** 2, axis=0)) for fit in (m, free)]
+    assert np.all(err[0] < err[1])
+
+
+def simulate_sites(n_sites=12, p=30, sd_site=0.3, seed=43):
+    """Normal data of sites of 8 to 150 subjects with random site means (SD sd_site of
+    the noise SD 1)."""
+    rng = np.random.default_rng(seed)
+    size = np.linspace(8, 150, n_sites).astype(int)
+    site = np.repeat(np.arange(n_sites), size)
+    n = site.size
+    age = rng.uniform(20, 80, n)
+    male = rng.integers(0, 2, n).astype(float)
+    u = sd_site * rng.standard_normal((n_sites, p))
+    Y = 0.02 * (age - 50)[:, None] + u[site] + rng.standard_normal((n, p))
+    return Y, age, male, site, u
+
+
+def test_random_site_effects():
+    """The site variance is estimated, small sites are shrunk toward the mean more
+    than large ones, and a new site (site=None) gets the population mean."""
+    Y, age, male, site, u = simulate_sites()
+    m = NG.NormativeModel(2, 1, site_random=True).fit(Y, age, male, site)
+    fixed = NG.NormativeModel(2, 1).fit(Y, age, male, site)
+    assert np.all(m.converged) and m.sp_names == ['mu site']
+    sd = np.median(1 / np.sqrt(m.sp[0]))
+    assert 0.2 < sd < 0.4                                # true SD 0.3
+    X, _ = m._design(age, male, site)
+    blup = m.beta[-12:]
+    Xf, _ = fixed._design(age, male, site)
+    est = [np.mean(X[site == s] @ m.beta - X[site == s] @ np.vstack(
+        [m.beta[:-12], np.zeros((12, m.beta.shape[1]))]), axis=0) for s in (0, 11)]
+    assert np.allclose(est[0], blup[0]) and np.allclose(est[1], blup[11])
+    raw = [np.mean(Y[site == s], axis=0) - np.mean(Y, axis=0) for s in (0, 11)]
+    shrink = [np.median(np.abs(blup[s]) / np.abs(r)) for s, r in zip((0, 11), raw)]
+    assert shrink[0] < shrink[1]                         # 8 subjects shrunk more than 150
+    err = [np.mean((b - u[[0, 11]]) ** 2) for b in (blup[[0, 11]], np.array(raw))]
+    assert err[0] < err[1]
+    mu_new = m.mu_sigma(age[:5], male[:5])[0]
+    Xn, _ = m._design(age[:5], male[:5])
+    assert np.allclose(Xn[:, -12:], 0) and np.allclose(mu_new, Xn @ m.beta)
+
+
+@pytest.mark.parametrize("family", ['normal', 'shash'])
+def test_arrowhead_layout_gives_the_same_fit(monkeypatch, family):
+    """Many site columns are fitted by sums per site and a Schur complement (_Arrow);
+    the fit equals the one with dense matrices within the convergence tolerance."""
+    Y, age, male, site, _ = simulate_sites(n_sites=10, p=12)
+    fits = []
+    for threshold in (10 ** 6, 2):                      # dense, then arrowhead
+        monkeypatch.setattr(NG, 'SITE_ARROW', threshold)
+        m = NG.NormativeModel(6, 3, family=family, penalized=True, site_random=True,
+                              site_sd=True).fit(Y, age, male, site)
+        fits.append((m.zscores(Y, age, male, site), m.edf, m.converged))
+    (z1, e1, c1), (z2, e2, c2) = fits
+    assert np.all(c1) and np.all(c2)
+    assert np.max(np.abs(z1 - z2)) < (1e-5 if family == 'normal' else 1e-3)
+    assert np.max(np.abs(e1 - e2)) < 0.02
+
+
+@pytest.mark.parametrize("family", ['normal', 'shash'])
+def test_penalized_random_fits_do_not_depend_on_threads(family):
+    Y, age, male, site, _ = simulate_sites(n_sites=10, p=40)
+    fits = [NG.NormativeModel(8, 4, family=family, penalized=True, site_random=True, site_sd=True,
+                              jobs=jobs).fit(Y, age, male, site) for jobs in (1, 4)]
+    for key in ('beta', 'theta', 'sp', 'edf', 'converged'):
+        assert np.array_equal(getattr(fits[0], key), getattr(fits[1], key))
+
+
+@pytest.mark.parametrize("ext", ['.npz', '.mat'])
+def test_penalized_random_save_load(tmp_path, ext):
+    Y, age, male, site, _ = simulate_sites(n_sites=10, p=8)
+    d = NG.Data(Y.astype(np.float32), age, male, site, 'sim_8mm_X.mat', res='8')
+    vm = NG.VoxelModel(8, 4, family='shash', penalized=True, site_random=True,
+                       site_sd=True).fit(d)
+    path = str(tmp_path / f'model{ext}')
+    NG.save_models(path, [NG.ModelSet(NG.data_info(d), None, vm)],
+                   NG.model_description([d], dict(cov=None), 'test', dict(family='shash')))
+    m = NG.load_models(path)[0][0].voxel.model
+    assert m.penalized and m.site_random and m.sp_names == vm.model.sp_names
+    assert np.array_equal(m.sp, vm.model.sp) and np.array_equal(m.edf, vm.model.edf)
+    for s in (site, None):
+        assert np.array_equal(m.zscores(Y, age, male, s), vm.model.zscores(Y, age, male, s))
+
+
+def test_command_line_penalized_site_random(tmp_path):
+    import json
+    Y, age, male, site, _ = simulate_sites(n_sites=4, p=30)
+    files = []
+    for s in range(4):
+        files.append(str(tmp_path / f's4rp1_8mm_S{s}_CAT12.9.mat'))
+        savemat(files[-1], dict(Y=Y[site == s].astype(np.float32), age=age[site == s][:, None],
+                                male=male[site == s][:, None]))
+    model, out = str(tmp_path / 'norm.npz'), str(tmp_path / 'r')
+    NG.main(['--train', '+'.join(files), '--penalized', '--site-random', '--zmaps', '--pca', '5',
+             '--brainloss', '--kfold', '0', '--save-model', model, '--out', out])
+    with open(str(tmp_path / 'norm.json')) as f:
+        desc = json.load(f)
+    assert desc['settings']['penalized'] is True and desc['settings']['site_random'] is True
+    assert desc['models'][0]['df_voxel']['method'] == 'penalized splines'
+    s = NG.load_models(model)[0][0]
+    for m in (s.voxel.model, s.brainage.parts[0].model, s.brainage.loss_model):
+        assert m.penalized and m.site_random and m.df_mu == NG.DF_PENALIZED['mu']
+    with pytest.raises(SystemExit):                              # saved models keep their design
+        NG.main(['--normative-only', '--model', model, '--penalized', '--test', files[0]])
+
+
 def simulate_test_site(n_ctrl=150, n_pat=100, p=40, seed=31):
     """Test sample whose data depend on age, on an image quality measure q and, for the
     patients, on a disease effect of -0.3; q is worse with age and in the patients."""
