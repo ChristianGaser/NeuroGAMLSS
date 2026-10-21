@@ -176,6 +176,20 @@ DF_AUTO = 'auto'
 DF_GRID_VOXEL = dict(mu=(2, 3, 4, 5, 6, 8, 10, 12), sigma=(1, 2, 3, 4, 5))
 DF_GRID_BRAINAGE = dict(mu=(1, 2, 3, 4, 5, 6, 8), sigma=(1, 2, 3, 4))
 DF_START_SIGMA, DF_FOLDS, DF_MAX_FEATURES = 3, 5, 1000
+
+# penalized age splines (--penalized) and random site effects (--site-random): basis
+# size of the penalized splines of mu and sigma, change of the effective df of every
+# penalized term at convergence, and the range of the smoothing parameters relative to
+# the information per unit of penalty at the start (at the ends, the penalized terms
+# are practically free or zero; a wider range makes the joint Hessian of shash
+# ill-conditioned)
+DF_PENALIZED = dict(mu=10, sigma=6)
+EDF_TOL, SP_RANGE = 0.01, (1e-6, 1e6)
+
+# designs with at least this many site columns (fixed or random site effects) are
+# fitted in the arrowhead layout (_Arrow): sums per site and a Schur complement
+# instead of products and solves of all columns
+SITE_ARROW = 8
 LOG2PI = np.log(2 * np.pi)
 
 _NOTES = set()
@@ -559,6 +573,29 @@ class NaturalSpline:
         d_last = d(len(k) - 2)
         return np.column_stack([t] + [d(i) - d_last for i in range(len(k) - 2)])
 
+    def penalty(self):
+        """Integrated squared second derivative of the curves of the basis, in units
+        of the scaled values t: S (df, df) with c'Sc = int f''(t)^2 dt for f = basis @ c.
+        The curves are linear outside the boundary knots, so the integral runs over
+        [0, 1], where the second derivatives are piecewise linear between the knots
+        and Simpson's rule per interval is exact.  The linear column is unpenalized."""
+        k = self.knots
+        if len(k) <= 2:
+            return np.zeros((1, 1))
+        t = np.unique(np.concatenate([k, 0.5 * (k[1:] + k[:-1])]))
+        h = np.diff(k)
+        w = np.zeros(t.size)                    # Simpson weights of knots and midpoints
+        pos = np.searchsorted(t, k)
+        w[pos[:-1]] += h / 6
+        w[pos[1:]] += h / 6
+        w[np.searchsorted(t, 0.5 * (k[1:] + k[:-1]))] += 4 * h / 6
+
+        def d2(i):
+            return 6 * np.maximum(t - k[i], 0) / (k[-1] - k[i])
+        last = d2(len(k) - 2)
+        D = np.column_stack([np.zeros_like(t)] + [d2(i) - last for i in range(len(k) - 2)])
+        return D.T @ (D * w[:, None])
+
     def get_state(self):
         return dict(lo=float(self.lo), hi=float(self.hi),
                     knots=np.asarray(self.knots, dtype=np.float64))
@@ -590,8 +627,228 @@ def _deviance(S, eta, size=None):
     return np.sum((base if size is None else size * base) + S * np.exp(-2 * eta), axis=0)
 
 
+def _penalty_stack(pens, k):
+    """Penalties (cols, S) of the coefficients cols as full (n_pen, k, k) matrices,
+    their ranks and the numbers of penalized coefficients."""
+    P = np.zeros((len(pens), k, k))
+    for j, (cols, S) in enumerate(pens):
+        P[j][np.ix_(cols, cols)] = S
+    rank = np.array([np.linalg.matrix_rank(S) for _, S in pens], dtype=np.float64)
+    size = np.array([len(cols) for cols, _ in pens], dtype=np.float64)
+    return P, rank, size
+
+
+def _positive(A, scl, cols=slice(None)):
+    """Modified Newton: absolute eigenvalues (at least 1e-8 scl) of the matrices of
+    A (m, k, k) in cols that are not positive definite (eigenvalue below 1e-10 scl,
+    scl (m,)); in place."""
+    Ac = A[cols]
+    bad = ~(np.linalg.eigvalsh(Ac)[:, 0] > 1e-10 * scl[cols])
+    if np.any(bad):
+        lam, V = np.linalg.eigh(Ac[bad])
+        lam = np.maximum(np.abs(lam), 1e-8 * scl[cols][bad, None])
+        Ac[bad] = (V * lam[:, None, :]) @ V.transpose(0, 2, 1)
+        A[cols] = Ac
+
+
+class _Arrow:
+    """Symmetric matrices of m columns whose coefficients are q dense ones and then,
+    per site, the r site effects of the parameters with site effects: A = [[D, C],
+    [C', E]] with D (m, q, q), C (m, q, L, r) and E (m, L, r, r) block diagonal over
+    the L sites, because two site columns are never nonzero in the same row.  Solves,
+    the modified Newton step and the parts of the inverse that the smoothing
+    parameters need go through the site blocks and the q x q Schur complement
+    S = D - C E^-1 C' (the full matrix is never formed)."""
+
+    def __init__(self, D, C, E):
+        self.D, self.C, self.E = D, C, E
+        self.Ei = self.CEi = self.S = None
+
+    def take(self, cols):
+        new = _Arrow(self.D[cols], self.C[cols], self.E[cols])
+        if self.S is not None:
+            new.Ei, new.CEi, new.S = self.Ei[cols], self.CEi[cols], self.S[cols]
+        return new
+
+    def put(self, cols, other):
+        self.D[cols], self.C[cols], self.E[cols] = other.D, other.C, other.E
+
+    def diag(self):
+        """Diagonal elements (m, q + L r)."""
+        m = self.D.shape[0]
+        return np.concatenate([np.diagonal(self.D, axis1=1, axis2=2),
+                               np.diagonal(self.E, axis1=2, axis2=3).reshape(m, -1)], axis=1)
+
+    def factor(self, scl):
+        """Modified Newton (as _positive) for the site blocks and then for the Schur
+        complement; stores E^-1, C E^-1 and S."""
+        m, L, r = self.E.shape[:3]
+        E = self.E.reshape(m * L, r, r)
+        _positive(E, np.repeat(scl, L))
+        self.E = E.reshape(m, L, r, r)
+        q = self.D.shape[1]
+        self.Ei = np.linalg.inv(self.E)
+        self.CEi = (self.C.transpose(0, 2, 1, 3) @ self.Ei).transpose(0, 2, 1, 3)
+        self.S = self.D - self.CEi.reshape(m, q, -1) @ self.C.reshape(m, q, -1).transpose(0, 2, 1)
+        _positive(self.S, scl)
+
+    def solve(self, g, extra=None):
+        """x (m, q + L r) with A x = g (m, q + L r), optionally with extra (m, q, q)
+        added to the dense part (factor first)."""
+        m, L, r = self.E.shape[:3]
+        q = self.D.shape[1]
+        gd, gs = g[:, :q], g[:, q:]
+        rhs = gd - (self.CEi.reshape(m, q, -1) @ gs[..., None])[..., 0]
+        S = self.S if extra is None else self.S + extra
+        xd = np.linalg.solve(S, rhs[..., None])[..., 0]
+        v = gs - (self.C.reshape(m, q, -1).transpose(0, 2, 1) @ xd[..., None])[..., 0]
+        xs = self.Ei @ v.reshape(m, L, r, 1)
+        return np.concatenate([xd, xs.reshape(m, -1)], axis=1)
+
+    def traces(self, dense, sites):
+        """tr(A^-1 P) of penalties P of the dense coefficients, dense (n_d, q, q), and
+        of the identity on the site effects of the parameters sites (n_s,), (n, m)
+        in this order (factor first)."""
+        Si = np.linalg.inv(self.S)
+        out = [np.einsum('mab,jba->jm', Si, dense)] if len(dense) else []
+        for b in sites:
+            M = self.CEi[:, :, :, b]                   # (m, q, L)
+            out.append(np.sum(self.Ei[:, :, b, b], axis=1)
+                       + np.sum(M * (Si @ M), axis=(1, 2))[None])
+        return np.vstack(out) if out else np.zeros((0, self.D.shape[0]))
+
+
+def _site_layout(code, n_cols):
+    """Observations sorted by their site column (code; -1: none) and the start of every
+    column, for sums per site (np.add.reduceat); None if a column has no observation."""
+    counts = np.bincount(code[code >= 0], minlength=n_cols)
+    if not np.all(counts > 0):
+        return None
+    order = np.flatnonzero(code >= 0)
+    order = order[np.argsort(code[order], kind='stable')]
+    return order, np.concatenate([[0], np.cumsum(counts)[:-1]])
+
+
+class _Cross:
+    """Weighted cross-products M' diag(w) M plus penalties of a design M for the
+    penalized RS steps of fit_location_scale, with their solves and the traces for the
+    smoothing parameters.  Given its site columns scols and the site column of every
+    row (code), in the arrowhead layout (_Arrow with r = 1): sums per site instead of
+    products of all columns.  Constant weights w (rows, 1) are summed once (system
+    with w=None)."""
+
+    def __init__(self, M, pens, code=None, scols=None, w=None):
+        self.k, self.pens = M.shape[1], list(pens)
+        self.P, self.rank, self.ncol = _penalty_stack(pens, self.k)
+        self.layout = (None if scols is None or len(scols) == 0
+                       else _site_layout(np.asarray(code), len(scols)))
+        if self.layout is None:
+            self.MM = (M[:, :, None] * M[:, None, :]).reshape(len(M), -1)
+        else:
+            dense = np.setdiff1d(np.arange(self.k), scols)
+            self.perm = np.concatenate([dense, scols])
+            self.Md = M[:, dense]
+            self.MMd = (self.Md[:, :, None] * self.Md[:, None, :]).reshape(len(M), -1)
+            self.drow, self.srow, pen_d = [], [], []
+            for j, (cols, S) in enumerate(pens):
+                if (np.array_equal(np.sort(cols), np.sort(scols))
+                        and np.allclose(S, np.eye(len(cols)))):
+                    self.srow.append(j)
+                else:
+                    pc = np.searchsorted(dense, cols)
+                    Mj = np.zeros((dense.size, dense.size))
+                    Mj[np.ix_(pc, pc)] = S
+                    self.drow.append(j)
+                    pen_d.append(Mj)
+            self.pen_d = np.array(pen_d).reshape(-1, dense.size, dense.size)
+            self.trace_rows = np.argsort(self.drow + self.srow)
+        self.base = None if w is None else self._cross(w)
+
+    def _sums(self, v):
+        order, starts = self.layout
+        return np.add.reduceat(v[order], starts, axis=0)
+
+    def _cross(self, w):
+        """M' diag(w) M for the weights w (rows, m): (m, k, k) or _Arrow."""
+        m = w.shape[1]
+        if self.layout is None:
+            return (self.MM.T @ w).T.reshape(m, self.k, self.k)
+        q = self.Md.shape[1]
+        C = np.stack([self._sums(w * self.Md[:, a:a + 1]).T for a in range(q)], axis=1)
+        return _Arrow((self.MMd.T @ w).T.reshape(m, q, q), C[..., None],
+                      self._sums(w).T[:, :, None, None])
+
+    def system(self, w, sp):
+        """M' diag(w) M + sum_j sp_j P_j for the weights w (rows, m), or the constant
+        weights of the constructor (w=None); sp (n_pen, m)."""
+        m = sp.shape[1]
+        if w is not None:
+            A = self._cross(w)
+        elif self.layout is None:
+            A = np.repeat(self.base, m, axis=0)
+        else:
+            A = _Arrow(*(np.repeat(x, m, axis=0) for x in (self.base.D, self.base.C,
+                                                          self.base.E)))
+        if self.layout is None:
+            return A + np.einsum('jm,jab->mab', sp, self.P) if len(self.P) else A
+        scl = np.max(np.abs(A.diag()), axis=1) + 1e-12      # without the penalties
+        if self.drow:
+            A.D += np.einsum('jm,jab->mab', sp[self.drow], self.pen_d)
+        for j in self.srow:
+            A.E[:, :, 0, 0] += sp[j][:, None]
+        A.factor(scl)
+        return A
+
+    def solve(self, A, rhs):
+        """x (k, m) with A x = rhs (k, m)."""
+        if self.layout is None:
+            return np.linalg.solve(A, rhs.T[..., None])[..., 0].T
+        x = A.solve(rhs.T[:, self.perm])
+        out = np.empty_like(x)
+        out[:, self.perm] = x
+        return out.T
+
+    def traces(self, A):
+        """tr(A^-1 P_j) (n_pen, m)."""
+        if self.layout is None:
+            return np.einsum('mab,jba->jm', np.linalg.inv(A), self.P)
+        return A.traces(self.pen_d, [0] * len(self.srow))[self.trace_rows]
+
+
+def _pen_quad(pens, B):
+    """Quadratic forms B[cols]' S B[cols] (n_pen, m) of the penalties (cols, S)."""
+    return (np.array([np.sum(B[cols] * (S @ B[cols]), axis=0) for cols, S in pens])
+            .reshape(len(pens), B.shape[1]))
+
+
+def _pen_terms(pens, B, sp):
+    """Gradient (k, m) and value (m,) of the penalties sum_j sp_j B[cols]' S_j B[cols] / 2
+    of (cols_j, S_j) with the smoothing parameters sp (n_pen, m)."""
+    grad, val = np.zeros_like(B), np.zeros(B.shape[1])
+    for j, (cols, S) in enumerate(pens):
+        SB = S @ B[cols]
+        grad[cols] += sp[j] * SB
+        val += 0.5 * sp[j] * np.sum(B[cols] * SB, axis=0)
+    return grad, val
+
+
+def _efs_update(sp, tr, quad, rank, lo, hi):
+    """Extended Fellner-Schall update of the smoothing parameters sp (n_pen, m) of
+    penalties P_j with ranks rank (Wood and Fasiolo, 2017):
+    sp_j <- (rank_j - sp_j tr(A^-1 P_j)) / (B' P_j B), within [lo, hi], given the
+    traces tr = tr(A^-1 P_j) with the negative Hessian A of the penalized
+    log-likelihood and the quadratic forms quad = B' P_j B of the coefficients (n_pen,
+    m).  It increases the Laplace approximation of the restricted marginal likelihood
+    (REML).  Returns the new sp and sp_j tr(A^-1 P_j), the df that the penalty removes
+    from its coefficients."""
+    with np.errstate(divide='ignore', invalid='ignore'):
+        new = (rank[:, None] - sp * tr) / quad
+    new = np.clip(np.where(np.isfinite(new), new, hi), lo, hi)
+    return new, sp * tr
+
+
 def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000, init=None,
-                       jobs=None):
+                       jobs=None, penalties=None, sp=None, sites=None):
     """ML fit of y_j ~ N(X beta_j, exp(W theta_j)^2) for every column j of Y.
 
     Port of _fit_location_scale() in combat_family.py (ComCat) for data of
@@ -607,17 +864,32 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000,
     so the results do not either.  init = (beta, theta) starts from a previous
     solution instead of OLS.
 
-    Returns beta (kx, p), theta (kw, p), converged (p,)
+    penalties = (pen_x, pen_w): quadratic penalties of columns of X and of W, lists of
+    (cols, S) with the penalty matrix S of the coefficients cols (penalized splines,
+    random effects).  Their smoothing parameters are estimated for every column of Y
+    by the extended Fellner-Schall update (_efs_update, with the expected information)
+    after every RS iteration, starting from sp (n_x + n_w, p) or from the information
+    of the data; a column has converged when also the effective df of its penalized
+    terms change by less than EDF_TOL.
+    sites = dict(code=site column of every subject (-1: none), cols={0: site columns
+    of X, 1: of W}): one-hot site columns, whose cross-products are then sums per site
+    in the arrowhead layout (_Cross, _Arrow); for many sites.
+
+    Returns beta (kx, p), theta (kw, p), converged (p,) and, with penalties, the
+    smoothing parameters sp and the effective df of the penalized coefficients
+    (n_x + n_w, p).
     """
     n, p = Y.shape
     kx, kw = X.shape[1], W.shape[1]
     cells = _cells(X, W)
     size = None                                    # subjects per row of X and W: one
+    code = None if sites is None else np.asarray(sites['code'])
     if cells is not None:                          # one row per cell
         cell, first, counts = cells
         order = np.argsort(cell, kind='stable')
         starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
         X, W, size = X[first], W[first], counts[:, None].astype(np.float64)
+        code = None if code is None else code[first]
     XX = (X[:, :, None] * X[:, None, :]).reshape(len(X), kx * kx)
     if size is None:
         X_pinv, W_pinv = np.linalg.pinv(X), np.linalg.pinv(W)
@@ -629,6 +901,17 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000,
     beta = np.empty((kx, p))
     theta = np.empty((kw, p))
     converged = np.zeros(p, dtype=bool)
+    pen_x, pen_w = penalties if penalties is not None else ((), ())
+    npx, npw = len(pen_x), len(pen_w)
+    scols = {} if sites is None else sites['cols']
+    cx = _Cross(X, pen_x, code, scols.get(0)) if npx or 0 in scols else None
+    w2 = 2 * (np.ones((len(W), 1)) if size is None else size)   # information of theta
+    cw = _Cross(W, pen_w, code, scols.get(1), w2) if npw or 1 in scols else None
+    if npx + npw:
+        sp_out = np.full((npx + npw, p), np.nan)
+        edf_out = np.full((npx + npw, p), np.nan)
+        hw = (W ** 2).T @ w2[:, 0]
+        trS = np.array([np.trace(S) for _, S in list(pen_x) + list(pen_w)])
 
     step = max(1, max_elements // n)
 
@@ -636,6 +919,10 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000,
         """Sums of the squared residuals of the subjects of every row from the
         residuals r of the row means and the sums of squares Q within the cells."""
         return r ** 2 if Q is None else size * r ** 2 + Q
+
+    def penalty(c, spc, tt):
+        """Gradient (k, m) and value (m,) of sum_j sp_j tt'P_j tt / 2 of _Cross c."""
+        return _pen_terms(c.pens, tt, spc)
 
     def run(start):
         y_all = np.asarray(Y[:, start:start + step], dtype=np.float64)
@@ -654,28 +941,56 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000,
             b_all = X_pinv @ y_all
             t_all = np.zeros((kw, y_all.shape[1]))
             t_all[0] = 0.5 * np.log(np.sum(squares(y_all - X @ b_all, Q_all), axis=0) / n)
+        m_all = y_all.shape[1]
+        sp_all = np.zeros((npx + npw, m_all))
+        if npx + npw:
+            # scale of the smoothing parameters: information of the penalized
+            # coefficients per unit of penalty at the start, within SP_RANGE of it
+            sw0 = np.exp(-2 * (W @ t_all)) * (1 if size is None else size)
+            hx = (X ** 2).T @ sw0
+            scale = np.vstack([hx[cols].sum(axis=0) for cols, _ in pen_x]
+                              + [np.full(m_all, hw[cols].sum()) for cols, _ in pen_w])
+            scale = scale / trS[:, None]
+            lo, hi = SP_RANGE[0] * scale, SP_RANGE[1] * scale
+            sp_all = (scale.copy() if sp is None
+                      else np.clip(np.array(sp[:, start:start + step], np.float64), lo, hi))
+            edf_all = np.full(sp_all.shape, np.nan)
 
-        active = np.arange(y_all.shape[1])
+        active = np.arange(m_all)
         for _ in range(max_iter):
             y, b, t = y_all[:, active], b_all[:, active], t_all[:, active]
             Q = None if Q_all is None else Q_all[:, active]
             eta = W @ t
+            spx, spw = sp_all[:npx, active], sp_all[npx:, active]
 
             # mu step: weighted least squares with weights 1/sigma^2
             w = np.exp(-2 * eta)
             sw = w if size is None else size * w
-            A = (XX.T @ sw).T.reshape(-1, kx, kx)
-            rhs = (X.T @ (sw * y)).T[..., None]
-            b_new = np.linalg.solve(A, rhs)[..., 0].T
+            if cx is None:
+                A = (XX.T @ sw).T.reshape(-1, kx, kx)
+                rhs = (X.T @ (sw * y)).T[..., None]
+                b_new = np.linalg.solve(A, rhs)[..., 0].T
+            else:
+                b_new = cx.solve(cx.system(sw, spx), X.T @ (sw * y))
             d_mu = np.max(np.abs(X @ (b_new - b)) * np.exp(-eta), axis=0)
             S = squares(y - X @ b_new, Q)
 
             # sigma step: Fisher scoring on log(sigma)
             dev_old = _deviance(S, eta, size)
-            d_t = W_pinv @ (0.5 * (S * w - (1 if size is None else size)))
+            if cw is None:
+                d_t = W_pinv @ (0.5 * (S * w - (1 if size is None else size)))
+            else:                                  # with the penalty: 2 W'W + S_sp
+                Aw = cw.system(None, spw)
+                score = W.T @ (S * w - (1 if size is None else size))
+                if npw:
+                    pg, pv = penalty(cw, spw, t)
+                    score, dev_old = score - pg, dev_old + 2 * pv
+                d_t = cw.solve(Aw, score)
             t_new = t + d_t
             eta_new = W @ t_new
             dev_new = _deviance(S, eta_new, size)
+            if npw:
+                dev_new = dev_new + 2 * penalty(cw, spw, t_new)[1]
             for _ in range(20):                    # step halving (gamlss autostep)
                 worse = dev_new > dev_old
                 if not np.any(worse):
@@ -684,11 +999,30 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000,
                 t_new[:, worse] = t[:, worse] + d_t[:, worse]
                 eta_new[:, worse] = W @ t_new[:, worse]
                 dev_new[worse] = _deviance(S[:, worse], eta_new[:, worse], size)
+                if npw:
+                    dev_new[worse] += 2 * penalty(cw, spw[:, worse], t_new[:, worse])[1]
             d_theta = np.max(np.abs(t_new - t), axis=0)
 
             b_all[:, active] = b_new
             t_all[:, active] = t_new
             done = (d_mu < tol) & (d_theta < tol)
+            if npx + npw:                          # smoothing parameters (EFS)
+                old = sp_all[:, active]
+                new, removed = old.copy(), np.empty_like(old)
+                if npx:
+                    sw = np.exp(-2 * eta_new) * (1 if size is None else size)
+                    new[:npx], removed[:npx] = _efs_update(
+                        spx, cx.traces(cx.system(sw, spx)), _pen_quad(pen_x, b_new), cx.rank,
+                        lo[:npx, active], hi[:npx, active])
+                if npw:
+                    new[npx:], removed[npx:] = _efs_update(
+                        spw, cw.traces(Aw), _pen_quad(pen_w, t_new), cw.rank,
+                        lo[npx:, active], hi[npx:, active])
+                prev = edf_all[:, active]
+                sp_all[:, active] = new
+                ncol = np.concatenate([cx.ncol if npx else [], cw.ncol if npw else []])
+                edf_all[:, active] = ncol[:, None] - removed
+                done &= np.max(np.abs(edf_all[:, active] - prev), axis=0) < EDF_TOL
             converged[start + active[done]] = True
             active = active[~done]
             if active.size == 0:
@@ -696,8 +1030,13 @@ def fit_location_scale(Y, X, W, max_iter=2000, tol=1e-6, max_elements=1_000_000,
 
         beta[:, start:start + step] = b_all
         theta[:, start:start + step] = t_all
+        if npx + npw:
+            sp_out[:, start:start + step] = sp_all
+            edf_out[:, start:start + step] = edf_all
 
     _map(run, range(0, p, step), jobs)
+    if npx + npw:
+        return beta, theta, converged, sp_out, edf_out
     return beta, theta, converged
 
 
@@ -857,7 +1196,7 @@ def gg_score(y, a, s, n):
 
 def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bound=None,
                      max_iter=500, tol=1e-9, max_elements=500_000, rho=100.0, rs_iter=0,
-                     jobs=None):
+                     jobs=None, penalties=(), sp=None, sites=None):
     """Penalized maximum likelihood fit of a distribution for every column of Y.
 
     Every parameter block b has a linear predictor eta_b = designs[b] @ coef_b;
@@ -891,8 +1230,21 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
     bound        : (block, lo, hi) soft bound of a linear predictor (quadratic penalty
                    rho outside [lo, hi], e.g. for log tau)
     init         : starting coefficients, one (k_b, p) array per block
+    penalties    : quadratic penalties (block, cols, S) of the coefficients cols of a
+                   block (penalized splines, random effects), whose smoothing parameters
+                   are estimated per column by the extended Fellner-Schall update with
+                   the Newton Hessian (_efs_update) before every Newton step, starting
+                   from sp (n_pen, p) or from the information of the data; a column
+                   has converged when also the effective df of the penalized terms
+                   change by less than EDF_TOL
+    sites        : dict(code=site column of every observation (-1: none), cols={block:
+                   its site columns}), one-hot site columns of some blocks (one column
+                   per site in each); the Hessian is then assembled by sums per site and
+                   solved in the arrowhead layout (_Arrow), for many sites (not with
+                   rs_iter)
     Returns the coefficients (list of (k_b, p)), the log-likelihood (p,) and the
-    convergence flags (p,).
+    convergence flags (p,), and with penalties also the smoothing parameters and the
+    effective df of the penalized coefficients (n_pen, p).
     """
     n, p = Y.shape
     ks = [D.shape[1] for D in designs]
@@ -908,6 +1260,16 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
     diag = np.arange(k)
     coef = np.vstack([np.asarray(c, np.float64) for c in init])
     loglik, conv = np.full(p, np.nan), np.zeros(p, dtype=bool)
+    pens = [(off[b] + np.asarray(cols), S) for b, cols, S in penalties]
+    P, rank_p, ncol_p = _penalty_stack(pens, k)
+    npen = len(pens)
+    if npen:
+        sp_out, edf_out = np.full((npen, p), np.nan), np.full((npen, p), np.nan)
+        trS = np.array([np.trace(S) for _, S in pens])
+
+    def pen_terms(B, spa):
+        """Gradient (k, m) and value (m,) of the smoothing penalties 0.5 sum_j sp_j B'P_jB."""
+        return _pen_terms(pens, B, spa)
 
     def evaluate(B, y, order):
         """Penalized log-likelihood, log-likelihood and the derivatives up to order."""
@@ -943,11 +1305,149 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
                 M[:, off[j]:off[j + 1], off[i]:off[i + 1]] = h.transpose(0, 2, 1)
         return M
 
+    # site effects (sites) in the arrowhead layout (_Arrow): the dense coefficients,
+    # then per site column those of the blocks with site effects
+    arrow = sites is not None and rs_iter == 0
+    if arrow:
+        code = np.asarray(sites['code'])
+        sb = sorted(sites['cols'])
+        rpos = {b: i for i, b in enumerate(sb)}
+        scol = np.stack([off[b] + np.asarray(sites['cols'][b]) for b in sb], axis=1)
+        Lc, r = scol.shape
+        counts = np.bincount(code[code >= 0], minlength=Lc)
+        arrow = bool(np.all(counts > 0))
+    if arrow:
+        isdense = np.ones(k, dtype=bool)
+        isdense[scol.ravel()] = False
+        didx = np.flatnonzero(isdense)
+        perm = np.concatenate([didx, scol.ravel()])       # coefficients in arrowhead order
+        q = didx.size
+        dcols = [np.flatnonzero(isdense[off[b]:off[b + 1]]) for b in range(nb)]
+        dpos = [np.searchsorted(didx, off[b] + dcols[b]) for b in range(nb)]
+        Xd = [designs[b][:, dcols[b]] for b in range(nb)]
+        ODd = {(i, j): (Xd[i][:, :, None] * Xd[j][:, None, :]).reshape(n, -1) for i, j in pairs}
+        order = np.flatnonzero(code >= 0)
+        order = order[np.argsort(code[order], kind='stable')]
+        starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
+        dprior, ddiag = prior[didx], np.arange(q)
+        drow, srow, pen_d = [], [], []          # penalties of dense coefficients (q, q)
+        for j, (cols, S) in enumerate(pens):    # and the identity on site effects
+            hit = [b for b in sb if np.array_equal(np.sort(cols), np.sort(scol[:, rpos[b]]))]
+            if hit and np.allclose(S, np.eye(len(cols))):
+                srow.append((j, rpos[hit[0]]))
+            elif np.all(isdense[cols]):
+                M = np.zeros((q, q))
+                pc = np.searchsorted(didx, cols)
+                M[np.ix_(pc, pc)] = S
+                drow.append(j)
+                pen_d.append(M)
+            else:
+                raise ValueError("A penalty mixes dense coefficients and site effects.")
+        pen_d = np.array(pen_d).reshape(-1, q, q)
+        trace_rows = np.argsort(drow + [j for j, _ in srow])
+
+    def site_sum(v):
+        """Sums (L, m) of the rows of v (n, m) over the observations of every site column."""
+        return np.add.reduceat(v[order], starts, axis=0)
+
+    def hessian(D2, m):
+        """Hessian of the log-likelihood of m columns from the second derivatives D2:
+        dense (m, k, k) or in the arrowhead layout (_Arrow, assembled by sums per site)."""
+        if not arrow:
+            return blocks(D2, m)
+        D, C, E = np.zeros((m, q, q)), np.zeros((m, q, Lc, r)), np.zeros((m, Lc, r, r))
+        for (i, j), v in D2.items():
+            h = (ODd[(i, j)].T @ v).reshape(len(dcols[i]), len(dcols[j]), -1).transpose(2, 0, 1)
+            D[:, dpos[i][:, None], dpos[j]] = h
+            if i != j:
+                D[:, dpos[j][:, None], dpos[i]] = h.transpose(0, 2, 1)
+            for a, b in ((i, j), (j, i)) if i != j else ((i, j),):
+                if b in rpos:           # dense coefficients of a with the site effects of b
+                    for c, pos in enumerate(dpos[a]):
+                        C[:, pos, :, rpos[b]] = site_sum(v * Xd[a][:, c:c + 1]).T
+            if i in rpos and j in rpos:
+                E[:, :, rpos[i], rpos[j]] = E[:, :, rpos[j], rpos[i]] = site_sum(v).T
+        return _Arrow(D, C, E)
+
+    def take(H, cols):
+        return H.take(cols) if arrow else H[cols]
+
+    def put(H, cols, Hn):
+        if arrow:
+            H.put(cols, Hn)
+        else:
+            H[cols] = Hn
+
+    def info_diag(H):
+        """|diagonal| of the Hessians (k, m)."""
+        if not arrow:
+            return np.abs(np.diagonal(H, axis1=1, axis2=2)).T
+        out = np.empty((k, H.D.shape[0]))
+        out[perm] = np.abs(H.diag()).T
+        return out
+
+    def system(H, spa, it):
+        """Negative Hessians of the penalized log-likelihood with the smoothing parameters
+        spa, made positive definite (modified Newton); the scale of the definiteness
+        test excludes the smoothing penalties, whose large values would hide small
+        curvatures."""
+        if arrow:
+            A = _Arrow(-H.D, -H.C, -H.E)
+            A.D[:, ddiag, ddiag] += dprior
+            for M in (A.D, A.C, A.E):
+                M[~np.isfinite(M)] = 0
+            scl = np.max(np.abs(A.diag()), axis=1) + 1e-12
+            if npen:
+                if drow:
+                    A.D += np.einsum('jm,jab->mab', spa[drow], pen_d)
+                for j, rb in srow:
+                    A.E[:, :, rb, rb] += spa[j][:, None]
+            A.factor(scl)
+            return A
+        A = -H
+        if it < rs_iter:                          # RS: no cross-derivatives
+            for i, j in pairs:
+                if i != j:
+                    A[:, off[i]:off[i + 1], off[j]:off[j + 1]] = 0
+                    A[:, off[j]:off[j + 1], off[i]:off[i + 1]] = 0
+        A[:, diag, diag] += prior
+        A = np.where(np.isfinite(A), A, 0)
+        scl = np.max(np.abs(A[:, diag, diag]), axis=1) + 1e-12
+        if npen:
+            A += np.einsum('jm,jab->mab', spa, P)
+        _positive(A, scl)
+        return A
+
+    def solve(A, g, extra=None):
+        """Steps (k, m) for the gradients g (k, m); extra (m, k_b, k_b) is added for the
+        coefficients of the bounded block (bound_step)."""
+        if arrow:
+            ex = None
+            if extra is not None:
+                bpos = np.searchsorted(didx, np.arange(off[bound[0]], off[bound[0] + 1]))
+                ex = np.zeros((g.shape[1], q, q))
+                ex[:, bpos[:, None], bpos] = extra
+            x = A.solve(g.T[:, perm], ex)
+            out = np.empty_like(x)
+            out[:, perm] = x
+            return out.T
+        if extra is not None:
+            sl = slice(off[bound[0]], off[bound[0] + 1])
+            A = A.copy()
+            A[:, sl, sl] += extra
+        return np.linalg.solve(A, g.T[..., None])[..., 0].T
+
+    def traces(A):
+        """tr(A^-1 P_j) of the penalties (n_pen, m)."""
+        if arrow:
+            return A.traces(pen_d, [rb for _, rb in srow])[trace_rows]
+        return np.einsum('mab,jba->jm', np.linalg.inv(A), P)
+
     # the bounded predictor is the same for all observations (constant shape), so that
     # its steps across the bound can be corrected (bound_step)
     shared = bound is not None and bool(np.all(designs[bound[0]] == designs[bound[0]][0]))
 
-    def bound_step(B, A, gt, delta):
+    def bound_step(B, A, g, delta):
         """Newton steps delta (k, m) at B, for the columns in which the shared bounded
         predictor crosses its bound: with the penalty beyond the bound."""
         b, lo, hi = bound
@@ -957,11 +1457,11 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
         cross = up | down
         if not np.any(cross):
             return delta
-        Ac, gc = A[cross], gt[cross]
-        Ac[:, sl, sl] += rho * n * np.outer(v, v)
-        gc[:, sl, 0] += rho * n * (np.where(up, hi, lo) - e0)[cross, None] * v
+        gc = g[:, cross].copy()
+        gc[sl] += rho * n * v[:, None] * (np.where(up, hi, lo) - e0)[cross]
+        extra = np.broadcast_to(rho * n * np.outer(v, v), (int(cross.sum()), v.size, v.size))
         delta = delta.copy()
-        delta[:, cross] = np.linalg.solve(Ac, gc)[..., 0].T
+        delta[:, cross] = solve(take(A, cross), gc, extra)
         return delta
 
     step = max(1, int(max_elements // n))
@@ -971,64 +1471,96 @@ def fit_distribution(Y, designs, terms, init, shape_blocks=(), prior_sd=1.0, bou
         B = coef[:, c0:c0 + step].copy()
         pc = B.shape[1]
         f_all, l_all, d1, d2 = evaluate(B, y, 2)
-        G, H = gradient(B, d1), blocks(d2, pc)        # at B, for every column
+        G, H = gradient(B, d1), hessian(d2, pc)       # at B, for every column
         del d1, d2
+        if npen:                # smoothing parameters, scaled to the information at the start
+            info = info_diag(H)
+            scale = np.vstack([info[cols].sum(axis=0) for cols, _ in pens]) / trS[:, None]
+            sp_lo, sp_hi = SP_RANGE[0] * scale, SP_RANGE[1] * scale
+            spc = (scale.copy() if sp is None
+                   else np.clip(np.array(sp[:, c0:c0 + step], np.float64), sp_lo, sp_hi))
+            edfc = np.full(spc.shape, np.nan)
         active, done_ok = np.arange(pc), np.zeros(pc, dtype=bool)
         for it in range(max_iter):
             if not active.size:
                 break
             Ba = B[:, active]
-            A = -H[active]
-            if it < rs_iter:                          # RS: no cross-derivatives
-                for i, j in pairs:
-                    if i != j:
-                        A[:, off[i]:off[i + 1], off[j]:off[j + 1]] = 0
-                        A[:, off[j]:off[j + 1], off[i]:off[i + 1]] = 0
-            A[:, diag, diag] += prior
-            A = np.where(np.isfinite(A), A, 0)
-            scl = np.max(np.abs(A[:, diag, diag]), axis=1) + 1e-12
-            bad = ~(np.linalg.eigvalsh(A)[:, 0] > 1e-10 * scl)
-            if np.any(bad):                   # modified Newton: absolute eigenvalues
-                lam, V = np.linalg.eigh(A[bad])
-                lam = np.maximum(np.abs(lam), 1e-8 * scl[bad, None])
-                A[bad] = (V * lam[:, None, :]) @ V.transpose(0, 2, 1)
-            gt = np.where(np.isfinite(G[:, active]), G[:, active], 0).T[..., None]
-            delta = np.linalg.solve(A, gt)[..., 0].T
-            if shared:
-                delta = bound_step(Ba, A, gt, delta)
-            decr = np.sum(gt[..., 0].T * delta, axis=0)          # Newton decrement
+            spa = spc[:, active] if npen else None
+            A = system(take(H, active), spa, it)
+            Ga = G[:, active]
+            if npen:
+                pg, pv = pen_terms(Ba, spa)
+                Ga = Ga - pg
+
+            def newton(A, cols):
+                """Newton steps and decrements of the columns cols (positions in active)
+                with their systems A."""
+                g = np.where(np.isfinite(Ga[:, cols]), Ga[:, cols], 0)
+                d = solve(A, g)
+                if shared:
+                    d = bound_step(Ba[:, cols], A, g, d)
+                return d, np.sum(g * d, axis=0)
+            delta, decr = newton(A, slice(None))                 # Newton decrement
             small = (0.5 * decr < tol * n) & (it >= rs_iter)
+            if npen and np.any(small):
+                # smoothing parameters at the optimum for the current ones (EFS); where
+                # they still change, the iteration continues with the new values
+                cols = np.flatnonzero(small)
+                old, Bc = spc[:, active[cols]], Ba[:, cols]
+                new, removed = _efs_update(old, traces(take(A, cols)), _pen_quad(pens, Bc),
+                                           rank_p, sp_lo[:, active[cols]],
+                                           sp_hi[:, active[cols]])
+                prev = edfc[:, active[cols]]
+                spc[:, active[cols]] = new
+                edfc[:, active[cols]] = ncol_p[:, None] - removed
+                cols = cols[~(np.max(np.abs(edfc[:, active[cols]] - prev), axis=0) < EDF_TOL)]
+                if cols.size:
+                    spa = spc[:, active]
+                    Ac = system(take(H, active[cols]), spa[:, cols], it)
+                    pgc, pv[cols] = pen_terms(Ba[:, cols], spa[:, cols])
+                    Ga[:, cols] = G[:, active[cols]] - pgc
+                    delta[:, cols], decr[cols] = newton(Ac, cols)
+                    small[cols] = False
             f0, fnew, lnew = f_all[active], f_all[active].copy(), l_all[active].copy()
+            if npen:                # penalized objective with the current smoothing parameters
+                f0 = f0 - pv
             Bnew, todo, fac = Ba.copy(), np.flatnonzero(~small), np.ones(active.size)
-            Gnew, Hnew = G[:, active], H[active]
+            Gnew, Hnew = G[:, active], take(H, active)
             for _ in range(30):                 # backtracking, trial steps with derivatives
                 if not todo.size:
                     break
                 cand = Ba[:, todo] + fac[todo] * delta[:, todo]
                 fc, lc, d1, d2 = evaluate(cand, y[:, active[todo]], 2)
-                good = fc >= f0[todo] - 1e-12 * np.abs(f0[todo])
+                fp = fc - pen_terms(cand, spa[:, todo])[1] if npen else fc
+                good = fp >= f0[todo] - 1e-12 * np.abs(f0[todo])
                 if np.any(good):
                     acc = todo[good]
                     Bnew[:, acc], fnew[acc], lnew[acc] = cand[:, good], fc[good], lc[good]
                     Gnew[:, acc] = gradient(cand, d1)[:, good]
-                    Hnew[acc] = blocks(d2, todo.size)[good]
+                    put(Hnew, acc, take(hessian(d2, todo.size), good))
                 del d1, d2
-                fc, todo = fc[~good], todo[~good]
+                fp, todo = fp[~good], todo[~good]
                 a, s = fac[todo], decr[todo]
                 with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
-                    t = 0.5 * s * a * a / (f0[todo] + s * a - fc)   # maximum of the quadratic
+                    t = 0.5 * s * a * a / (f0[todo] + s * a - fp)   # maximum of the quadratic
                 fac[todo] = np.clip(np.where(np.isfinite(t), t, 0.1 * a), 0.1 * a, 0.5 * a)
             B[:, active], f_all[active], l_all[active] = Bnew, fnew, lnew
-            G[:, active], H[active] = Gnew, Hnew
+            G[:, active] = Gnew
+            put(H, active, Hnew)
             stop = small | np.isin(np.arange(active.size), todo)
             done_ok[active[small]] = True
             active = active[~stop]
         coef[:, c0:c0 + step] = B
         loglik[c0:c0 + step] = l_all
         conv[c0:c0 + step] = done_ok
+        if npen:
+            sp_out[:, c0:c0 + step], edf_out[:, c0:c0 + step] = spc, edfc
 
     _map(run, range(0, p, step), jobs)
-    return [coef[off[i]:off[i + 1]] for i in range(nb)], loglik, conv
+    coefs = [coef[off[i]:off[i + 1]] for i in range(nb)]
+    if npen:
+        return coefs, loglik, conv, sp_out, edf_out
+    return coefs, loglik, conv
 
 
 class NormativeModel:
@@ -1056,15 +1588,26 @@ class NormativeModel:
     optionally adapted to a new site by adapt() (location and scale of the z-scores).
     With site_sd, the sites also enter log sigma, and predictions use the
     size-weighted mean of these effects as well.
+
+    penalized   : the age splines of mu and log sigma get a penalty on their
+                  curvature (integrated squared second derivative), with smoothing
+                  parameters estimated for every feature (REML by the extended
+                  Fellner-Schall method); df_mu and df_sigma are then the basis sizes
+    site_random : the sites are random effects (one column per site with a normal
+                  prior whose variance is estimated for every feature, the same
+                  method), in mu and, with site_sd, in log sigma; small sites are
+                  shrunk toward the mean, and predictions for a new site use the
+                  population mean (effects 0) instead of the size-weighted mean
     """
 
     def __init__(self, df_mu=5, df_sigma=3, cov=None, max_iter=2000, tol=1e-6,
                  family='normal', shape_df=0, tau_max=2.0, shape_prior=1.0, jobs=None,
-                 site_sd=False):
+                 site_sd=False, penalized=False, site_random=False):
         if family not in FAMILIES:
             raise ValueError(f"Unknown family {family!r}; use one of {', '.join(FAMILIES)}.")
         self.df_mu, self.df_sigma = df_mu, df_sigma
         self.site_sd = bool(site_sd)
+        self.penalized, self.site_random = bool(penalized), bool(site_random)
         self.cov = cov or Covariates()
         self.max_iter, self.tol = max_iter, tol
         self.family, self.shape_df = family, int(shape_df)
@@ -1072,6 +1615,8 @@ class NormativeModel:
         self.jobs = jobs                 # threads of the fits (_jobs)
         self.kappa = self.lam = None
         self.basis_shape = None
+        self.sp = self.edf = None        # smoothing parameters and effective df (_penalties)
+        self.sp_names = []
 
     def _cov_columns(self, C, n, names):
         """Spline bases (n, k) of the covariates names, centred at their median."""
@@ -1095,7 +1640,10 @@ class NormativeModel:
             X.append(np.asarray(male, dtype=np.float64)[:, None])
             W.append(np.asarray(male, dtype=np.float64)[:, None])
         if len(self.site_levels) > 1:
-            if site is None:     # reference: size-weighted mean of the sites
+            if self.site_random:     # one column per site; a new site: effects 0
+                S = (np.zeros((n, len(self.site_levels))) if site is None else
+                     (np.asarray(site)[:, None] == self.site_levels[None, :]).astype(float))
+            elif site is None:     # reference: size-weighted mean of the sites
                 S = np.repeat(self.site_props[None, 1:], n, axis=0)
             else:
                 codes = np.searchsorted(self.site_levels, site)
@@ -1110,6 +1658,39 @@ class NormativeModel:
     def _shape_design(self, age):
         one = np.ones((len(age), 1))
         return one if self.basis_shape is None else np.hstack([one, self.basis_shape(age)])
+
+    def _sites(self, site):
+        """Site columns of the designs (_design) for the arrowhead layout of the fits:
+        dict(code=site column of every subject (-1: the reference site of fixed effects),
+        cols={0: of X, 1: of W}), or None with fewer than SITE_ARROW site columns."""
+        L = len(self.site_levels)
+        n_cols = L if self.site_random else L - 1
+        if L < 2 or n_cols < SITE_ARROW:
+            return None
+        code = np.searchsorted(self.site_levels, site) - (0 if self.site_random else 1)
+        cols = {}
+        for blk, basis, used in ((0, self.basis_mu, True), (1, self.basis_sigma, self.site_sd)):
+            if used:
+                first = 1 + basis.df + int(self.use_male)
+                cols[blk] = np.arange(first, first + n_cols)
+        return dict(code=code, cols=cols)
+
+    def _penalties(self):
+        """Penalties (cols, S) of the columns of the designs X and W (_design): the
+        curvature of the age splines (penalized) and the site effects (site_random),
+        and their names."""
+        pen_x, pen_w, names = [], [], []
+        L = len(self.site_levels) if len(self.site_levels) > 1 else 0
+        for part, basis, pens, sites in (('mu', self.basis_mu, pen_x, True),
+                                         ('sigma', self.basis_sigma, pen_w, self.site_sd)):
+            if self.penalized and basis.df > 1:
+                pens.append((np.arange(1, 1 + basis.df), basis.penalty()))
+                names.append(f'{part} age')
+            if self.site_random and L and sites:
+                first = 1 + basis.df + int(self.use_male)
+                pens.append((np.arange(first, first + L), np.eye(L)))
+                names.append(f'{part} site')
+        return (pen_x, pen_w), names
 
     def _setup(self, age, male, site, C=None):
         """Bases of age and covariates, sites and sex coding of the training data;
@@ -1177,24 +1758,38 @@ class NormativeModel:
         self.n_features = Y.shape[1]
 
         X, W = self._design(age, male, site, C)
+        pen, self.sp_names = self._penalties()
         t0 = time.time()
         Yv = Y[:, self.valid]
         if self.family == 'gg':
             Yv = np.log(np.asarray(Yv, np.float64))
-        self.beta, self.theta, conv = fit_location_scale(Yv, X, W, self.max_iter, self.tol,
-                                                         jobs=self.jobs)
+        sites = self._sites(site)
+        res = fit_location_scale(Yv, X, W, self.max_iter, self.tol, jobs=self.jobs,
+                                 penalties=pen if self.sp_names else None, sites=sites)
+        self.beta, self.theta, conv = res[:3]
+        self.sp, self.edf = res[3:] if self.sp_names else (None, None)
         self.converged = conv
         if verbose:
             print(f"    normative model: {self.valid.size} features, "
-                  f"{int(np.sum(~conv))} not converged ({time.time() - t0:.1f}s)")
+                  f"{int(np.sum(~conv))} not converged ({time.time() - t0:.1f}s)"
+                  + self._describe_penalties())
         self.offset = np.zeros(self.valid.size)
         self.scale = np.ones(self.valid.size)
         if self.family != 'normal':
-            self._fit_shape(Y[:, self.valid], age, X, W, verbose)
+            self._fit_shape(Y[:, self.valid], age, X, W, verbose, pen, sites)
         return self
 
-    def _fit_shape(self, Y, age, X, W, verbose=False):
-        """shash or gg from the normal start by penalized ML (fit_distribution)."""
+    def _describe_penalties(self):
+        """Median effective df of the penalized terms, for messages."""
+        if not self.sp_names:
+            return ''
+        return '; median effective df: ' + ', '.join(
+            f"{nm} {np.nanmedian(e):.1f}" for nm, e in zip(self.sp_names, self.edf))
+
+    def _fit_shape(self, Y, age, X, W, verbose=False, pen=((), ()), sites=None):
+        """shash or gg from the normal start by penalized ML (fit_distribution), with
+        the penalties pen (_penalties) and the smoothing parameters of the normal fit
+        as start, and the site columns sites (_sites)."""
         t0 = time.time()
         Y = np.asarray(Y, np.float64)
         n, p = Y.shape
@@ -1217,20 +1812,35 @@ class NormativeModel:
             t0_ = self.theta.copy()
             terms, bound = gg_terms, None
         blocks = list(range(2, 2 + nshape))
-        coef, ll, conv = fit_distribution(Ys, [X, W] + [V[:, :1]] * nshape, terms,
-                                          [b0, t0_] + [np.zeros((1, p))] * nshape,
-                                          blocks, self.shape_prior, bound, jobs=self.jobs)
+        penalties = [(0, cols, S) for cols, S in pen[0]] + [(1, cols, S) for cols, S in pen[1]]
+        kw = dict(jobs=self.jobs, sites=sites)
+        if penalties:                   # shash: mu in units of s, smoothing parameters * s^2
+            mu_pen = (np.arange(len(penalties)) < len(pen[0]))[:, None]
+            unit = np.where(mu_pen, s[None] ** 2 if shash else 1.0, 1.0)
+            kw.update(penalties=penalties, sp=self.sp * unit)
+        res = fit_distribution(Ys, [X, W] + [V[:, :1]] * nshape, terms,
+                               [b0, t0_] + [np.zeros((1, p))] * nshape,
+                               blocks, self.shape_prior, bound, **kw)
+        coef, ll, conv = res[:3]
         pad = [np.vstack([c_, np.zeros((V.shape[1] - 1, p))]) for c_ in coef[2:]]
         self.shape_age = np.zeros(p, dtype=bool)
+        if penalties:
+            sp, edf = res[3:]
         if V.shape[1] > 1:              # age-dependent shape where BIC prefers it
-            coef2, ll2, conv2 = fit_distribution(Ys, [X, W] + [V] * nshape, terms,
-                                                 coef[:2] + pad, blocks, self.shape_prior, bound,
-                                                 jobs=self.jobs)
+            if penalties:
+                kw['sp'] = sp
+            res2 = fit_distribution(Ys, [X, W] + [V] * nshape, terms,
+                                    coef[:2] + pad, blocks, self.shape_prior, bound, **kw)
+            coef2, ll2, conv2 = res2[:3]
             use = 2 * (ll2 - ll) > nshape * (V.shape[1] - 1) * np.log(n)
             coef[:2] = [np.where(use, a2, a1) for a1, a2 in zip(coef[:2], coef2[:2])]
             pad = [np.where(use, a2, a1) for a1, a2 in zip(pad, coef2[2:])]
             conv = np.where(use, conv2, conv)
+            if penalties:
+                sp, edf = (np.where(use, a2, a1) for a1, a2 in zip((sp, edf), res2[3:]))
             self.shape_age = use
+        if penalties:
+            self.sp, self.edf = sp / unit, edf
         b, t = coef[0], coef[1]
         if shash:
             b = b * s
@@ -1246,7 +1856,8 @@ class NormativeModel:
         self.shape_converged = self.converged = conv
         if verbose:
             print(f"    {self.family}: {p} features, {int(np.sum(~conv))} not converged, "
-                  f"{int(np.sum(self.shape_age))} with age-dependent shape ({time.time() - t0:.1f}s)")
+                  f"{int(np.sum(self.shape_age))} with age-dependent shape ({time.time() - t0:.1f}s)"
+                  + self._describe_penalties())
 
     def _normal_only(self):
         if self.family != 'normal':
@@ -1337,7 +1948,10 @@ class NormativeModel:
             theta=self.theta, offset=self.offset, scale=self.scale,
             converged=np.asarray(self.converged, dtype=bool), family=self.family,
             shape_df=self.shape_df, tau_max=self.tau_max, shape_prior=self.shape_prior,
-            site_sd=bool(self.site_sd))
+            site_sd=bool(self.site_sd), penalized=bool(self.penalized),
+            site_random=bool(self.site_random), sp_names=list(self.sp_names))
+        if self.sp_names:
+            s.update(sp=self.sp, edf=self.edf)
         if self.family != 'normal':
             s.update(kappa=self.kappa, shape_age=self.shape_age,
                      basis_shape=None if self.basis_shape is None else self.basis_shape.get_state())
@@ -1350,7 +1964,13 @@ class NormativeModel:
         self = cls(s['df_mu'], s['df_sigma'], Covariates.from_state(s['cov']),
                    family=s.get('family', 'normal'), shape_df=s.get('shape_df', 0),
                    tau_max=s.get('tau_max', 2.0), shape_prior=s.get('shape_prior', 1.0),
-                   site_sd=s.get('site_sd', False))     # older models: site in mu only
+                   site_sd=s.get('site_sd', False),     # older models: site in mu only,
+                   penalized=s.get('penalized', False),  # fixed df and fixed site effects
+                   site_random=s.get('site_random', False))
+        self.sp_names = list(s.get('sp_names', []))
+        if self.sp_names:
+            self.sp = np.asarray(s['sp'], dtype=np.float64)
+            self.edf = np.asarray(s['edf'], dtype=np.float64)
         self.use_male = bool(s['use_male'])
         self.site_levels = np.asarray(s['site_levels']).ravel()
         self.site_props = np.asarray(s['site_props'], dtype=np.float64).ravel()
@@ -1489,11 +2109,13 @@ class Warp:
     """
 
     def __init__(self, df_mu=5, df_sigma=3, max_outer=40, tol=1e-5, prior=9.0,
-                 warp_iter=2, rs_iter=3, chunk=4000, cov=None, site_sd=False):
+                 warp_iter=2, rs_iter=3, chunk=4000, cov=None, site_sd=False,
+                 penalized=False, site_random=False):
         self.df_mu, self.df_sigma = df_mu, df_sigma
         self.max_outer, self.tol, self.prior = max_outer, tol, prior
         self.warp_iter, self.rs_iter, self.chunk = warp_iter, rs_iter, chunk
         self.cov, self.site_sd = cov or Covariates(), bool(site_sd)
+        self.penalized, self.site_random = bool(penalized), bool(site_random)
 
     def fit(self, Y, age, male, site=None, verbose=False, C=None, mask=None):
         finite = np.all(np.isfinite(Y), axis=0)
@@ -1507,15 +2129,21 @@ class Warp:
         self.sd = sd[self.valid]
         self.eps = np.zeros(self.valid.size)
         self.delta = np.ones(self.valid.size)
-        design = NormativeModel(self.df_mu, self.df_sigma, self.cov, site_sd=self.site_sd)
-        X, W = design._design(age, male, design._setup(age, male, site, C), C)
+        design = NormativeModel(self.df_mu, self.df_sigma, self.cov, site_sd=self.site_sd,
+                                penalized=self.penalized, site_random=self.site_random)
+        site = design._setup(age, male, site, C)
+        X, W = design._design(age, male, site, C)
+        pen, names = design._penalties()
+        pen, sites = (pen if names else None), design._sites(site)
         n = len(age)
         ll_start, ll_end, rounds = 0.0, 0.0, 0
         t0 = time.time()
         for c0 in range(0, self.valid.size, self.chunk):
             cols = np.arange(c0, min(c0 + self.chunk, self.valid.size))
             x = self._standardize(Y, cols)
-            beta, theta, _ = fit_location_scale(x, X, W)      # identity warp
+            res = fit_location_scale(x, X, W, penalties=pen, sites=sites)   # identity warp
+            beta, theta = res[:2]
+            sp = res[3] if pen else None
             e, d = self.eps[cols], self.delta[cols]
             ll = _warp_loglik(x, X @ beta, np.exp(W @ theta), e, d, self.prior) \
                 - np.sum(W @ theta, axis=0)
@@ -1531,13 +2159,18 @@ class Warp:
                 ba[0] += shift
                 ta = ta.copy()
                 ta[0] += np.log(fac)
-                ba, ta, _ = fit_location_scale(w, X, W, max_iter=self.rs_iter, init=(ba, ta))
+                res = fit_location_scale(w, X, W, max_iter=self.rs_iter, init=(ba, ta),
+                                         penalties=pen, sp=None if pen is None else sp[:, active],
+                                         sites=sites)
+                ba, ta = res[:2]
                 new = _warp_loglik(xa, X @ ba, np.exp(W @ ta), ea, da, self.prior) \
                     - np.sum(W @ ta, axis=0)
                 keep = new >= ll[active]               # accept only improvements
                 idx = active[keep]
                 e[idx], d[idx] = ea[keep], da[keep]
                 beta[:, idx], theta[:, idx] = ba[:, keep], ta[:, keep]
+                if pen is not None:
+                    sp[:, idx] = res[3][:, keep]
                 gain = np.where(keep, new - ll[active], 0.0)
                 ll[idx] = new[keep]
                 active = active[gain > self.tol * n]
@@ -1567,13 +2200,16 @@ class Warp:
 
     def get_state(self):
         return dict(df_mu=self.df_mu, df_sigma=self.df_sigma, cov=asdict(self.cov),
-                    site_sd=bool(self.site_sd), chunk=int(self.chunk), valid=self.valid,
-                    center=self.center, sd=self.sd, eps=self.eps, delta=self.delta)
+                    site_sd=bool(self.site_sd), penalized=bool(self.penalized),
+                    site_random=bool(self.site_random), chunk=int(self.chunk),
+                    valid=self.valid, center=self.center, sd=self.sd, eps=self.eps,
+                    delta=self.delta)
 
     @classmethod
     def from_state(cls, s):
         self = cls(s['df_mu'], s['df_sigma'], chunk=int(s['chunk']),
-                   cov=Covariates.from_state(s['cov']), site_sd=s.get('site_sd', False))
+                   cov=Covariates.from_state(s['cov']), site_sd=s.get('site_sd', False),
+                   penalized=s.get('penalized', False), site_random=s.get('site_random', False))
         self.valid = np.asarray(s['valid']).astype(np.int64).ravel()
         for key in ('center', 'sd', 'eps', 'delta'):
             setattr(self, key, np.asarray(s[key], dtype=np.float64).ravel())
@@ -1801,12 +2437,15 @@ class NDMBrainAge:
               its df are chosen as for the z-map models
     cov     : covariates of all normative models (Covariates, columns of Data.C)
     site_sd : the training sites also enter log sigma of all normative models
+    penalized, site_random : penalized age splines and random site effects of all
+              normative models (NormativeModel)
     """
 
     def __init__(self, df_mu=5, df_sigma=3, pca=100, rank=20, psi_min=0.01,
                  grid_step=0.25, grid_margin=5.0, parcellation=False,
                  atlas_dir=ATLAS_DIR, warp=False, cov=None, verbose=False,
-                 mask_threshold=None, standardize=True, brainloss=False, site_sd=False):
+                 mask_threshold=None, standardize=True, brainloss=False, site_sd=False,
+                 penalized=False, site_random=False):
         self.df_mu, self.df_sigma = df_mu, df_sigma
         self.pca, self.rank, self.psi_min = pca, rank, psi_min
         self.grid_step, self.grid_margin = grid_step, grid_margin
@@ -1815,6 +2454,7 @@ class NDMBrainAge:
         self.mask_threshold, self.mask_info = mask_threshold, None
         self.standardize, self.brainloss = standardize, brainloss
         self.site_sd = bool(site_sd)
+        self.penalized, self.site_random = bool(penalized), bool(site_random)
         self.loss_model = self.loss_record = None
         self.warper = None
 
@@ -1822,8 +2462,12 @@ class NDMBrainAge:
         """Data with the training warp applied (unchanged without warp)."""
         return d if self.warper is None else replace(d, Y=self.warper.transform(d.Y))
 
+    def _options(self):
+        """Options of the normative models."""
+        return dict(site_sd=self.site_sd, penalized=self.penalized, site_random=self.site_random)
+
     def _normative(self, Y, d, mask=None):
-        return NormativeModel(self.df_mu, self.df_sigma, self.cov, site_sd=self.site_sd).fit(
+        return NormativeModel(self.df_mu, self.df_sigma, self.cov, **self._options()).fit(
             Y, d.age, d.male, d.site, self.verbose, C=d.C, mask=mask)
 
     def _fit_pca_part(self, d, name, cols):
@@ -1852,7 +2496,7 @@ class NDMBrainAge:
             raise ValueError(f"{d.name}: fewer than 2 voxels/vertices pass the mask.")
         raw = d                            # BrainLOSS uses the values before the warp
         if self.warp:
-            self.warper = Warp(self.df_mu, self.df_sigma, cov=self.cov, site_sd=self.site_sd).fit(
+            self.warper = Warp(self.df_mu, self.df_sigma, cov=self.cov, **self._options()).fit(
                 d.Y, d.age, d.male, d.site, self.verbose, C=d.C, mask=mask)
             d = self._prep(d)
         groups = [('global', None, np.flatnonzero(mask))]
@@ -1896,12 +2540,17 @@ class NDMBrainAge:
 
     def _fit_loss(self, d):
         """Normal normative model of the part means of the training data d for
-        BrainLOSS, with df chosen by cross-validation as for the z-map models."""
+        BrainLOSS, with df chosen by cross-validation as for the z-map models (penalized
+        splines: DF_PENALIZED)."""
         M = self._part_means(d.Y)
-        dm, ds, self.loss_record = select_df_normative(replace(d, Y=M.astype(np.float32)),
-                                                       self.cov, mask_threshold=0,
-                                                       site_sd=self.site_sd)
-        self.loss_model = NormativeModel(dm, ds, self.cov, site_sd=self.site_sd).fit(
+        if self.penalized:
+            dm, ds = DF_PENALIZED['mu'], DF_PENALIZED['sigma']
+            self.loss_record = dict(df_mu=dm, df_sigma=ds, selected=False, method='penalized')
+        else:
+            dm, ds, self.loss_record = select_df_normative(
+                replace(d, Y=M.astype(np.float32)), self.cov, mask_threshold=0,
+                site_sd=self.site_sd, site_random=self.site_random)
+        self.loss_model = NormativeModel(dm, ds, self.cov, **self._options()).fit(
             M, d.age, d.male, d.site, C=d.C)
 
     def _loss(self, d, age):
@@ -2053,7 +2702,8 @@ class NDMBrainAge:
             psi_min=self.psi_min, grid_step=self.grid_step, grid_margin=self.grid_margin,
             parcellation=bool(self.parcellation), warp=bool(self.warp), cov=asdict(self.cov),
             standardize=bool(self.standardize), brainloss=bool(self.brainloss),
-            site_sd=bool(self.site_sd),
+            site_sd=bool(self.site_sd), penalized=bool(self.penalized),
+            site_random=bool(self.site_random),
             loss_model=None if self.loss_model is None else self.loss_model.get_state(),
             mask_threshold=self.mask_threshold, mask_info=self.mask_info,
             grid=self.grid, regions=[int(r) for r in self.regions],
@@ -2071,6 +2721,8 @@ class NDMBrainAge:
         self.standardize = bool(s.get('standardize', False))     # older models: raw values
         self.brainloss = bool(s.get('brainloss', False))
         self.site_sd = bool(s.get('site_sd', False))             # older models: site in mu only
+        self.penalized = bool(s.get('penalized', False))         # fixed df
+        self.site_random = bool(s.get('site_random', False))     # fixed site effects
         loss = s.get('loss_model')
         self.loss_model = None if loss is None else NormativeModel.from_state(loss)
         self.warper = None if s['warper'] is None else Warp.from_state(s['warper'])
@@ -2092,9 +2744,10 @@ class VoxelModel:
 
     def __init__(self, df_mu=5, df_sigma=3, cov=None, family='shash', shape_df=0,
                  tau_max=2.0, shape_prior=1.0, verbose=False, mask_threshold=None,
-                 site_sd=False):
+                 site_sd=False, penalized=False, site_random=False):
         self.df_mu, self.df_sigma, self.cov = df_mu, df_sigma, cov or Covariates()
         self.site_sd = bool(site_sd)
+        self.penalized, self.site_random = bool(penalized), bool(site_random)
         self.family, self.shape_df = family, shape_df
         self.tau_max, self.shape_prior, self.verbose = tau_max, shape_prior, verbose
         self.mask_threshold, self.mask_info = mask_threshold, None
@@ -2106,7 +2759,9 @@ class VoxelModel:
         mask, self.mask_info = feature_mask(d, self.mask_threshold)
         self.model = NormativeModel(self.df_mu, self.df_sigma, self.cov, family=self.family,
                                     shape_df=self.shape_df, tau_max=self.tau_max,
-                                    shape_prior=self.shape_prior, site_sd=self.site_sd).fit(
+                                    shape_prior=self.shape_prior, site_sd=self.site_sd,
+                                    penalized=self.penalized,
+                                    site_random=self.site_random).fit(
             d.Y, d.age, d.male, d.site, self.verbose, C=d.C, mask=mask)
         return self
 
@@ -2116,7 +2771,7 @@ class VoxelModel:
         if est.pca:
             raise ValueError("Only an NDMBrainAge with pca=0 has a voxel/vertex-wise model.")
         self = cls(est.df_mu, est.df_sigma, est.cov, family='normal', verbose=est.verbose,
-                   mask_threshold=est.mask_threshold, site_sd=est.site_sd)
+                   mask_threshold=est.mask_threshold, **est._options())
         self.mask_info = est.mask_info
         self.model, self.warper, self.shared = est.parts[0].model, est.warper, True
         return self
@@ -2232,7 +2887,8 @@ class VoxelModel:
         Z[np.ix_(ctrl[rows], model.valid)] = new[rows]
     def get_state(self):
         return dict(df_mu=self.df_mu, df_sigma=self.df_sigma, cov=asdict(self.cov),
-                    site_sd=bool(self.site_sd),
+                    site_sd=bool(self.site_sd), penalized=bool(self.penalized),
+                    site_random=bool(self.site_random),
                     family=self.family, shape_df=self.shape_df, tau_max=self.tau_max,
                     shape_prior=self.shape_prior, shared=bool(self.shared),
                     mask_threshold=self.mask_threshold, mask_info=self.mask_info,
@@ -2244,7 +2900,8 @@ class VoxelModel:
         self = cls(s['df_mu'], s['df_sigma'], Covariates.from_state(s['cov']),
                    family=s.get('family', 'normal'), shape_df=s.get('shape_df', 0),
                    tau_max=s.get('tau_max', 2.0), shape_prior=s.get('shape_prior', 1.0),
-                   mask_threshold=s.get('mask_threshold'), site_sd=s.get('site_sd', False))
+                   mask_threshold=s.get('mask_threshold'), site_sd=s.get('site_sd', False),
+                   penalized=s.get('penalized', False), site_random=s.get('site_random', False))
         self.mask_info = s.get('mask_info')
         if s['shared']:
             if ndm is None:
@@ -2296,7 +2953,7 @@ def _search_df(criteria, df_mu, df_sigma, grid):
 
 def select_df_normative(d, cov=None, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS,
                         max_features=DF_MAX_FEATURES, seed=0, mask_threshold=None, jobs=None,
-                        site_sd=False):
+                        site_sd=False, site_random=False):
     """Spline df of age of mu and sigma of the voxel/vertex-wise normative models,
     the same for all features of the training data d, by k-fold cross-validation.
 
@@ -2306,9 +2963,9 @@ def select_df_normative(d, cov=None, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS
     subject, relative to the mean of the settings compared: the median is robust to
     the few degenerate features, such as near-empty voxels, in which flexible curves
     fail out of sample.  The features are drawn from feature_mask(d, mask_threshold),
-    and the folds and settings are fitted in parallel threads (jobs).  site_sd as
-    for NormativeModel.  df_mu is searched first (_search_df).  Returns df_mu,
-    df_sigma and a record of the search."""
+    and the folds and settings are fitted in parallel threads (jobs).  site_sd and
+    site_random as for NormativeModel.  df_mu is searched first (_search_df).  Returns
+    df_mu, df_sigma and a record of the search."""
     ok = np.flatnonzero(feature_mask(d, mask_threshold)[0])
     rng = np.random.default_rng(seed)
     cols = np.sort(rng.choice(ok, min(max_features, ok.size), replace=False))
@@ -2320,7 +2977,7 @@ def select_df_normative(d, cov=None, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS
     def heldout(task):
         (dm, ds), f = task
         tr, te = np.flatnonzero(fold != f), np.flatnonzero(fold == f)
-        m = NormativeModel(dm, ds, cov, jobs=1, site_sd=site_sd).fit(
+        m = NormativeModel(dm, ds, cov, jobs=1, site_sd=site_sd, site_random=site_random).fit(
             Y[tr], d.age[tr], d.male[tr], d.site[tr], C=Cs(tr))
         known = np.isin(d.site[te], m.site_levels)     # sites seen in training
         mu = np.empty((te.size, m.valid.size))
@@ -2365,7 +3022,8 @@ def select_df_brainage(d, kw, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS, seed=
     if not kw.get('pca', 100):
         return select_df_normative(d, kw.get('cov'), df_mu, df_sigma, k, seed=seed,
                                    mask_threshold=kw.get('mask_threshold'),
-                                   site_sd=kw.get('site_sd', False))
+                                   site_sd=kw.get('site_sd', False),
+                                   site_random=kw.get('site_random', False))
     if DF_AUTO not in (df_mu, df_sigma):
         return int(df_mu), int(df_sigma), dict(df_mu=int(df_mu), df_sigma=int(df_sigma),
                                                 selected=False)
@@ -2404,8 +3062,13 @@ def select_df_brainage(d, kw, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS, seed=
 def _resolve_df(d, kw, which):
     """Numeric (df_mu, df_sigma) for the brain age ('brainage') or the voxel/vertex-
     wise models ('voxel') of the training data d, chosen by cross-validation where kw
-    gives 'auto' (default without df: 5 and 3), and the record of the choice."""
+    gives 'auto' (default without df: 5 and 3), and the record of the choice.  Penalized
+    splines (kw['penalized']) need no choice: 'auto' gives the basis sizes DF_PENALIZED."""
     dm, ds = kw.get('df_mu', 5), kw.get('df_sigma', 3)
+    if kw.get('penalized'):
+        dm = DF_PENALIZED['mu'] if dm == DF_AUTO else int(dm)
+        ds = DF_PENALIZED['sigma'] if ds == DF_AUTO else int(ds)
+        return dm, ds, dict(df_mu=dm, df_sigma=ds, selected=False, method='penalized splines')
     if DF_AUTO not in (dm, ds):
         return int(dm), int(ds), dict(df_mu=int(dm), df_sigma=int(ds), selected=False)
     t0 = time.time()
@@ -2417,7 +3080,8 @@ def _resolve_df(d, kw, which):
     else:
         dm, ds, rec = select_df_normative(d, kw.get('cov'), dm, ds,
                                           mask_threshold=kw.get('mask_threshold'),
-                                          site_sd=kw.get('site_sd', False))
+                                          site_sd=kw.get('site_sd', False),
+                                          site_random=kw.get('site_random', False))
     rec['seconds'] = round(time.time() - t0, 1)
     return dm, ds, rec
 
@@ -3118,7 +3782,8 @@ def fit_models(train, kw, brainage=True, voxel=False, vkw=None):
                 dm, ds, info['df_voxel'] = _resolve_df(
                     d, dict(kw, mask_threshold=vkw['mask_threshold']), 'voxel')
                 vm = VoxelModel(dm, ds, kw.get('cov'), site_sd=kw.get('site_sd', False),
-                                **vkw).fit(d)
+                                penalized=kw.get('penalized', False),
+                                site_random=kw.get('site_random', False), **vkw).fit(d)
                 dfs.append(f"z-maps {dm}/{ds}")
             m = vm.model
             if m.family != 'normal':
@@ -3127,10 +3792,13 @@ def fit_models(train, kw, brainage=True, voxel=False, vkw=None):
                 if m.basis_shape is not None:
                     msg += f", age-dependent shape in {int(np.sum(m.shape_age))}"
         info['mask'] = (vm if vm is not None else est).mask_info
+        if vm is not None and vm.model.sp_names:
+            msg += vm.model._describe_penalties().replace('; median', '; z-maps: median')
         chosen = any(r.get('selected') for key, r in info.items() if key.startswith('df_'))
         mk = info['mask']
         print(f"  {d.name}: fitted in {time.time() - t0:.1f}s; df mu/sigma {', '.join(dfs)}"
-              f"{' (chosen by cross-validation)' if chosen else ''}; {mk['n_used']} of "
+              f"{' (chosen by cross-validation)' if chosen else ''}"
+              f"{' (basis of penalized splines)' if kw.get('penalized') else ''}; {mk['n_used']} of "
               f"{mk['n_features']} voxels/vertices used (mean >= {mk['threshold']:.3g}){msg}",
               flush=True)
         sets.append(ModelSet(info, est, vm))
@@ -3872,6 +4540,17 @@ def main(argv=None):
     p.add_argument('--site-sd', action='store_true',
                    help="the training sites ('+'-joined files) also enter the log SD of all "
                         "normative models, not only the mean")
+    p.add_argument('--site-random', action='store_true',
+                   help="the training sites enter all normative models as random effects "
+                        "with a variance estimated per voxel/vertex (and per principal "
+                        "component score), which shrinks the effects of small sites; "
+                        "a new site starts from the population mean.  Default: fixed effects")
+    p.add_argument('--penalized', action='store_true',
+                   help="penalized splines of age for mu and sigma, with the smoothness "
+                        "estimated per voxel/vertex (and per principal component score) by "
+                        "REML instead of one df per sample chosen by cross-validation; "
+                        "--df-mu/--df-sigma then set the basis size (default "
+                        f"{DF_PENALIZED['mu']} and {DF_PENALIZED['sigma']})")
     p.add_argument('--test-nuisance',
                    help="table of nuisance variables of the test subjects, e.g. image "
                         "quality measures, one row per subject (as --test-cov); their "
@@ -3899,7 +4578,8 @@ def main(argv=None):
     p.add_argument('--df-mu', type=_df_arg, default=DF_AUTO,
                    help="spline df of age for mu: auto (default) chooses one value per "
                         "training sample and model by cross-validation (brain age: error "
-                        "of the brain age; z-maps: held-out likelihood), or a number")
+                        "of the brain age; z-maps: held-out likelihood), or a number; "
+                        "with --penalized the basis size")
     p.add_argument('--df-sigma', type=_df_arg, default=DF_AUTO,
                    help="spline df of age for sigma: auto (default) or a number, as --df-mu")
     p.add_argument('--grid-step', type=float, default=0.25,
@@ -3927,9 +4607,10 @@ def main(argv=None):
         p.error("give either --train or --model.")
     if a.model and not a.test:
         p.error("--model needs --test.")
-    if a.model and (a.save_model or a.train_cov or a.cov_mean or a.cov_sd or a.site_sd):
-        p.error("--save-model, --train-cov, --cov-mean, --cov-sd and --site-sd need --train "
-                "(saved models only need --test-cov).")
+    if a.model and (a.save_model or a.train_cov or a.cov_mean or a.cov_sd or a.site_sd
+                    or a.site_random or a.penalized):
+        p.error("--save-model, --train-cov, --cov-mean, --cov-sd, --site-sd, --site-random "
+                "and --penalized need --train (saved models only need --test-cov).")
     if (a.cov_mean or a.cov_sd) and not a.train_cov:
         p.error("--cov-mean and --cov-sd need --train-cov.")
     if a.test_nuisance and not (a.test and a.adjust):
@@ -3994,13 +4675,15 @@ def main(argv=None):
             print(f"Covariates ({'linear' if cov.df == 1 else f'natural splines, df {cov.df}'}"
                   f") in the mean: {', '.join(cov.mean) or '-'}; in the log SD: "
                   f"{', '.join(cov.sd) or '-'}")
-        if a.site_sd and np.unique(train[0].site).size < 2:
-            print("--site-sd has no effect: the training data come from one site.")
+        for flag, used in (('--site-sd', a.site_sd), ('--site-random', a.site_random)):
+            if used and np.unique(train[0].site).size < 2:
+                print(f"{flag} has no effect: the training data come from one site.")
         kw = dict(df_mu=a.df_mu, df_sigma=a.df_sigma, mask_threshold=a.mask_threshold,
                   pca=a.pca, rank=a.rank,
                   psi_min=a.psi_min, grid_step=a.grid_step, grid_margin=a.grid_margin,
                   parcellation=a.parcellation, warp=a.warp, standardize=not a.no_standardize,
-                  brainloss=a.brainloss, cov=cov, site_sd=a.site_sd)
+                  brainloss=a.brainloss, cov=cov, site_sd=a.site_sd, site_random=a.site_random,
+                  penalized=a.penalized)
         ok = _valid_train(train[0], a.age_range)
         if ok.sum() < 10:
             p.error(f"Only {int(ok.sum())} training subject(s) have a valid age (not 0 or NaN) "
