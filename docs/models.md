@@ -122,14 +122,27 @@ The models with shape parameters maximize, for every voxel, the penalized log-li
 The coefficients are updated by Newton steps for all voxels at once:
 
 - **Derivatives.** The first and second derivatives of $`\log\, f`$ with respect to the linear predictors are exact for SHASH. For GG, they are central differences with step $`10^{-4}`$. The gradient and the Hessian of every voxel are assembled from these derivatives with one matrix product per pair of predictors.
-- **Squared scores.** Where the negative Hessian plus the prior is not positive definite, the outer product of the scores replaces it (the BHHH approximation). This always gives an ascent direction. gamlss.dist uses the same squared-score approximation for the expected second derivatives of SHASH.
-- **Step halving.** A step is halved, up to 30 times, until the penalized log-likelihood does not decrease, as in the autostep of gamlss. Every trial step is evaluated with its derivatives, so that the gradient and the Hessian of an accepted step are ready for the next iteration without a second evaluation.
+- **Indefinite Hessian.** Where the negative Hessian plus the prior is not positive definite, its eigenvalues are replaced by their absolute values, at least $`10^{-8}`$ times its largest diagonal element (a modified Newton step; Nocedal and Wright, 2006, section 3.4). This gives an ascent direction that keeps the curvature of the likelihood. The outer product of the scores (the BHHH approximation, the squared-score approximation that gamlss.dist uses for the expected second derivatives of SHASH) also gives an ascent direction, but it needed several times more steps in strongly skewed voxels (see below).
+- **Steps across the bound of τ.** The penalty of the bound is steep, with curvature $`\rho n`$ for constant $`\tau`$, and the Newton step at a point inside the bound does not see it. For constant $`\tau`$, a step that moves $`\log\, \tau`$ across a bound is therefore replaced by the Newton step of the quadratic model that includes the penalty. This model is exact beyond the bound, and its step ends between the bound and the plain step. Age-dependent $`\tau`$ keeps the plain step (see below).
+- **Backtracking.** A step is shortened, up to 30 times, until the penalized log-likelihood does not decrease, as in the autostep of gamlss. Instead of halving, the new length is the maximum of the quadratic through the current penalized log-likelihood, its slope along the step and the rejected value, kept within 0.1 to 0.5 of the last length. Every trial step is evaluated with its derivatives, so that the gradient and the Hessian of an accepted step are ready for the next iteration without a second evaluation.
 - **Convergence.** A voxel stops when half its Newton decrement falls below $`10^{-9}`$ per subject. Voxels that reach 500 iterations, or whose step cannot be improved by halving, keep their best fit and are flagged as not converged.
 - **Parallel chunks.** The voxels are processed in chunks of about 500,000 values, which run in parallel threads (`--jobs`, by default half the CPU count). NumPy releases Python's global lock in its array operations, so the threads use several cores. The chunks do not depend on the number of threads, so neither do the results.
 - **Arithmetic.** One exponential of $`t`$ gives $`\sinh\, t`$, $`\cosh\, t`$, $`\tanh\, t`$ and $`\cosh\, 2t`$, and $`\mathrm{asinh}\, z`$ is computed as $`\mathrm{log1p}(|z| + z^2/(1 + \sqrt{1 + z^2}))`$ with the sign of $`z`$, which is accurate also for small $`|z|`$. Exponentials and logarithms take most of the time, so the log-density uses only two more: the exponential for $`1/(\sigma\tau)`$ and one logarithm of $`\cosh(t)/\sqrt{1 + z^2}`$. Constant $`\nu`$ and $`\tau`$ enter as one value per voxel rather than one per subject.
 - **Mixed algorithm.** The optimizer can start with iterations that ignore the cross-derivatives between predictors, as the RS phase of the mixed algorithm of gamlss (`rs_iter` of `fit_distribution`). This was slower without better fits for SHASH and is off by default.
 
-In 8 mm gray and white matter of 2,241 subjects without a mask, 0.7% and 0.9% of the voxels did not converge. These voxels contain almost no tissue, with a median density of 0.001, and only a few subjects have nonzero values. Their raw skewness is about 10, and most of them have $`\tau`$ between 0.2 and 0.4. With the default mask, 1 of 3,546 gray matter voxels and 1 of 3,242 white matter voxels did not converge.
+In 8 mm gray and white matter of 2,241 subjects without a mask, with the df chosen by cross-validation (2 and 2), 0.3% and 0.4% of the voxels did not converge. These voxels contain almost no tissue, with a median density of 0.001, and only a few subjects have nonzero values. Their raw skewness is about 10, and most of them have $`\tau`$ between 0.2 and 0.4. With the default mask, all 3,546 gray matter voxels and all 3,242 white matter voxels converged.
+
+The modified Newton step and the steps across the bound replaced the BHHH approximation and plain step halving. In gray matter at 4 mm of the lifespan sample (df 5 and 3), 14% of the voxels had an indefinite Hessian at some iteration. These are strongly skewed voxels, with a median $`|\nu|`$ of 1.3. With BHHH, each needed on average 19.5 iterations and 34 halvings. Another 9% of the voxels end at $`\tau_{\max}`$, and each needed 10 iterations and 20 halvings. Every trial step costs a full evaluation of the derivatives, so these 23% of the voxels caused 72% of the work. The comparison used the same models, the same voxels and four threads on an Apple M2, alternating the two versions:
+
+| SHASH fit, lifespan sample, df chosen by cross-validation | BHHH, halving | Modified Newton | Faster |
+|---|---|---|---|
+| Gray matter 8 mm, 3,546 voxels | 7.9 s, 1 not converged | 3.0 s, 0 | 2.6× |
+| White matter 8 mm, 3,242 voxels | 12.6 s, 1 not converged | 3.6 s, 0 | 3.5× |
+| Gray matter 4 mm, 28,222 voxels | 58 s, 5 not converged | 22 s, 0 | 2.7× |
+| White matter 4 mm, 25,918 voxels | 89 s, 7 not converged | 26 s, 0 | 3.4× |
+| Thickness of NKI-Rockland, 59,380 vertices, df 5 and 2 | 16 s, 0 not converged | 16 s, 0 | 1.0× |
+
+Evaluations of the derivatives per voxel fell from 15 to 7 in gray matter at 4 mm (df 5 and 3) and from 27 to 9 in white matter (df 3 and 2). Where both versions converged, the penalized log-likelihood agreed within $`2.2 \cdot 10^{-6}`$, the convergence tolerance, and the normal scores within 0.001. The voxels that had not converged before reached a higher penalized log-likelihood, by 0.5 to 88, and their normal scores changed by up to 0.6. Cortical thickness has few strongly skewed vertices and gained nothing. Without the mask, both versions stop at the iteration limit in the same near-empty voxels, and their parameters there are arbitrary. With age-dependent shape (`--shape-df 2`), the fit of 8 mm gray matter took 6 s instead of 16 to 19 s, the BIC chose the same voxels, and no voxel reached a lower maximum. The steps across the bound are used only for constant shape. With age-dependent $`\tau`$, whose penalty per subject is weaker, they kept $`\tau`$ inside the bound on the way and led 54 of these 3,546 voxels to lower local maxima, by up to 30.
 
 ### Age-dependent shape
 
@@ -464,7 +477,7 @@ The evidence comes from ADNI, with CAT12 r1840 data of 835 subjects and models t
 
 ## Relation to the gamlss R package
 
-NeuroGAMLSS takes from gamlss and gamlss.dist the SHASHo2 and GG families, the RS algorithm, step halving, the squared-score approximation and the Q statistics and worm plots. It differs in four ways:
+NeuroGAMLSS takes from gamlss and gamlss.dist the SHASHo2 and GG families, the RS algorithm, the autostep and the Q statistics and worm plots. It differs in four ways:
 
 - **Vectorized fitting.** All voxels are fitted at once by batched linear algebra rather than one model at a time.
 - **Fixed smoothness.** Age enters through natural splines with fixed degrees of freedom and boundary knots at the 5th and 95th percentiles instead of penalized splines with automatic smoothing, such as `pb()` in gamlss.
@@ -484,6 +497,7 @@ PCNtoolkit offers warped Bayesian linear regression (Fraza et al., 2021) and hie
 - Hastie, T., Tibshirani, R., Friedman, J., 2009. The Elements of Statistical Learning, 2nd ed. Springer, New York.
 - Johnson, W.E., Li, C., Rabinovic, A., 2007. Adjusting batch effects in microarray expression data using empirical Bayes methods. Biostatistics 8, 118–127.
 - Jones, M.C., Pewsey, A., 2009. Sinh-arcsinh distributions. Biometrika 96, 761–780.
+- Nocedal, J., Wright, S.J., 2006. Numerical Optimization, 2nd ed. Springer, New York.
 - Rigby, R.A., Stasinopoulos, D.M., 2005. Generalized additive models for location, scale and shape. Journal of the Royal Statistical Society, Series C 54, 507–554.
 - Rigby, R.A., Stasinopoulos, D.M., Heller, G.Z., De Bastiani, F., 2019. Distributions for Modeling Location, Scale, and Shape: Using GAMLSS in R. Chapman and Hall/CRC, Boca Raton.
 - Royston, P., Wright, E.M., 2000. Goodness-of-fit statistics for age-specific reference intervals. Statistics in Medicine 19, 2943–2962.

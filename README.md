@@ -9,7 +9,7 @@ NeuroGAMLSS fits a generalized additive model for location, scale and shape (GAM
 
 - **Distribution families:** sinh-arcsinh (SHASH, the default) for skewed or heavy-tailed voxel data, normal for near-Gaussian data, and generalized gamma (GG) as in Brain Charts for positive data.
 - **Age curves:** natural cubic splines for location and scale, whose flexibility is chosen for each training sample by cross-validation. The shape is constant or, where BIC prefers it, also a function of age.
-- **Speed:** all voxels are fitted together, in parallel threads. SHASH models for 30,000 voxels and 2,241 subjects take less than half a minute on a laptop, including the choice of the df.
+- **Speed:** all voxels are fitted together, in parallel threads. SHASH models for 30,000 voxels and 2,241 subjects take about half a minute on a laptop, including the choice of the df.
 - **Sites and covariates:** sites enter the mean, and optionally the standard deviation, as fixed effects, and new sites are adapted with their control subjects. Covariates such as image quality measures can enter the mean and the standard deviation.
 - **Diagnostics:** Q statistics and worm plots by age group show how well the models fit.
 - **Saved models:** fitted models are stored as `.mat` or `.npz` files with a JSON description, so new data can be scored without the training data.
@@ -351,21 +351,21 @@ z = m.zscores(Y_new, age_new, male_new)          # columns m.valid of Y_new
 
 NeuroGAMLSS fits chunks of voxels in parallel threads, by default as many as half the CPU count, which on most machines are the physical or performance cores. `--jobs` sets another number, and the results do not depend on it. On an Apple M2, four threads were 1.9 times faster than one core. More threads did not help there, because the other four cores are slower efficiency cores and the computation is limited by memory speed.
 
-Times for fitting with fixed df to 2,241 training subjects on an Apple M2 laptop, with four threads and the default mask:
+Times for fitting to 2,241 training subjects on an Apple M2 laptop, with four threads, the default mask and the df that cross-validation chose, given with `--df-mu` and `--df-sigma` (2 and 2, for white matter at 4 mm 3 and 2). The laptop was also running desktop applications:
 
-| Data | Voxels | normal, gray matter | normal, white matter | shash, gray matter | shash, white matter |
+| Data | Voxels in the mask, gray / white matter | normal, gray matter | normal, white matter | shash, gray matter | shash, white matter |
 |---|---|---|---|---|---|
-| 8 mm volume | 3,747 | 0.7 s | 0.6 s | 2 s | 2 s |
-| 4 mm volume | 29,852 | 5 s | 6 s | 18 s | 18 s |
+| 8 mm volume | 3,546 / 3,242 | 0.5 s | 0.6 s | 3 s | 4 s |
+| 4 mm volume | 28,222 / 25,918 | 4 s | 4 s | 25 s | 27 s |
 
-The normal fits pool subjects with the same age, sex and site, which helps where ages are given in whole years and no continuous covariates are used. Three of the four training samples here give whole years. Memory is bounded by processing the voxels in chunks.
+The normal fits pool subjects with the same age, sex and site, which helps where ages are given in whole years and no continuous covariates are used. Three of the four training samples here give whole years. The SHASH fits use modified Newton steps where the Hessian is indefinite, which made them 2.6 to 3.5 times faster on these data than the outer product of the scores used before ([docs/models.md](docs/models.md#shash-and-gg-penalized-newton-steps)). Memory is bounded by processing the voxels in chunks.
 
 The automatic choice of the df adds the following times for gray matter. Fixed df given with `--df-mu` and `--df-sigma` skip it.
 
 | Choice of the df | 8 mm | 4 mm |
 |---|---|---|
-| z-map models | 9 s | 9 s |
-| brain age models | 34 s | 46 s |
+| z-map models | 10 s | 10 s |
+| brain age models | 9 s | 19 s |
 
 ## Tests
 
@@ -374,13 +374,13 @@ pip install -e ".[all,test]"
 python -m pytest
 ```
 
-The tests use simulated data. They check the SHASH derivatives, the GG density and normal scores, parameter recovery, the τ bound, the BIC choice of age-dependent shape, the calibration of the Q statistics, the boundary knots of the splines, the choice of the df, the mask, site effects on the scale, the nuisance correction of test data, saving and loading of all families in both formats, the command line, and the images of `mat2image.py`.
+The tests use simulated data. They check the SHASH derivatives, the GG density and normal scores, parameter recovery, the τ bound, the convergence of strongly skewed fits, the BIC choice of age-dependent shape, the calibration of the Q statistics, the boundary knots of the splines, the choice of the df, the mask, site effects on the scale, the nuisance correction of test data, saving and loading of all families in both formats, the command line, and the images of `mat2image.py`.
 
 ## Limitations
 
 - **Independent voxels.** Every voxel is fitted on its own, without spatial smoothing of the parameters.
 - **Fixed site effects.** Sites are fixed effects of the location and, with `--site-sd`, of the scale. Many small sites would be better served by random effects, which are not implemented.
-- **Non-converged fits.** Without the mask, about 1% of the SHASH fits did not converge, almost all in near-empty voxels. With the default mask, 1 of 3,546 gray matter voxels and 1 of 3,242 white matter voxels at 8 mm failed to converge. Such fits keep the best parameters found and are flagged in `converged`.
+- **Non-converged fits.** Without the mask, 0.3% of the SHASH fits of gray matter and 0.4% of white matter at 8 mm did not converge, all in near-empty voxels. With the default mask, all voxels of the lifespan sample converged, at 8 and at 4 mm. Such fits keep the best parameters found and are flagged in `converged`.
 - **Bounded data.** Gray and white matter densities are bounded by 0 and 1. SHASH describes the resulting skewness well but is not bounded itself.
 
 ## References
