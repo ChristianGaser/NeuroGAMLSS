@@ -132,6 +132,38 @@ def test_shash_fit_is_stationary():
                              m.kappa[0, j] + e[2], m.lam[0, j] + e[3], j) <= best + 1e-6
 
 
+def test_skewed_fits_converge_quickly():
+    """Strongly skewed features, whose Hessian is indefinite on the way from the normal
+    start and some of whose tau end at the bound, converge within 30 Newton steps (the
+    outer product of the scores, used before, needed up to 60) to the maximum of a
+    fit with a much smaller tolerance."""
+    rng = np.random.default_rng(7)
+    n, p = 1000, 20
+    age = rng.uniform(20, 85, n)
+    male = rng.integers(0, 2, n).astype(float)
+    u = (age - 20) / 65
+    nu, tau = rng.uniform(1.5, 3.0, p), rng.uniform(0.5, 2.5, p)
+    z = np.sinh((np.arcsinh(rng.standard_normal((n, p))) + nu) / tau)
+    Y = 0.5 - 0.3 * u[:, None] + 0.05 * (1 + 0.5 * u)[:, None] * tau * z
+    m = NG.NormativeModel(4, 2).fit(Y, age, male)
+    X, W = m._design(age, male)
+    c, s = Y.mean(axis=0), Y.std(axis=0)            # standardized as in _fit_shape
+    b0 = m.beta / s
+    b0[0] -= c / s
+    t0 = m.theta.copy()
+    t0[0] -= np.log(s)
+    one = np.ones((n, 1))
+    Ys = (Y - c) / s
+    args = (Ys, [X, W, one, one], NG.shash_terms, [b0, t0, np.zeros((1, p)), np.zeros((1, p))],
+            (2, 3), 1.0, (3, np.log(NG.TAU_MIN), np.log(2.0)))
+    fast, _, conv = NG.fit_distribution(*args, max_iter=30, jobs=1)
+    ref, _, conv_ref = NG.fit_distribution(*args, tol=1e-13, jobs=1)
+    assert np.all(conv) and np.all(conv_ref)
+    assert np.any(np.exp(fast[3][0]) > 1.99)               # bound reached
+    z1, z2 = [NG.shash_score(Ys, X @ b[0], W @ b[1], b[2], b[3]) for b in (fast, ref)]
+    assert np.max(np.abs(z1 - z2)) < 1e-3
+
+
 def test_tau_bound():
     rng = np.random.default_rng(4)
     n = 1000
