@@ -20,9 +20,9 @@ g(\mu_i) &= \beta_0 + \mathbf{b}_\mu(a_i)^\top \boldsymbol\beta + \beta_s s_i + 
 ```
 
 - **Link of the location.** $`g`$ is the identity for the normal and SHASH families and the logarithm for GG.
-- **Age.** $`\mathbf{b}_\mu`$, $`\mathbf{b}_\sigma`$ and $`\mathbf{b}_\nu`$ are natural cubic spline bases without intercept (Hastie et al., 2009). The degrees of freedom of $`\mathbf{b}_\mu`$ and $`\mathbf{b}_\sigma`$ are chosen for every training sample, see [Flexibility of the age curves](#flexibility-of-the-age-curves), and those of $`\mathbf{b}_\nu`$ are given by `--shape-df`. Their boundary knots lie at the 5th and 95th percentiles of the training ages and their inner knots at equally spaced quantiles between them, see [Boundary knots](#boundary-knots). The splines are linear below and above the boundary knots, so the models extrapolate linearly.
+- **Age.** $`\mathbf{b}_\mu`$, $`\mathbf{b}_\sigma`$ and $`\mathbf{b}_\nu`$ are natural cubic spline bases without intercept (Hastie et al., 2009). The degrees of freedom of $`\mathbf{b}_\mu`$ and $`\mathbf{b}_\sigma`$ are chosen for every training sample, see [Flexibility of the age curves](#flexibility-of-the-age-curves), and those of $`\mathbf{b}_\nu`$ are given by `--shape-df`. Their boundary knots lie at the 5th and 95th percentiles of the training ages and their inner knots at equally spaced quantiles between them, see [Boundary knots](#boundary-knots). The splines are linear below and above the boundary knots, so the models extrapolate linearly. With `--penalized`, $`\mathbf{b}_\mu`$ and $`\mathbf{b}_\sigma`$ have 10 and 6 df, and a penalty on their curvature sets the flexibility for every voxel, see [Penalized splines](#penalized-splines).
 - **Sex** enters location and log scale as a main effect. It is left out when the training sample has only one sex or the test data contain no sex.
-- **Site** enters the location as a fixed effect, with $`\gamma_1 = 0`$. With `--site-sd`, it also enters the log scale, with $`\delta_1 = 0`$ (term in square brackets). Predictions for new data use the size-weighted mean of the site effects, as the standardized mean of ComBat, for the log scale as well.
+- **Site** enters the location as a fixed effect, with $`\gamma_1 = 0`$. With `--site-sd`, it also enters the log scale, with $`\delta_1 = 0`$ (term in square brackets). Predictions for new data use the size-weighted mean of the site effects, as the standardized mean of ComBat, for the log scale as well. With `--site-random`, the effects of all sites are random, $`\gamma_c \sim \mathcal{N}(0, \omega_\gamma^2)`$ and $`\delta_c \sim \mathcal{N}(0, \omega_\delta^2)`$, with variances estimated for every voxel, and new data are predicted at the population mean, $`\gamma = \delta = 0`$, see [Random site effects](#random-site-effects).
 - **Covariates** $`\mathbf{h}(\mathbf{x})`$ are natural splines with `--cov-df` degrees of freedom and knots placed as for age, linear by default, centred at their training median. A covariate is dropped from a predictor when it is constant or collinear with the other columns of that predictor.
 - **Shape.** The shape parameters $`\nu`$ and $`\tau`$ are constant by default. The terms in square brackets are added with `--shape-df` where BIC prefers them, see [Age-dependent shape](#age-dependent-shape).
 
@@ -144,6 +144,25 @@ The modified Newton step and the steps across the bound replaced the BHHH approx
 
 Evaluations of the derivatives per voxel fell from 15 to 7 in gray matter at 4 mm (df 5 and 3) and from 27 to 9 in white matter (df 3 and 2). Where both versions converged, the penalized log-likelihood agreed within $`2.2 \cdot 10^{-6}`$, the convergence tolerance, and the normal scores within 0.001. The voxels that had not converged before reached a higher penalized log-likelihood, by 0.5 to 88, and their normal scores changed by up to 0.6. Cortical thickness has few strongly skewed vertices and gained nothing. Without the mask, both versions stop at the iteration limit in the same near-empty voxels, and their parameters there are arbitrary. With age-dependent shape (`--shape-df 2`), the fit of 8 mm gray matter took 6 s instead of 16 to 19 s, the BIC chose the same voxels, and no voxel reached a lower maximum. The steps across the bound are used only for constant shape. With age-dependent $`\tau`$, whose penalty per subject is weaker, they kept $`\tau`$ inside the bound on the way and led 54 of these 3,546 voxels to lower local maxima, by up to 30.
 
+### Many sites: arrowhead layout
+
+Two site columns are never nonzero in the same row. With at least 8 site columns (`SITE_ARROW`), fixed or random, both fits therefore order the coefficients as the dense ones (intercepts, age splines, sex, covariates and shape) followed by the effects of every site, one for the location and one for the log scale with `--site-sd`. The Hessian then has an arrowhead form: a dense block, its coupling with the sites, and one block of size 1 or 2 per site.
+
+- **Assembly.** The Hessian is built from products of the dense columns and from sums per site, instead of products of all pairs of columns, whose number grows with the square of the number of sites.
+- **Linear algebra.** Solves, the modified Newton step (absolute eigenvalues of every site block and then of the Schur complement of the dense block) and the traces for the smoothing parameters go through the site blocks and the Schur complement. The full matrix is never formed.
+- **Results.** The fits agree with those of dense matrices within the convergence tolerance, with normal scores within 0.001.
+
+SHASH fits of 1,000 gray matter voxels of the 3,916 subjects of the [random-effects comparison](#random-site-effects), with its 20 sites and with the larger sites split into 57 and 104 groups, on four threads of an Apple M2:
+
+| Sites | Fixed effects, dense | Fixed effects, arrowhead | Random location, dense | Random location, arrowhead | Random location and scale, dense | Random location and scale, arrowhead |
+|---|---|---|---|---|---|---|
+| 1 | 1.7 s | | | | | |
+| 20 | 3.4 s | 2.3 s | 5.1 s | 4.7 s | 8.9 s | 8.2 s |
+| 57 | 6.7 s | 2.9 s | 29.3 s | 9.0 s | 70.6 s | 19.0 s |
+| 104 | 10.0 s | 3.5 s | 150.7 s | 13.5 s | 820 s | 32.5 s |
+
+Below 8 site columns the matrices are small, and the dense layout is kept.
+
 ### Age-dependent shape
 
 With `--shape-df k`, every voxel is first fitted with constant shape and then with $`\nu`$ and $`\log\, \tau`$ as natural splines of age with $`k`$ degrees of freedom, starting from the constant fit. A voxel keeps the age-dependent shape if the Bayesian information criterion prefers it,
@@ -197,6 +216,40 @@ Choosing the df per component did not beat one setting for all components. The t
 | Error ratio, former 5 and 3 df | 1.45 | 1.49 |
 | Error ratio, chosen df | 1.23 | 1.23 |
 
+### Penalized splines
+
+`--penalized` replaces the choice of one df per sample by penalized splines whose smoothness is estimated for every voxel and every component score. The natural spline bases of age get 10 df for $`\mu`$ and 6 for $`\sigma`$ (`--df-mu`, `--df-sigma` set other sizes), and the penalized log-likelihood is
+
+```math
+\ell_p = \ell - \frac{\lambda_\mu}{2} \boldsymbol\beta^\top \mathbf{S}_\mu \boldsymbol\beta - \frac{\lambda_\sigma}{2} \boldsymbol\theta^\top \mathbf{S}_\sigma \boldsymbol\theta,
+```
+
+where $`\boldsymbol\beta^\top \mathbf{S} \boldsymbol\beta`$ is the integrated squared second derivative of the curve. It is computed exactly: the curves are linear outside the boundary knots, and their second derivatives are piecewise linear between the knots. The linear term is not penalized, so $`\lambda \to \infty`$ gives a straight line.
+
+- **Smoothing parameters.** They are estimated by the extended Fellner–Schall method (Wood and Fasiolo, 2017), a fixed-point update that increases the Laplace approximation of the restricted likelihood (REML), as `method = "REML"` in mgcv:
+
+  ```math
+  \lambda_j \leftarrow \frac{\operatorname{rank}(\mathbf{S}_j) - \lambda_j \operatorname{tr}(\mathbf{H}_p^{-1} \mathbf{S}_j)}{\boldsymbol\beta^\top \mathbf{S}_j \boldsymbol\beta},
+  ```
+
+  with the negative Hessian $`\mathbf{H}_p`$ of $`\ell_p`$: the expected information in the normal fits and the Newton Hessian in SHASH and GG. The normal fits update $`\lambda`$ after every RS iteration. SHASH and GG start from the values of the normal fit and update them only when the Newton steps have converged for the current values; updates after every Newton step oscillated between nearly linear and very flexible curves. A voxel has converged when the effective df of its curves change by less than 0.01. $`\lambda`$ stays within $`10^{\pm 6}`$ times the information per unit of penalty, where the curves are practically free or straight; a wider range made the joint Hessian of SHASH ill-conditioned.
+- **Effective df.** Every fit stores $`\lambda`$ (`sp`) and the effective df of every penalized term (`edf`), the number of its coefficients minus $`\lambda_j \operatorname{tr}(\mathbf{H}_p^{-1} \mathbf{S}_j)`$.
+- **Use.** No df search is needed, for the z-maps, the component scores of NormBrainAGE and BrainLOSS alike.
+
+The comparison used 5-fold cross-validation of 1,000 random voxels or vertices, with the df of the default chosen again within every training fold, as on new data. Differences in held-out log-likelihood per subject, penalized minus chosen df, in thousandths of a nat:
+
+| Data | Chosen df | Effective df of SHASH, $`\mu`$ and $`\sigma`$ | Normal, mean | Normal, median over voxels | SHASH, mean | SHASH, median over voxels |
+|---|---|---|---|---|---|---|
+| Lifespan gray matter 8 mm | 2 and 2 | 2.2, 1.8 | +0.14 | −0.01 | +0.19 | −0.04 |
+| Lifespan white matter 8 mm | 2 and 1 | 2.7, 1.6 | −0.31 | −0.11 | +1.34 | +0.10 |
+| NKI-Rockland gray matter 8 mm, 6–85 years | 3 and 1 or 2 | 4.0, 1.8 | +0.76 | +0.18 | +0.84 | +0.19 |
+| NKI-Rockland thickness | 3 or 4 and 2 | 4.5, 1.9 | +0.22 | −0.12 | +0.18 | −0.22 |
+
+- **Fit.** The differences are small. About half of the voxels gained, and the median over voxels was near 0. The penalized curves were better at the ends of the age range of white matter (+3.8 and +6.6 for the youngest and oldest 5% with SHASH) and in the children of NKI-Rockland (+1.3 to +1.9), and worse for the oldest 5% of the thickness data (−5.4).
+- **Time.** Over the five folds, the penalized fits took 6 to 22 s, the choice of the df and the fits 23 to 54 s.
+- **Brain age.** In 10-fold cross-validation of NormBrainAGE, penalized splines were less accurate than the df chosen for the error of the brain age, by 0.07 to 0.17 years: a mean absolute error of 5.17 instead of 5.09 years in gray matter and 5.91 instead of 5.74 in white matter of the lifespan sample, and 4.03 instead of 3.96 in gray matter of NKI-Rockland. REML fits every component score as well as possible, while the choice of the df optimizes the brain age itself.
+- **Default.** It stays the choice of one df per sample, which was as good for the z-maps on average, better for brain age and simpler to report. `--penalized` is an option for z-maps of samples whose voxels need different flexibility.
+
 ### Boundary knots
 
 The boundary knots of all splines lie at the 5th and 95th percentiles of the training values, and the inner knots at equally spaced quantiles between them. For 3 to 5 df, these are the default knots of restricted cubic splines (Harrell, 2015). The splines are linear below and above the boundary knots. Earlier versions placed the boundary knots at the youngest and the oldest age. Such knots depend on single subjects, and the curves are least certain near them. In the lifespan sample, whose oldest subject is 97 years old, the standard error of $`\mu`$ at the oldest age was 3.9, 5.9 and 6.3 times that at the median age with 2, 3 and 12 df. Boundary knots at the percentiles reduced it by 11%, 19% and 41%.
@@ -240,6 +293,25 @@ The comparisons in this section used models of the 2,241 lifespan subjects (CamC
 - **Size.** The sites differ in their standard deviation by only a few percent. The error of an estimated site effect costs about $`1/(2 n_c)`$ nats per subject of a site with $`n_c`$ training subjects, so the effects pay off only for large sites. With the scanners of IXI and OASIS-3 as sites, the small groups lost more than they gained.
 - **New samples.** In the four samples below, the option changed the mean absolute error of brain age by at most 0.12 years and left the z-maps unchanged.
 - **Default.** It is off. It may help with a few large sites that differ in noise, and with image quality measures in the log scale, see below.
+
+### Random site effects
+
+`--site-random` makes the site effects of the location, and with `--site-sd` of the log scale, random: every site gets its own effect, and a normal prior with a variance estimated for every voxel, by the same Fellner–Schall update as for [penalized splines](#penalized-splines), shrinks the effects of small sites toward the mean. This is the random intercept of Brain Charts and of hierarchical normative models. New data are predicted at the population mean, with the site effects at 0, instead of the size-weighted mean of the fixed effects; the adaptation to a new site with its controls is unchanged.
+
+The comparison used gray matter at 8 mm, 1,000 random voxels and 5-fold cross-validation stratified by site, so every site was in the training and the test folds. The df were chosen once with fixed site effects and used for all variants. Two samples had sites of very different sizes: the 437 subjects of ABIDE (10–18 years) from 13 sites of 11 to 88 subjects, and 3,916 subjects (6–97 years) from 20 sites of 11 to 1,238 subjects (CamCAN, IXI split into its three scanners, OASIS-3, SALD, the 13 ABIDE sites and NKI-Rockland). Differences in held-out log-likelihood per subject relative to fixed site effects on the location, in thousandths of a nat:
+
+| Sample and family | Random location | Sites of at most 30 subjects | Larger sites | Fixed effects also on the log scale (`--site-sd`) | Random effects on both |
+|---|---|---|---|---|---|
+| ABIDE, normal | +7.9 | +14.6 | +4.4 | −35.6 | +3.1 |
+| ABIDE, SHASH | +29.8 | +68.2 | +10.1 | −72.2 | +24.5 |
+| 20 sites, normal | +0.7 | +12.8 | +0.2 | −0.4 | +3.9 |
+| 20 sites, SHASH | +65.3 | +1,603 | +4.9 | −131.1 | +69.0 |
+
+- **Small sites.** Random effects helped mostly the small sites, in 93% to 96% of the voxels. With fixed effects, the SHASH fits of the smallest sites failed badly for held-out subjects of these sites, by 1.6 nats per subject in the 20-site sample.
+- **Scale.** Fixed site effects on the log scale hurt small sites a lot. As random effects, they never did worse than fixed location effects alone; they added to random location effects in the 20-site sample (+3.9 instead of +0.7 with the normal family) but not in ABIDE (+3.1 instead of +7.9).
+- **New sites.** Leaving every site out in turn and predicting it without adaptation, random effects did better for 70% to 77% of the sites. On average they gained +4.9 (normal) and +6.5 (SHASH) in ABIDE and lost −2.9 and −5.3 in the 20-site sample, where the population mean is further from some large sites than the size-weighted mean. New sites should be adapted with their controls in any case.
+- **Time.** The variances need more iterations: the fits took 2.4 to 5.6 times as long as with fixed effects, and up to 14 times with random effects on both parameters. With many sites, the arrowhead layout keeps this manageable, see [Many sites](#many-sites-arrowhead-layout).
+- **Default.** Fixed effects stay the default for samples of a few large sites, where random effects change little. Use `--site-random` for training samples with small sites.
 
 ### Image quality measures
 
@@ -480,9 +552,9 @@ The evidence comes from ADNI, with CAT12 r1840 data of 835 subjects and models t
 NeuroGAMLSS takes from gamlss and gamlss.dist the SHASHo2 and GG families, the RS algorithm, the autostep and the Q statistics and worm plots. It differs in four ways:
 
 - **Vectorized fitting.** All voxels are fitted at once by batched linear algebra rather than one model at a time.
-- **Fixed smoothness.** Age enters through natural splines with fixed degrees of freedom and boundary knots at the 5th and 95th percentiles instead of penalized splines with automatic smoothing, such as `pb()` in gamlss.
+- **Smoothness.** By default, age enters through natural splines with degrees of freedom chosen per sample and boundary knots at the 5th and 95th percentiles. `--penalized` uses penalized splines with REML smoothing per voxel instead, similar to `pb()` in gamlss.
 - **Newton steps.** The shape models use Newton steps on all coefficients with exact SHASH derivatives, rather than the RS or CG algorithms of gamlss.
-- **Fewer features.** Random effects, other families such as BCT or BCPE, and model selection by generalized AIC beyond the BIC choice of age-dependent shape are not implemented.
+- **Fewer features.** Random intercepts of the sites are available (`--site-random`). Other random effects, other families such as BCT or BCPE, and model selection by generalized AIC beyond the BIC choice of age-dependent shape are not implemented.
 
 PCNtoolkit offers warped Bayesian linear regression (Fraza et al., 2021) and hierarchical Bayesian regression with a SHASH likelihood (de Boer et al., 2024). The latter found SHASH equal to or slightly better than warped regression for most measures.
 
@@ -502,3 +574,4 @@ PCNtoolkit offers warped Bayesian linear regression (Fraza et al., 2021) and hie
 - Rigby, R.A., Stasinopoulos, D.M., Heller, G.Z., De Bastiani, F., 2019. Distributions for Modeling Location, Scale, and Shape: Using GAMLSS in R. Chapman and Hall/CRC, Boca Raton.
 - Royston, P., Wright, E.M., 2000. Goodness-of-fit statistics for age-specific reference intervals. Statistics in Medicine 19, 2943–2962.
 - van Buuren, S., Fredriks, M., 2001. Worm plot: a simple diagnostic device for modelling growth reference curves. Statistics in Medicine 20, 1259–1277.
+- Wood, S.N., Fasiolo, M., 2017. A generalized Fellner-Schall method for smoothing parameter optimization with application to Tweedie location, scale and shape models. Biometrics 73, 1071–1081.

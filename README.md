@@ -8,9 +8,9 @@ Vectorized GAMLSS normative models for voxel- and vertex-wise brain MRI, with z-
 NeuroGAMLSS fits a generalized additive model for location, scale and shape (GAMLSS) to every voxel or vertex of a reference sample at once. Each model describes how a brain measure is distributed as a function of age, sex, scanner site and optional covariates such as image quality measures. New subjects then get deviation maps (z-maps) at their chronological age. NormBrainAGE, the brain-age module, uses the same kind of models in the opposite direction: it estimates the age at which a subject's data are most likely.
 
 - **Distribution families:** sinh-arcsinh (SHASH, the default) for skewed or heavy-tailed voxel data, normal for near-Gaussian data, and generalized gamma (GG) as in Brain Charts for positive data.
-- **Age curves:** natural cubic splines for location and scale, whose flexibility is chosen for each training sample by cross-validation. The shape is constant or, where BIC prefers it, also a function of age.
+- **Age curves:** natural cubic splines for location and scale, whose flexibility is chosen for each training sample by cross-validation or, with `--penalized`, penalized splines whose smoothness is estimated for every voxel. The shape is constant or, where BIC prefers it, also a function of age.
 - **Speed:** all voxels are fitted together, in parallel threads. SHASH models for 30,000 voxels and 2,241 subjects take about half a minute on a laptop, including the choice of the df.
-- **Sites and covariates:** sites enter the mean, and optionally the standard deviation, as fixed effects, and new sites are adapted with their control subjects. Covariates such as image quality measures can enter the mean and the standard deviation.
+- **Sites and covariates:** sites enter the mean, and optionally the standard deviation, as fixed effects or, with `--site-random`, as random effects, and new sites are adapted with their control subjects. Covariates such as image quality measures can enter the mean and the standard deviation.
 - **Diagnostics:** Q statistics and worm plots by age group show how well the models fit.
 - **Saved models:** fitted models are stored as `.mat` or `.npz` files with a JSON description, so new data can be scored without the training data.
 - **NormBrainAGE:** maximum-likelihood brain age with a standard error, regional brain ages for the brain lobes and a deviation score that aging does not explain. With `--brainloss`, also BrainLOSS, the tissue loss that the brain age does not explain, and BrainLOSS_age, the total tissue loss at chronological age.
@@ -155,6 +155,8 @@ python neurogamlss.py --train s4rp1_8mm_A_CAT12.9.mat s4rp2_8mm_A_CAT12.9.mat \
 
 In the example data, the choice took 20 to 80 s for each kind of model and picked 2 or 3 df for location and 1 or 2 for scale, stiffer than the former fixed 5 and 3. On an independent sample, this made brain age more accurate and its standard errors better calibrated. `--df-mu` and `--df-sigma` set fixed df instead. The chosen df are stored in the model file, its JSON description and all output files. With `--kfold`, the df are chosen once on all subjects before the folds, so the cross-validated errors are slightly optimistic (in simulations by about 2% of the MAE at 150 subjects and 0.8% at 400). The GPR trend correction and the ensemble weights of every fold are estimated on the other folds.
 
+**Penalized splines.** `--penalized` replaces the choice of the df by penalized splines: the age splines of location and scale get 10 and 6 df (`--df-mu` and `--df-sigma` set other sizes), and a penalty on the curvature with a smoothing parameter estimated for every voxel, vertex and component score by REML (the extended Fellner–Schall method of mgcv) sets their flexibility. No df search is needed, and the fits store the smoothing parameters and the effective df of every curve. In cross-validation on four data sets, they fit about as well as the chosen df: SHASH models gained 0.2 to 1.3 thousandths of a nat per subject on average, but the median over voxels was near 0, and about half of the voxels did worse. They did better at the ends of the age range and in children, and worse for the oldest subjects of the thickness data. For brain age they were 0.07 to 0.17 years less accurate, because the choice of the df optimizes the brain age directly. Details are in [docs/models.md](docs/models.md#penalized-splines).
+
 **Boundary knots.** The splines of age and of the covariates are linear below the 5th and above the 95th percentile of the training values, as restricted cubic splines. Single very young or very old subjects therefore do not bend the curves. In the example data, this improved the fit of the oldest 5% of the subjects and reduced the standard error of the location curve at the oldest age by 11% to 41%, depending on the df. The mean absolute error of brain age rose by 0.01 to 0.03 years. Details are in [docs/models.md](docs/models.md#boundary-knots).
 
 **Age-dependent shape.** By default, the shape parameters are constant for each voxel. `--shape-df 3` also fits ν and τ as natural splines of age and keeps them for a voxel only where the Bayesian information criterion (BIC) prefers them. In the example data, BIC chose age-dependent shape for about 8% of the voxels, and fitting took about twice as long. Use it where the diagnostics show that the shape misfit depends on age.
@@ -180,7 +182,7 @@ With thousands of training subjects, the Q statistics detect even small misfit. 
 
 ## New sites and covariates
 
-**Training sites.** Files joined with `+` are sites, which enter the location as fixed effects. Without adaptation, z-scores refer to the size-weighted average of the training sites. With `--site-sd`, the sites also enter the log standard deviation. A site with more or less noise then no longer bends the standard deviation curve in the age range it covers, and the reference is the size-weighted average of the site effects on both parameters. In the lifespan sample, this improved the fit only slightly and only with large sites, so it is off by default, see [Sites and image quality](docs/models.md#sites-and-image-quality).
+**Training sites.** Files joined with `+` are sites, which enter the location as fixed effects. Without adaptation, z-scores refer to the size-weighted average of the training sites. With `--site-sd`, the sites also enter the log standard deviation. A site with more or less noise then no longer bends the standard deviation curve in the age range it covers, and the reference is the size-weighted average of the site effects on both parameters. In the lifespan sample, this improved the fit only slightly and only with large sites, so it is off by default, see [Sites and image quality](docs/models.md#sites-and-image-quality). `--site-random` makes the site effects random, with a variance estimated for every voxel, as in Brain Charts: the effects of small sites are shrunk toward the mean, and new data refer to the population mean instead of the size-weighted average. In cross-validation with 13 and 20 sites of 11 to 1,238 subjects, this helped subjects of sites with up to 30 subjects a lot, especially with SHASH, and changed little for large sites. With `--site-sd`, the effects on the log scale are random as well, which no longer hurts small sites. See [Random site effects](docs/models.md#random-site-effects).
 
 **New sites.** `--adjust` lists the healthy control subjects of the test sample as 1-based indices, for example `1:108,150,160:170`. For every voxel, the z-scores of the controls are then rescaled to mean 0 and standard deviation 1. This is the location and scale step of ComBat without empirical Bayes shrinkage. The controls' own z-maps are adapted leave-one-out, with the mean and SD of the other controls, so that they are on the same out-of-sample footing as the patients' (`--controls-in-sample` restores the former in-sample adaptation, under which the controls have fewer extreme values than new subjects). After adaptation, compare patients with the controls: the error of the estimated site offset is shared by all patients, so tests of patients against 0 are anti-conservative unless there are many more controls than patients. `--correction` chooses how brain age uses the controls:
 
@@ -306,7 +308,8 @@ python mat2image.py adni_gm4_zmaps_s4rp1_4mm_ADNI_CAT12.9.mat --subjects 1:10 --
 | `--shape-df` | 0 | spline degrees of freedom of the shape parameters, chosen by BIC per voxel |
 | `--tau-max` | 2 | upper bound of the SHASH tail parameter τ |
 | `--shape-prior` | 1 | standard deviation of the priors on the shape parameters |
-| `--df-mu`, `--df-sigma` | `auto` | spline degrees of freedom of age for location and scale, chosen by cross-validation or given as numbers |
+| `--df-mu`, `--df-sigma` | `auto` | spline degrees of freedom of age for location and scale, chosen by cross-validation or given as numbers; with `--penalized` the basis size |
+| `--penalized` | off | penalized splines of age, with the smoothness estimated for every voxel or vertex (and component score) instead of the cross-validated df |
 | `--mask-threshold` | 0.05 or 5% | voxels and vertices that are modelled: their training mean must reach this value or this percentage of the median mean; 0 for all |
 | `--diagnostics` | off | Q statistics and worm plots of the training fit |
 | `--adjust` | | 1-based indices of the test controls |
@@ -317,6 +320,7 @@ python mat2image.py adni_gm4_zmaps_s4rp1_4mm_ADNI_CAT12.9.mat --subjects 1:10 --
 | `--train-cov`, `--test-cov` | | covariate tables |
 | `--cov-mean`, `--cov-sd`, `--cov-df` | all, none, 1 | covariates in the mean and in the log SD, and their spline degrees of freedom |
 | `--site-sd` | off | the training sites also enter the log SD |
+| `--site-random` | off | the training sites are random effects, with a variance estimated for every voxel or vertex (and component score) |
 | `--test-nuisance`, `--nuisance-cols`, `--nuisance-df` | off, all, 1 | nuisance variables of the test subjects, such as IQMs, whose effects are estimated in the controls and removed from the test data |
 | `--parcellation` | off | lobe-wise brain age and lobe-wise mean z |
 | `--pca` | 100 | NormBrainAGE only: principal components per model and region, 0 for every voxel |
@@ -360,12 +364,30 @@ Times for fitting to 2,241 training subjects on an Apple M2 laptop, with four th
 
 The normal fits pool subjects with the same age, sex and site, which helps where ages are given in whole years and no continuous covariates are used. Three of the four training samples here give whole years. The SHASH fits use modified Newton steps where the Hessian is indefinite, which made them 2.6 to 3.5 times faster on these data than the outer product of the scores used before ([docs/models.md](docs/models.md#shash-and-gg-penalized-newton-steps)). Memory is bounded by processing the voxels in chunks.
 
-The automatic choice of the df adds the following times for gray matter. Fixed df given with `--df-mu` and `--df-sigma` skip it.
+The automatic choice of the df adds the following times for gray matter. Fixed df given with `--df-mu` and `--df-sigma` skip it, and so do penalized splines (`--penalized`).
 
 | Choice of the df | 8 mm | 4 mm |
 |---|---|---|
 | z-map models | 10 s | 10 s |
 | brain age models | 9 s | 19 s |
+
+### Methods for speed
+
+- vectorized fits of all voxels with batched linear algebra
+- parallel threads over chunks of voxels (`--jobs`)
+- cells: subjects with the same design rows pooled into sufficient statistics
+- active set: converged voxels leave the batch
+- Newton steps with exact SHASH derivatives
+- trial steps evaluated with their derivatives
+- modified Newton steps with absolute eigenvalues where the Hessian is indefinite
+- Newton steps across the bound of τ with its penalty
+- backtracking by quadratic interpolation
+- few exponentials and logarithms in the SHASH density, constant shape as one value per voxel
+- arrowhead layout for many sites: sums per site and a Schur complement
+- smoothing parameters by the extended Fellner–Schall update, without a search
+- low-rank residual correlation from the smaller of the two cross-product matrices
+- principal components from the Gram matrix
+- brain-age likelihood on the age grid by matrix products
 
 ## Tests
 
@@ -374,12 +396,12 @@ pip install -e ".[all,test]"
 python -m pytest
 ```
 
-The tests use simulated data. They check the SHASH derivatives, the GG density and normal scores, parameter recovery, the τ bound, the convergence of strongly skewed fits, the BIC choice of age-dependent shape, the calibration of the Q statistics, the boundary knots of the splines, the choice of the df, the mask, site effects on the scale, the nuisance correction of test data, saving and loading of all families in both formats, the command line, and the images of `mat2image.py`.
+The tests use simulated data. They check the SHASH derivatives, the GG density and normal scores, parameter recovery, the τ bound, the convergence of strongly skewed fits, penalized splines and random site effects, the arrowhead layout for many sites, the BIC choice of age-dependent shape, the calibration of the Q statistics, the boundary knots of the splines, the choice of the df, the mask, site effects on the scale, the nuisance correction of test data, saving and loading of all families in both formats, the command line, and the images of `mat2image.py`.
 
 ## Limitations
 
 - **Independent voxels.** Every voxel is fitted on its own, without spatial smoothing of the parameters.
-- **Fixed site effects.** Sites are fixed effects of the location and, with `--site-sd`, of the scale. Many small sites would be better served by random effects, which are not implemented.
+- **Site effects.** By default, sites are fixed effects of the location and, with `--site-sd`, of the scale. `--site-random` makes them random effects, which helps sites with few subjects; it does not replace the adaptation of new sites with their controls.
 - **Non-converged fits.** Without the mask, 0.3% of the SHASH fits of gray matter and 0.4% of white matter at 8 mm did not converge, all in near-empty voxels. With the default mask, all voxels of the lifespan sample converged, at 8 and at 4 mm. Such fits keep the best parameters found and are flagged in `converged`.
 - **Bounded data.** Gray and white matter densities are bounded by 0 and 1. SHASH describes the resulting skewness well but is not bounded itself.
 
