@@ -1,5 +1,6 @@
 """Tests of NeuroGAMLSS on synthetic data: python -m pytest tests"""
 import os
+import re
 import sys
 
 import numpy as np
@@ -247,6 +248,18 @@ def test_command_line(tmp_path):
     NG.main(['--normative-only', '--model', model, '--test', files['TE'], '--adjust', '1:100',
              '--out', out])
     assert os.path.isfile(out + '_zmaps_s4rp1_8mm_TE_CAT12.9.mat')
+
+
+def test_readme_options_exist():
+    """Every option in the table of README.md exists (the table lists the most important
+    ones, --help all of them)."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, 'README.md')) as f:
+        table = f.read().split('## Command-line options')[1].split('\n## ')[0]
+    documented = set(re.findall(r'`(--[a-z][a-z0-9-]*)', table))
+    assert len(documented) > 30
+    assert documented <= set(NG._parser()._option_string_actions), \
+        documented - set(NG._parser()._option_string_actions)
 
 
 def test_convergence_saved(tmp_path):
@@ -719,6 +732,39 @@ def test_random_site_effects():
     mu_new = m.mu_sigma(age[:5], male[:5])[0]
     Xn, _ = m._design(age[:5], male[:5])
     assert np.allclose(Xn[:, -12:], 0) and np.allclose(mu_new, Xn @ m.beta)
+
+
+def test_cross_layouts_agree():
+    """_Cross gives the same diagonals, solves and traces in the dense and in the
+    arrowhead layout: site effects in two of three blocks (random effects), a smoothing
+    penalty of dense coefficients, a prior and an extra term in the third block."""
+    rng = np.random.default_rng(5)
+    n, L, m = 400, 9, 6
+    code = rng.permutation(np.arange(n) % L)
+    S = (code[:, None] == np.arange(L)).astype(float)
+    x = rng.normal(size=(n, 3))
+    one = np.ones((n, 1))
+    designs = [np.hstack([one, x, S]), np.hstack([one, x[:, :1], S]), one]
+    k0, k = 4 + L, 4 + L + 2 + L + 1
+    sites = dict(code=code, cols={0: np.arange(4, 4 + L), 1: np.arange(2, 2 + L)})
+    curv = np.array([[1., -1, 0], [-1, 2, -1], [0, -1, 1]])
+    pens = [(np.arange(1, 4), curv), (np.arange(4, 4 + L), np.eye(L)),
+            (k0 + np.arange(2, 2 + L), np.eye(L))]
+    G = rng.normal(size=(n, m, 3, 3))           # negative definite second derivatives
+    d2 = -(G @ G.transpose(0, 1, 3, 2) + 0.1 * np.eye(3))
+    V = {(i, j): d2[:, :, i, j] for i in range(3) for j in range(i, 3)}
+    sp, prior = rng.uniform(0.5, 2, (3, m)), np.r_[np.zeros(k - 1), 1.0]
+    g, extra = rng.normal(size=(k, m)), rng.uniform(1, 2, (m, 1, 1))
+    out = []
+    for c in (NG._Cross(designs, pens), NG._Cross(designs, pens, sites)):
+        H = c.assemble(V, m)
+        A = c.system(c.negative(H, prior), sp, positive=True)
+        x = c.solve(A, g)
+        np.testing.assert_allclose(c.solve(A[[1, 4]], g[:, [1, 4]]), x[:, [1, 4]], rtol=1e-12)
+        out.append((c.diag(H), x, c.solve(A, g, extra, 2), c.traces(A)))
+    assert isinstance(H, NG._Arrow)
+    for dense, arrow in zip(*out):
+        np.testing.assert_allclose(arrow, dense, rtol=1e-8, atol=1e-12)
 
 
 @pytest.mark.parametrize("family", ['normal', 'shash'])
