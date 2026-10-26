@@ -1122,3 +1122,209 @@ def test_controls_zmaps_leave_one_out():
     assert np.allclose(np.mean(zin[ctrl][:, v], axis=0), 0, atol=1e-5)
     assert np.allclose(np.std(zin[ctrl][:, v], axis=0, ddof=1), 1, atol=1e-4)
     assert not np.allclose(np.mean(z[ctrl][:, v], axis=0), 0, atol=1e-3)
+
+
+def test_site_adaptation():
+    """One site: mean and SD of the controls; several: offsets shrunk toward the mean of
+    all controls, less for sites with more controls, the mean for sites without."""
+    rng = np.random.default_rng(1)
+    W = rng.standard_normal((40, 6))
+    W[3, 2] = np.nan
+    o, r, lam = NG.site_adaptation(W, np.zeros(40, int), 1)
+    assert np.allclose(o[0], np.nanmean(W, axis=0)) and not lam.any()
+    assert np.allclose(r, np.nanstd(W, axis=0, ddof=1))
+    code = np.repeat(np.arange(4), [3, 10, 40, 150])
+    W = rng.normal(0, 0.5, (4, 300))[code] + rng.standard_normal((code.size, 300))
+    o, r, lam = NG.site_adaptation(W, code, 5)              # site 4 has no controls
+    assert np.all(np.diff(np.median(lam[:4], axis=1)) > 0) and np.median(lam[3]) > 0.9
+    assert not lam[4].any() and np.allclose(o[4], W.mean(axis=0))
+    assert abs(np.median(r) - 1) < 0.05
+    lam0 = NG.site_adaptation(rng.standard_normal((code.size, 300)), code, 4)[2]
+    assert np.median(lam0[0]) < 0.1                         # no site effects: the mean
+
+
+def simulate_test_sites(shift=(0.0, 0.5, -0.3), n_site=100, p=40):
+    """Normal models of a training sample and a test sample of sites whose data are
+    shifted by shift."""
+    d = simulate_brain(n=600 + n_site * len(shift), p=p, seed=34)
+    site = np.repeat(np.arange(len(shift)), n_site)
+    te = d.subset(np.arange(600, d.n))
+    te = replace(te, Y=(te.Y + np.asarray(shift)[site][:, None]).astype(np.float32),
+                 site=site, site_names=('A', 'B', 'C'))
+    vm = NG.VoxelModel(df_mu=3, df_sigma=2, family='normal').fit(d.subset(np.arange(600)))
+    return vm, te, site
+
+
+def test_zmaps_of_several_test_sites():
+    vm, te, site = simulate_test_sites()
+    ctrl = np.concatenate([np.flatnonzero(site == s)[:40] for s in range(3)])
+    pat = np.setdiff1d(np.arange(te.n), ctrl)
+    out = vm.zmaps(te, ctrl)
+    z, z1 = out['Z'], vm.zmaps(replace(te, site=np.zeros(te.n, int)), ctrl)['Z']
+    mean = lambda Z, s: np.nanmean(Z[pat][site[pat] == s])   # noqa: E731
+    assert max(abs(mean(z, s)) for s in range(3)) < 0.15      # site offsets removed
+    assert mean(z1, 1) > 0.5 and mean(z1, 2) < -0.4          # one site keeps them
+    assert list(out['site_names']) == ['A', 'B', 'C'] and np.all(out['site'] == site + 1)
+    assert list(out['site_controls']) == [40, 40, 40] and np.all(out['site_shrinkage'] > 0.5)
+    for i in (0, 45, 119):        # leave-one-out: adapted to the other controls
+        zi = vm.zmaps(te, ctrl[ctrl != i])['Z']
+        assert np.allclose(z[i], zi[i], atol=1e-5, equal_nan=True)
+    zin = vm.zmaps(te, ctrl, loo_controls=False)['Z']
+    assert np.allclose(z[pat], zin[pat], equal_nan=True)
+    out = vm.zmaps(te, ctrl[site[ctrl] < 2])                  # site C without controls
+    assert out['site_controls'][2] == 0
+    assert np.isfinite(out['Z'][np.ix_(site == 2, vm.model.valid)]).all()
+
+
+def test_nuisance_within_sites():
+    """With several sites, the nuisance effects are estimated within the sites, and the
+    site offsets are kept for the adaptation; across sites, the effect of a quality
+    measure that differs between the sites is confounded with the site offset."""
+    rng = np.random.default_rng(35)
+    n, p = 400, 30
+    site = np.arange(n) % 2
+    age = rng.uniform(20, 80, n)
+    q = rng.standard_normal(n) + 2 * site
+    Y = ((1 - 0.01 * (age - 20))[:, None] - 0.2 * q[:, None] * rng.uniform(0.5, 1.5, p)
+         + 0.8 * site[:, None] + 0.1 * rng.standard_normal((n, p)))
+    d = NG.Data(Y.astype(np.float32), age, np.zeros(n), site, 'sim_8mm_T.mat', res='8')
+    out = NG.remove_nuisance(d, q[:, None], np.arange(n), names=['q'])[0]
+    e_site, e_q = effects(out.Y, age, site, q)[1:]
+    assert np.all(np.abs(e_q) < 0.03) and abs(e_site.mean() - 0.8) < 0.05
+    pooled = NG.remove_nuisance(replace(d, site=np.zeros(n, int)), q[:, None], np.arange(n))[0]
+    assert effects(pooled.Y, age, site, q)[2].mean() < -0.15   # within-site effect left
+    with pytest.raises(ValueError):                           # site indicators: not nuisance
+        NG.remove_nuisance(d, site[:, None].astype(float), np.arange(n))
+
+
+def test_correct_age_per_site():
+    rng = np.random.default_rng(36)
+    n = 300
+    age, site = rng.uniform(20, 80, n), np.arange(n) % 3
+    pred = age + np.array([2.0, -3.0, 5.0])[site] + 0.1 * (age - 50) + rng.standard_normal(n)
+    ctrl = np.flatnonzero(site < 2)                           # site 2 has no controls
+    ba = NG.correct_age(pred, age, ctrl, 'offset', site) - age
+    for s in (0, 1):
+        assert abs(np.median(ba[ctrl][site[ctrl] == s])) < 1e-9
+    assert np.allclose(ba[site == 2], (pred - age)[site == 2] - np.median((pred - age)[ctrl]))
+    bt = NG.correct_age(pred, age, ctrl, 'trend', site) - age
+    assert abs(np.corrcoef(bt[ctrl], age[ctrl])[0, 1]) < 1e-6
+    assert all(abs(bt[ctrl][site[ctrl] == s].mean()) < 1e-6 for s in (0, 1))
+    for method in ('offset', 'trend'):                        # one site: as before
+        assert np.array_equal(NG.correct_age(pred, age, ctrl, method, np.zeros(n)),
+                              NG.correct_age(pred, age, ctrl, method))
+    one = np.arange(3)            # one control per site: the slope comes from across the sites
+    ba, ba1 = pred - age, NG.correct_age(pred, age, one, 'trend', site) - age
+    b = np.polyfit(age[one], ba[one], 1)[0]
+    assert np.allclose(ba1, ba - b * age - (ba[one] - b * age[one])[site])
+
+
+def test_brain_age_adapted_per_site():
+    d = simulate_brain(n=300, p=60)
+    est = NG.NDMBrainAge(df_mu=3, df_sigma=2, pca=10, mask_threshold=0).fit(
+        d.subset(np.arange(200)))
+    te = d.subset(np.arange(200, 300))
+    ctrl = np.arange(40)
+    a = est.copy().adapt(te.subset(ctrl)).predict(te)['age']
+    b = est.predict_sites(est.adapt_sites(te.subset(ctrl), 1), te)['age']
+    assert np.allclose(a, b)                                  # one site: adapt
+    te = replace(te, site=np.arange(100) % 2,
+                 Y=te.Y + np.where(np.arange(100) % 2, 0.5, 0)[:, None].astype(np.float32))
+    for agefree in (False, True):
+        out = est.predict_sites(est.adapt_sites(te.subset(ctrl), 2, agefree), te)
+        assert np.isfinite(out['age']).all() and out['at_bound'].dtype == bool
+        ba = out['age'] - te.age
+        assert abs(np.median(ba[te.site == 1]) - np.median(ba[te.site == 0])) < 2
+
+
+def test_command_line_test_sites(tmp_path):
+    """'+'-joined test files and --test-site adapt every test site with its controls."""
+    import glob
+    from scipy.io import loadmat
+    d = simulate_brain(n=420, p=60)
+    Y = np.abs(d.Y) + 0.5
+    Y[360:] += 0.4                                           # the second test site
+
+    def write(name, sel):
+        path = str(tmp_path / f's4rp1_8mm_{name}_CAT12.9.mat')
+        savemat(path, dict(Y=Y[sel].astype(np.float32), age=d.age[sel][:, None],
+                           male=d.male[sel][:, None]))
+        return path
+    tr, a, b = write('TR', slice(0, 300)), write('A', slice(300, 360)), write('B', slice(360, 420))
+    ab = write('AB', slice(300, 420))
+    labels = str(tmp_path / 'sites.txt')
+    np.savetxt(labels, np.repeat(['UM_1', 'NYU'], 60), fmt='%s')
+    base = ['--normative-only', '--family', 'normal', '--df-mu', '3', '--df-sigma', '2',
+            '--train', tr, '--adjust', '1:30,61:90']
+    z = {}
+    for key, test in (('plus', [a + '+' + b]), ('file', [ab, '--test-site', labels]),
+                      ('one', [ab])):
+        NG.main(base + ['--test'] + test + ['--out', str(tmp_path / key)])
+        f = glob.glob(str(tmp_path / f'{key}_zmaps_*.mat'))[0]
+        z[key] = loadmat(f, squeeze_me=True, struct_as_record=False)['NDMzmap']
+    assert np.allclose(z['plus'].Z, z['file'].Z, atol=1e-5, equal_nan=True)
+    assert list(z['file'].site_names) == ['NYU', 'UM_1']
+    assert list(z['plus'].site_names) == ['A_CAT12.9', 'B_CAT12.9']
+    assert 'site' not in z['one']._fieldnames
+    pat = np.r_[30:60, 90:120]
+    diff = lambda Z: np.nanmean(Z[pat[30:]]) - np.nanmean(Z[pat[:30]])   # noqa: E731
+    assert abs(diff(z['plus'].Z)) < 0.2 and diff(z['one'].Z) > 0.5
+    out = str(tmp_path / 'ba')
+    for corr in ('offset', 'adapt', 'agefree', 'trend'):
+        NG.main(['--train', tr, '--test', a + '+' + b, '--adjust', '1:30,61:90', '--pca', '5',
+                 '--df-mu', '3', '--df-sigma', '2', '--no-gpr', '--correction', corr,
+                 '--zmaps', '--out', out])
+        r = loadmat(out + '.mat', squeeze_me=True, struct_as_record=False)['NDM']
+        assert list(r.site_controls) == [30, 30] and np.isfinite(r.BrainAGE).all()
+        if corr == 'offset':      # every site: median BrainAGE of its controls 0
+            c = r.ind_control - 1
+            for s in (1, 2):
+                assert abs(np.median(r.BrainAGE[c[r.site[c] == s]])) < 1e-6
+    header = open(out + '.csv').readline().split(',')
+    assert header[:4] == ['subject', 'age', 'male', 'site']
+    with pytest.raises(SystemExit):                          # one label per test subject
+        np.savetxt(labels, np.repeat(['A', 'B'], 50), fmt='%s')
+        NG.main(base + ['--test', ab, '--test-site', labels, '--out', str(tmp_path / 'x')])
+
+
+def test_read_sites(tmp_path):
+    path = tmp_path / 'sites.txt'
+    path.write_text('10\n2\n1\n2\n')
+    code, names = NG.read_sites(str(path), 4)
+    assert list(code) == [2, 1, 0, 1] and names == ('1', '2', '10')   # numerical order
+    for text in ('NYU\nNA\nUM_1\nNYU\n', '1\nnan\n2\n1\n', 'NYU\n""\nUM_1\nNYU\n'):
+        path.write_text(text)
+        with pytest.raises(ValueError):                       # missing labels
+            NG.read_sites(str(path), 4)
+    with pytest.raises(ValueError):
+        NG.read_sites(str(path), 5)
+
+
+def test_sites_of_several_models(tmp_path):
+    """The test inputs of several models share the sites of those joined with '+'; they
+    must split the subjects in the same way.  Without controls, the sites are recorded
+    but not adapted."""
+    from scipy.io import loadmat
+    d = simulate_brain(n=420, p=60)
+    Y = {1: np.abs(d.Y) + 0.5, 2: np.abs(d.Y[:, ::-1]) + 0.5}
+    Y[1][360:] += 0.4
+
+    def write(t, name, sel):
+        path = str(tmp_path / f's4rp{t}_8mm_{name}_CAT12.9.mat')
+        savemat(path, dict(Y=Y[t][sel].astype(np.float32), age=d.age[sel][:, None],
+                           male=d.male[sel][:, None]))
+        return path
+    tr = [write(t, 'TR', slice(0, 300)) for t in (1, 2)]
+    ab = write(1, 'AB', slice(300, 420))
+    a, b = write(2, 'A', slice(300, 360)), write(2, 'B', slice(360, 420))
+    c, e = write(2, 'C', slice(300, 330)), write(2, 'D', slice(330, 420))
+    base = ['--train', *tr, '--pca', '5', '--df-mu', '3', '--df-sigma', '2', '--no-gpr']
+    out = str(tmp_path / 'r')
+    NG.main(base + ['--test', ab, a + '+' + b, '--adjust', '1:30,61:90', '--out', out])
+    r = loadmat(out + '.mat', squeeze_me=True, struct_as_record=False)['NDM']
+    assert list(r.site_names) == ['A_CAT12.9', 'B_CAT12.9'] and list(r.site_controls) == [30, 30]
+    NG.main(base + ['--test', ab, a + '+' + b, '--out', out])          # no controls
+    r = loadmat(out + '.mat', squeeze_me=True, struct_as_record=False)['NDM']
+    assert 'site' in r._fieldnames and 'site_controls' not in r._fieldnames
+    with pytest.raises(SystemExit):                                   # other split
+        NG.main(base + ['--test', a + '+' + b, c + '+' + e, '--adjust', '1:30', '--out', out])
