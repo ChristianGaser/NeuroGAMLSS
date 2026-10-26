@@ -65,7 +65,7 @@ File names follow the BrainAGE convention, for example `s4rp1_8mm_IXI547_CAT12.9
 
 Files are combined in two ways:
 
-- **`+` joins sites.** Files joined with `+` are concatenated into one sample, and each file becomes one site, for example `--train A.mat+B.mat+C.mat`.
+- **`+` joins sites.** Files joined with `+` are concatenated into one sample, and each file becomes one site, for example `--train A.mat+B.mat+C.mat`. In `--test`, every file becomes a test site that is adapted with its own controls (see [Several test sites](#new-sites-and-covariates)).
 - **Spaces separate models.** Several files after `--train` or `--test`, separated by spaces, are different models of the same subjects, for example gray and white matter. NeuroGAMLSS stops with a hint if their subjects differ.
 
 ### Voxels and vertices that are modelled
@@ -194,6 +194,21 @@ With thousands of training subjects, the Q statistics detect even small misfit. 
 | `trend` | remove a linear trend of BrainAGE on age | adapted |
 | `none` | no correction | not adapted |
 
+**Several test sites.** A test sample often comes from several scanners, as in ABIDE or ADNI. Files joined with `+` in `--test` are its sites, and `--test-site` gives the site of every subject of a single file, one label per line, such as the scanner or the site ID. Every site is then adapted with its own controls among the `--adjust` subjects:
+
+- **z-maps.** Every site gets its own offset: the mean of its controls' z-scores, shrunk toward the mean of all controls as a random site intercept whose variance is estimated for every voxel. The fewer controls a site has and the smaller the differences between the sites, the closer its offset stays to the mean of all controls. All sites share one scale. BrainLOSS and the brain age models of `--correction adapt` and `agefree` are adapted in the same way.
+- **BrainAGE.** `offset` subtracts the median BrainAGE of the controls of every site, and `trend` fits a common slope with an intercept per site.
+- **Image quality.** `--test-nuisance` estimates the effects of the nuisance variables within the sites, so that they are not confounded with the differences between the sites, which the adaptation removes.
+- **Sites without controls.** Their subjects are adapted with the controls of all sites, and a note names them.
+- **Several models.** The test inputs of all models share the sites of the inputs joined with `+`, for example `--test gm.mat wm_A.mat+wm_B.mat`. Inputs joined in different ways must split the subjects into the same sites.
+
+A site is best defined as the scanner and protocol of a scan, not the study or the institution, and groups with the same scanner and protocol are best merged. In ABIDE, with 14 scanners of 5 to 52 controls, the adaptation per site fitted the z-maps of held-out controls better than one site for the whole sample, although slightly more of their z-scores lay beyond ±2.58 (1.25% instead of 1.04%), because the offsets of small sites are uncertain. Separate runs per scanner, with a mean and SD per scanner, were the worst choice (3.05%). BrainAGE offsets per scanner lowered the mean absolute error from 3.71 to 3.32 years. See [Several test sites](docs/models.md#several-test-sites).
+
+```bash
+python neurogamlss.py --normative-only --model A_norm.npz --test s4rp1_8mm_B_CAT12.9.mat \
+    --test-site B_scanner.txt --adjust 1:108 --out B
+```
+
 **Covariates.** `--train-cov` and `--test-cov` give one table per sample with one row per subject, in the order of the mat-files. The tables are text files separated by commas, semicolons, tabs or spaces, with an optional header. Tables joined with `+` belong to samples joined with `+`. By default, every numeric column enters the mean. `--cov-mean` and `--cov-sd` choose the columns for the mean and for the log standard deviation, by name or number, and `--cov-df` uses natural splines instead of linear terms.
 
 ```bash
@@ -206,7 +221,7 @@ Covariates are centred at their training median, and z-scores condition on every
 
 **Image quality of the test data.** `--test-nuisance` gives a table of nuisance variables of the test subjects, such as image quality measures (IQMs), in the format of `--test-cov`. Their effects are estimated in the `--adjust` controls and removed from all test data before the models are applied. The models themselves are fitted without these variables. The output reports the share of the controls' variance removed in-sample, which is optimistic, and the 5-fold cross-fitted reduction of the variance of held-out controls (`nuisance_explained_crossfit`). A cross-fitted value at or below 0 means the correction adds as much variance to new subjects as it removes. A note warns when there are fewer than 10 controls per regression term.
 
-- **Regression.** Every voxel of the controls is regressed on the nuisance variables, age and sex. Age enters as a natural spline with up to 3 df, and not at all if the controls' ages span less than 5 years.
+- **Regression.** Every voxel of the controls is regressed on the nuisance variables, age, sex and, with several test sites, the sites. Age enters as a natural spline with up to 3 df, and not at all if the controls' ages span less than 5 years. Nuisance variables that do not vary within the sites are dropped.
 - **What is removed.** Only the nuisance part, relative to the controls' mean, is removed from every test subject. Effects of age and sex stay, and so do effects of a disease, because the controls have none.
 - **Options.** `--nuisance-cols` selects the columns, by default all numeric ones, and `--nuisance-df` uses natural splines instead of linear terms.
 - **Order.** The usual adaptation with the controls (`--correction`) follows.
@@ -253,14 +268,16 @@ When the training data are given, a Python replica of the GPR BrainAGE of the Br
 
 | File | Content |
 |---|---|
-| `<out>_zmaps_<model>.mat` | struct `NDMzmap`: `Z` (subjects × features), `converged`, `family`, `df_mu`, `df_sigma`, `mask_threshold`, `age`, `male`, `model`, `ind`, `dim`, and with `--parcellation` `regional_z`, `regions`, `region_names` |
-| `<out>.csv` | normative models only: mean z of each lobe for every subject (with `--parcellation`) |
-| `<out>.mat`, `<out>.csv` | brain age: struct `NDM`, including the df and the mask threshold of every model in `df_mu`, `df_sigma` and `mask_threshold`, and a table with BrainAGE, standard errors, deviations and, with `--brainloss`, BrainLOSS and BrainLOSS_age of every model and of the ensemble |
+| `<out>_zmaps_<model>.mat` | struct `NDMzmap`: `Z` (subjects × features), `converged`, `family`, `df_mu`, `df_sigma`, `mask_threshold`, `age`, `male`, `model`, `ind`, `dim`, with `--parcellation` `regional_z`, `regions`, `region_names`, and with several test sites `site`, `site_names`, `site_controls`, `site_shrinkage`, `site_offset_rms` |
+| `<out>.csv` | normative models only: mean z of each lobe for every subject (with `--parcellation`); with several test sites, a column `site` after age and sex |
+| `<out>.mat`, `<out>.csv` | brain age: struct `NDM`, including the df and the mask threshold of every model in `df_mu`, `df_sigma` and `mask_threshold`, and a table with BrainAGE, standard errors, deviations and, with `--brainloss`, BrainLOSS and BrainLOSS_age of every model and of the ensemble; with several test sites `site`, `site_names`, `site_controls`, `site_offset` and a column `site` in the table |
 | `<out>_diagnostics.csv` | summary of the diagnostics for every model |
 | `<out>_diagnostics_<model>.mat` | struct `NDMdiag`: `Q`, `p_Q` and `df_Q` (4 × features: mean, variance, skewness, kurtosis), `converged`, `age_groups`, `family`, `model`, `df_mu`, `df_sigma`, `mask_threshold`, `ind`, `dim` |
 | `<out>_wormplot_<model>.png` | worm plots |
 
 `Z` has the same feature order as `Y` in the input file, so it maps back to the image or surface like the input data. Features without a model are NaN, such as voxels outside the mask. `converged` is 1 for voxels whose fit converged, 0 for the others and NaN without a model. The z-scores of non-converged voxels are kept by default. Non-convergence mostly marks heavy-tailed, strongly skewed voxels on the flat nu/tau ridge of the SHASH likelihood, where the z-scores hardly depend on the position along the ridge (on simulated data, at most 0.16 change in z after ten times more iterations). Use `--mask-nonconverged` to set them to NaN, which also removes them from `regional_z`, or apply `converged` as a mask in later analyses. `ind` and `dim` are copied from the input file: the vertex index and the number of vertices of surface data, and the volume dimensions of volume data.
+
+With several test sites, `site` gives the site of every subject as a 1-based index into `site_names`, and `site_controls` the number of controls of every site. In `NDM`, `site_offset` is the median BrainAGE of the controls of every site and model before the correction. In `NDMzmap`, `site_shrinkage` is the median over voxels of the shrinkage factor of the offset of every site, from 0 for the mean of all controls to 1 for the mean of the site's own controls, and `site_offset_rms` is the RMS over voxels of the offset of every site from the mean of all controls, in units of z. Without `--adjust`, only `site` and `site_names` are written.
 
 ## Images of the maps
 
@@ -317,6 +334,7 @@ python mat2image.py adni_gm4_zmaps_s4rp1_4mm_ADNI_CAT12.9.mat --subjects 1:10 --
 | `--controls-in-sample` | off | adapt the controls' own z-maps with all controls instead of leave-one-out |
 | `--correction` | `offset` | use of the controls, see above |
 | `--test-male` | | text file with the sex of the test subjects, if the mat-files lack it |
+| `--test-site` | | text file with the site of every test subject, one label per line, instead of the sites of `+`-joined test files; every site is adapted with its own controls |
 | `--train-cov`, `--test-cov` | | covariate tables |
 | `--cov-mean`, `--cov-sd`, `--cov-df` | all, none, 1 | covariates in the mean and in the log SD, and their spline degrees of freedom |
 | `--site-sd` | off | the training sites also enter the log SD |
@@ -346,6 +364,8 @@ train = ng.load_data('s4rp1_8mm_A_CAT12.9.mat+s4rp1_8mm_B_CAT12.9.mat')
 vm = ng.VoxelModel(family='shash').fit(train)
 test = ng.load_data('s4rp1_8mm_C_CAT12.9.mat')
 z = vm.zmaps(test, ctrl=np.arange(50))['Z']     # adapted with the first 50 subjects
+test2 = ng.load_data('s4rp1_8mm_D_CAT12.9.mat+s4rp1_8mm_E_CAT12.9.mat')   # two test sites
+z2 = vm.zmaps(test2, ctrl=ctrl)['Z']            # every site adapted with its controls
 
 m = ng.NormativeModel(df_mu=5, df_sigma=3, family='shash').fit(Y, age, male, site)
 z = m.zscores(Y_new, age_new, male_new)          # columns m.valid of Y_new
@@ -396,12 +416,13 @@ pip install -e ".[all,test]"
 python -m pytest
 ```
 
-The tests use simulated data. They check the SHASH derivatives, the GG density and normal scores, parameter recovery, the τ bound, the convergence of strongly skewed fits, penalized splines and random site effects, the arrowhead layout for many sites, the BIC choice of age-dependent shape, the calibration of the Q statistics, the boundary knots of the splines, the choice of the df, the mask, site effects on the scale, the nuisance correction of test data, saving and loading of all families in both formats, the command line, and the images of `mat2image.py`.
+The tests use simulated data. They check the SHASH derivatives, the GG density and normal scores, parameter recovery, the τ bound, the convergence of strongly skewed fits, penalized splines and random site effects, the arrowhead layout for many sites, the BIC choice of age-dependent shape, the calibration of the Q statistics, the boundary knots of the splines, the choice of the df, the mask, site effects on the scale, the nuisance correction of test data, the adaptation of several test sites, saving and loading of all families in both formats, the command line, and the images of `mat2image.py`.
 
 ## Limitations
 
 - **Independent voxels.** Every voxel is fitted on its own, without spatial smoothing of the parameters.
 - **Site effects.** By default, sites are fixed effects of the location and, with `--site-sd`, of the scale. `--site-random` makes them random effects, which helps sites with few subjects; it does not replace the adaptation of new sites with their controls.
+- **Test sites.** Each test site needs controls. A site with only a few controls keeps part of its offset, because its offset is shrunk toward the mean of all controls, and the scale is common to all sites.
 - **Non-converged fits.** Without the mask, 0.3% of the SHASH fits of gray matter and 0.4% of white matter at 8 mm did not converge, all in near-empty voxels. With the default mask, all voxels of the lifespan sample converged, at 8 and at 4 mm. Such fits keep the best parameters found and are flagged in `converged`.
 - **Bounded data.** Gray and white matter densities are bounded by 0 and 1. SHASH describes the resulting skewness well but is not bounded itself.
 

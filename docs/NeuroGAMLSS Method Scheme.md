@@ -62,7 +62,7 @@ The z-maps answer the classical question of normative modeling. Every voxel or v
 ### Test subject
 
 4. Compute the normal score of every voxel at the chronological age, under the model of the subject's sex and covariates at the reference site, the size-weighted mean of the training sites.
-5. With controls of the test site (`--adjust`), the controls' z-scores of every voxel are shifted and scaled to mean 0 and SD 1, and all test subjects get the same shift and scale.
+5. With controls of the test site (`--adjust`), the controls' z-scores of every voxel are shifted and scaled to mean 0 and SD 1, and all test subjects get the same shift and scale. With several test sites, every site gets its own shift, the mean of its controls shrunk toward that of all controls, and all sites share one scale.
 6. With `--parcellation`, the z-map is also averaged within each lobe.
 
 In the code: `VoxelModel.fit`, `NormativeModel` with `family='shash'`, `VoxelModel.zmaps`.
@@ -131,7 +131,7 @@ With `--parcellation`, every lobe of the atlas becomes a part of its own, next t
 \mathrm{BrainLOSS}^{\mathrm{age}}_p = -\frac{\bar y_p - \mu_p(a)}{\sigma_p(a)}
 ```
 
-5. With controls of the test site, standardize both scores of every part to mean 0 and SD 1 in the controls.
+5. With controls of the test site, standardize both scores of every part to mean 0 and SD 1 in the controls. With several test sites, every site gets its own shift as in the z-maps.
 6. Positive values mean less tissue than expected for the brain age (BrainLOSS) or for the chronological age (BrainLOSS_age).
 
 Step 3 uses the brain age as estimated, before the site correction of BrainAGE. The standardization with the controls in step 5 then removes a shift that is common to the test site.
@@ -161,6 +161,8 @@ Files given separately on the command line, such as `gm.mat wm.mat`, are separat
 | BrainLOSS | whole brain and each lobe, at $`\hat a_m`$; BrainLOSS_age at the chronological age | both standardized to mean 0 and SD 1 | mean | `BrainLOSS_ensemble`, `BrainLOSS_regional_ensemble`, `BrainLOSS_age_ensemble`, `BrainLOSS_age_regional_ensemble` |
 | z-maps | one map per model | $`z`$ of every voxel set to mean 0 and SD 1 | not combined | `<out>_zmaps_<model>.mat` |
 
+With several test sites, the column of the controls applies to every site with its own controls: the median BrainAGE of the site's controls is subtracted, and BrainLOSS and the z-maps get the offset of the site, shrunk toward the mean of all controls, and a scale common to all sites. The sites are written to `site` and `site_names`.
+
 The GLS weights minimize the mean squared error of the combined brain age, under the constraint that they sum to one:
 
 ```math
@@ -179,6 +181,7 @@ In the code: `correct_age`, `ensemble_weights`, `_combine`, `_summarize`.
 - `--site-sd`: the training sites also enter $`\log \sigma`$ of all normative models.
 - `--train-cov`, `--test-cov`: covariates such as image quality measures enter $`\mu`$ and $`\log \sigma`$ of all normative models, and every subject is read at its own values.
 - `--test-nuisance`: nuisance effects are estimated in the controls and removed from the test data before brain age and BrainLOSS, and from the z-scores of the z-maps.
+- `--test-site`: the sites of a test sample from several scanners, as `+`-joined test files are. Every site is adapted with its own controls: shrunk shifts for the z-maps, the component scores (`adapt`, `agefree`) and BrainLOSS, and the median BrainAGE of its controls.
 - `--correction`: `adapt` rescales the normative models of the scores with the controls instead of subtracting an offset, `agefree` does so at the controls' estimated brain ages and then subtracts their median BrainAGE, `trend` removes a linear trend of BrainAGE on age, and `none` only estimates the ensemble weights.
 
 Built from `neurogamlss.py`, `NDM_methods.md` and `docs/models.md` as of 16 October 2026. Defaults shown: `--pca 100`, `--psi-min 0.01`, `--grid-step 0.25`, `--grid-margin 5`, `--df-mu auto`, `--df-sigma auto`, `--correction offset`, `--ensemble gls`, and `--family shash` for the z-maps. Figure 2 uses simulated values.

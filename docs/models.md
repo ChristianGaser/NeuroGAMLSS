@@ -277,6 +277,27 @@ The z-map of a test subject is its normal score $`\Phi^{-1}(F(y))`$ under the mo
 
 For a new site, the normal scores of its control subjects are standardized for every voxel. If $`o`$ and $`r`$ are their mean and standard deviation, every test subject's normal score becomes $`(z - o)/r`$. For the normal family, this equals the location and scale adaptation of ComBat without empirical Bayes shrinkage (Johnson et al., 2007; Fortin et al., 2018).
 
+A test sample from several sites, given as `+`-joined test files or with `--test-site`, gets an offset $`o_s`$ for every site $`s`$ and one scale $`r`$ for all sites, and a subject of site $`s`$ gets $`(z - o_s)/r`$. For every voxel, the controls' normal scores follow a one-way random-effects model: the mean $`m_s`$ of the $`n_s`$ controls of site $`s`$ is shrunk toward the mean $`m`$ of all $`n`$ controls,
+
+```math
+o_s = m + \lambda_s\, (m_s - m), \qquad \lambda_s = \frac{\tau^2}{\tau^2 + \sigma^2 / n_s},
+```
+
+where $`\sigma^2`$ is the variance within the sites and $`\tau^2`$ the variance between them. Both are estimated by the method of moments of the analysis of variance, with $`K`$ sites with controls:
+
+```math
+\sigma^2 = \frac{\sum_s \sum_{i \in s} (w_i - m_s)^2}{n - K}, \qquad
+\tau^2 = \max\left(0,\ \frac{\sum_s n_s (m_s - m)^2 - (K - 1)\, \sigma^2}{n - \sum_s n_s^2 / n}\right),
+```
+
+with $`w_i`$ the normal scores of the controls. Sites without controls get $`m`$. The scale is the standard deviation of the controls around the offsets of their sites,
+
+```math
+r^2 = \frac{\sum_i (w_i - o_{s_i})^2}{n - \mathrm{edf}}, \qquad \mathrm{edf} = 1 + \sum_s \lambda_s \left(1 - \frac{n_s}{n}\right),
+```
+
+where $`\mathrm{edf}`$, the trace of the fit of the offsets, lies between 1 for $`\lambda_s = 0`$ and $`K`$ for $`\lambda_s = 1`$. For one site, $`o_s`$ and $`r`$ are the mean and standard deviation of the controls. The controls' own z-maps are adapted leave-one-out in closed form: leaving out a control changes only the number, mean and sum of squares of its own site. BrainLOSS and the normative models of the component scores (`--correction adapt` and `agefree`) are adapted in the same way. BrainAGE is corrected with the median BrainAGE of the controls of every site (`offset`), or with a linear trend in age with a common slope and an intercept per site (`trend`), without shrinkage. The slope of the trend comes from the age differences within the sites, or from those across the sites if no site has controls of different ages. The sites of a test sample are those of `--test-site`, or else of the test files joined with `+`; with several models, all inputs share the sites of those joined with `+`, which must split the subjects in the same way.
+
 ## Sites and image quality
 
 The comparisons in this section used models of the 2,241 lifespan subjects (CamCAN, IXI, OASIS-3 and SALD), data smoothed with 6 mm unless stated otherwise, and [scripts/iqm_comparison.py](../scripts/iqm_comparison.py).
@@ -326,7 +347,7 @@ CAT12 rates every scan by quality measures (IQMs): noise (NCR), inhomogeneity (I
 y_{ij} = \alpha_j + f_j(a_i) + \beta_j s_i + \mathbf{h}(\mathbf{q}_i)^\top \boldsymbol\gamma_j + e_{ij}, \qquad i \in C .
 ```
 
-- **Terms.** $`\mathbf{h}`$ is linear, or a natural spline with `--nuisance-df`. Age has up to 3 df, one per 20 controls, and is left out if the controls' ages span less than 5 years. Sex is left out if the controls have only one.
+- **Terms.** $`\mathbf{h}`$ is linear, or a natural spline with `--nuisance-df`. Age has up to 3 df, one per 20 controls, and is left out if the controls' ages span less than 5 years. Sex is left out if the controls have only one. With several test sites, the regression also has an indicator of every site but one, so that $`\boldsymbol\gamma_j`$ comes from the variation within the sites. The site effects are not removed here but left to the adaptation, and nuisance variables that do not vary within any site are dropped.
 - **Brain age.** It uses the data $`y_{ij} - (\mathbf{h}(\mathbf{q}_i) - \bar{\mathbf{h}})^\top \hat{\boldsymbol\gamma}_j`$ of all test subjects, where $`\bar{\mathbf{h}}`$ is the mean over the controls.
 - **z-maps.** They are corrected on their own scale: the controls' normal scores are regressed on the same terms, and the nuisance part is subtracted from all normal scores before the adaptation with the controls. For the normal family, both corrections are nearly the same. For SHASH, a shift of the data is not a constant shift of the skewed normal score.
 - **Disease.** Effects of a disease are kept, because the controls have none. Estimated in all subjects instead, the IQM effects would absorb the part of a disease effect that goes along with worse image quality.
@@ -390,6 +411,47 @@ z-maps, with the share of $`|z| \gt 2.58`$ in the MR-ART scans without motion, w
 - **ComCat.** Evaluated on the harmonized scans themselves, it gave the most reproducible brain age and z-maps of the two single subjects and the most reproducible brain age in MR-ART. The z-maps of MR-ART and ON-Harmony became less reproducible than without correction. Two things contribute besides the IQMs. The scaling by the site variance shrinks all deviations around the fitted values: the share of extreme z in the scans without motion fell to 0.7%. And 35 to 70 spline terms adapt to the sample. With site variances from the residuals (`residual_delta`), the gains shrank. For held-out subjects, the z-maps of Buchert and MR-ART became less reproducible than without correction, and ON-Harmony failed. For the brain age of the two single subjects, ComCat remained better than `--test-nuisance` also for held-out scans.
 
 For z-maps, IQMs are best used on the test data with `--test-nuisance`. This needs enough controls with a spread of image quality: it worked with 74 subjects per half in MR-ART, but not with 5 in ON-Harmony. The controls should cover the image quality of the patients, whose values are otherwise extrapolated linearly. Few non-redundant ratings are safer than all seven. IQMs in the normative models should be a few ratings without the composites, and should stay out of the log scale if the test data may leave their training range.
+
+### Several test sites
+
+The test samples above were adapted as one site each. ABIDE (ABIDE437, 10 to 18 years) comes from 14 scanners, the `SITE_ID` of ABIDE with UM_1 and UM_2 apart, with 5 to 52 typically developing controls each. Models of NIH879 and NKIe2213 aged 5 to 30 years, of gray matter at 8 mm with 6 mm smoothing, were applied to it: SHASH z-maps and NormBrainAGE with the defaults. Every adaptation was estimated in some controls and evaluated in the others, in 5 folds stratified by scanner and 5 repetitions, with [scripts/test_sites_comparison.py](../scripts/test_sites_comparison.py). The table gives the held-out log density of the normal scores relative to one site for the whole sample, in thousandths of a nat per subject and voxel, and the share beyond ±2.58, which would be 1% for calibrated scores:
+
+| Adaptation | Log density | Beyond ±2.58 |
+|---|---|---|
+| One site for the whole sample | 0 | 1.04% |
+| Separate runs per scanner: mean and SD of its controls | −71.8 | 3.05% |
+| Fixed offsets per scanner, common SD | +16.8 | 1.43% |
+| Shrunk offsets, common scale with $`n - 1`$ degrees of freedom | +32.2 | 1.40% |
+| Shrunk offsets, common scale with $`n - \mathrm{edf}`$ degrees of freedom (default) | +33.8 | 1.25% |
+| One site, IQMs with `--test-nuisance` | +7.6 | 1.23% |
+| Shrunk offsets, IQMs within the scanners (`--test-nuisance` with test sites) | +22.0 | 1.51% |
+| Shrunk offsets, IQMs across the scanners | +25.2 | 1.37% |
+
+With fewer controls per scanner, the others held out (30 draws), relative to one site from the same controls, with the share beyond ±2.58 in parentheses:
+
+| Controls per scanner | Separate runs | Fixed offsets | Shrunk, $`n - 1`$ | Shrunk, $`n - \mathrm{edf}`$ (default) | One site |
+|---|---|---|---|---|---|
+| 3 | −10,004 (15.5%) | −118.6 (3.50%) | −35.6 (3.21%) | −9.8 (2.41%) | 0 (1.52%) |
+| 5 | −595.2 (7.92%) | −47.3 (2.42%) | +2.3 (2.26%) | +12.5 (1.83%) | 0 (1.32%) |
+| 8 | −252.4 (4.86%) | −10.0 (1.94%) | +18.6 (1.89%) | +24.0 (1.60%) | 0 (1.24%) |
+| 12 | −208.6 (3.53%) | +9.2 (1.74%) | +28.0 (1.73%) | +31.5 (1.51%) | 0 (1.23%) |
+
+- **One site.** Adapted as one site, the z-maps of held-out controls looked calibrated, but every scanner kept an offset of 0.22 to 0.55 standard deviations (RMS over voxels, after subtracting the sampling noise), which all its subjects share.
+- **Separate runs.** A mean and SD per scanner were the worst choice, because the SD from a few controls is too noisy: 3% of the held-out z-scores lay beyond ±2.58 with all controls, and 15% with 3 controls per scanner.
+- **Shrinkage.** Shrunk offsets did best with all controls and from 5 controls per scanner on, and lost little with 3. Fixed offsets needed about 10 controls per scanner to break even. The shrinkage factor $`\lambda_s`$ rose with the number of controls, from a median over voxels of 0.29 with 5 controls to 0.81 with 52.
+- **Scale.** With $`n - 1`$ degrees of freedom, the scale ignored the fit of the offsets and came out too small: 1.40% instead of 1.25% of the held-out z-scores lay beyond ±2.58, and 3.21% instead of 2.41% with 3 controls per scanner.
+- **Image quality.** Between 30% (NCR) and 69% (res_ECR) of the variance of the IQMs lay between the scanners. Without adaptation per scanner, the IQMs therefore partly stood in for the scanners (+7.6). With the scanners adapted, they cost 8 to 12 thousandths of a nat, whether their effects were estimated within or across the scanners. `--test-nuisance` estimates them within the sites, so that the differences between the scanners do not enter their effects, although across the scanners did slightly better here.
+- **BrainAGE.** The median BrainAGE of the controls ranged from −2.5 to +8.5 years between the scanners. Cross-fitted mean absolute errors of the controls in years, as `apply_models` reports them:
+
+| Correction | One site | Scanners as sites |
+|---|---|---|
+| `offset` | 3.71 | 3.32 |
+| `adapt` | 2.38 | 1.77 |
+| `trend` | 3.73 | 3.15 |
+
+Medians per scanner helped already with 3 controls per scanner, with a mean absolute error of 3.67 instead of 3.80 years, and more with 12, with 3.04 instead of 3.72 years. BrainAGE offsets shrunk like those of the z-maps did worse than the medians, with 3.76 and 3.26 years, probably because a few scanners have much larger offsets than the others. BrainAGE offsets are therefore not shrunk.
+
+A site is best defined as the scanner and protocol of a scan, not the study or the institution. Groups with the same scanner and protocol are best merged, and every site needs controls. Samples with many small sites of a few controls each were not tested. There, coarser sites such as scanner models may do better than sites whose offsets stay close to the mean of all controls.
 
 ## Diagnostics
 

@@ -569,7 +569,7 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
     <h3>Test subject</h3>
     <ol class="steps" start="4">
       <li>Compute the normal score of every voxel at the chronological age, under the model of the subject's sex and covariates at the reference site, the size-weighted mean of the training sites.</li>
-      <li>With controls of the test site (<code>--adjust</code>), the controls' z-scores of every voxel are shifted and scaled to mean 0 and SD 1, and all test subjects get the same shift and scale.</li>
+      <li>With controls of the test site (<code>--adjust</code>), the controls' z-scores of every voxel are shifted and scaled to mean 0 and SD 1, and all test subjects get the same shift and scale. With several test sites, every site gets its own shift, the mean of its controls shrunk toward that of all controls, and all sites share one scale.</li>
       <li>With <code>--parcellation</code>, the z-map is also averaged within each lobe.</li>
     </ol>
     <p class="code">In the code: <code>VoxelModel.fit</code>, <code>NormativeModel</code> with <code>family='shash'</code>, <code>VoxelModel.zmaps</code>.</p>
@@ -891,7 +891,7 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
     </ol>
     <p class="display">BrainLOSS<sub><i>p</i></sub><sup>age</sup> = −(<i>ȳ</i><sub><i>p</i></sub> − <i>μ</i><sub><i>p</i></sub>(<i>a</i>)) / <i>σ</i><sub><i>p</i></sub>(<i>a</i>)</p>
     <ol class="steps" start="5">
-      <li>With controls of the test site, standardize both scores of every part to mean 0 and SD 1 in the controls.</li>
+      <li>With controls of the test site, standardize both scores of every part to mean 0 and SD 1 in the controls. With several test sites, every site gets its own shift as in the z-maps.</li>
       <li>Positive values mean less tissue than expected for the brain age (BrainLOSS) or for the chronological age (BrainLOSS_age).</li>
     </ol>
     <p class="note">Step 3 uses the brain age as estimated, before the site correction of BrainAGE. The standardization with the controls in step 5 then removes a shift that is common to the test site.</p>
@@ -926,7 +926,8 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
     </table>
   </div>
   <div class="prose">
-    <p style="margin-top: 18px">The GLS weights minimize the mean squared error of the combined brain age, under the constraint that they sum to one:</p>
+    <p style="margin-top: 18px">With several test sites, the column of the controls applies to every site with its own controls: the median BrainAGE of the site's controls is subtracted, and BrainLOSS and the z-maps get the offset of the site, shrunk toward the mean of all controls, and a scale common to all sites. The sites are written to <code>site</code> and <code>site_names</code>.</p>
+    <p>The GLS weights minimize the mean squared error of the combined brain age, under the constraint that they sum to one:</p>
     <p class="display"><b>w</b> = <b>C</b><sup>−1</sup><b>1</b> / (<b>1</b><sup>T</sup><b>C</b><sup>−1</sup><b>1</b>),  <i>C</i><sub><i>mm′</i></sub> = (1/<i>n</i><sub>c</sub>) Σ<sub><i>i</i></sub> <i>e</i><sub><i>im</i></sub> <i>e</i><sub><i>im′</i></sub></p>
     <p>Here <span class="math"><i>e</i><sub><i>im</i></sub></span> is the BrainAGE of control <span class="math"><i>i</i></span> in model <span class="math"><i>m</i></span>. The weights account for the correlation of the errors between models and can be negative. They come from the controls given with <code>--adjust</code>. Without controls, all test subjects with a known age are used, and with <code>--kfold</code> all subjects.</p>
     <p class="code">In the code: <code>correct_age</code>, <code>ensemble_weights</code>, <code>_combine</code>, <code>_summarize</code>.</p>
@@ -943,6 +944,7 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
     <dt>--site-sd</dt><dd>The training sites also enter log <span class="math"><i>σ</i></span> of all normative models.</dd>
     <dt>--train-cov, --test-cov</dt><dd>Covariates such as image quality measures enter <span class="math"><i>μ</i></span> and log <span class="math"><i>σ</i></span> of all normative models, and every subject is read at its own values.</dd>
     <dt>--test-nuisance</dt><dd>Nuisance effects are estimated in the controls and removed from the test data before brain age and BrainLOSS, and from the z-scores of the z-maps.</dd>
+    <dt>--test-site</dt><dd>The sites of a test sample from several scanners, as <code>+</code>-joined test files are. Every site is adapted with its own controls: shrunk shifts for the z-maps, the component scores (<code>adapt</code>, <code>agefree</code>) and BrainLOSS, and the median BrainAGE of its controls.</dd>
     <dt>--correction</dt><dd><code>adapt</code> rescales the normative models of the scores with the controls instead of subtracting an offset, <code>agefree</code> does so at the controls' estimated brain ages and then subtracts their median BrainAGE, <code>trend</code> removes a linear trend of BrainAGE on age, and <code>none</code> only estimates the ensemble weights.</dd>
   </dl>
 </section>
