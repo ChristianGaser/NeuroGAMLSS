@@ -34,10 +34,12 @@ the RS algorithm of GAMLSS (ported from ComBatLS); shash and gg start from it an
 are refined by damped Newton steps with exact (shash) or numerical (gg)
 derivatives and step halving, in chunks of voxels/vertices that run in parallel
 threads (--jobs).  Test subjects get z-maps (normal scores) at chronological age,
-adapted to a new site with its control subjects (--adjust).  Effects of nuisance
-variables such as image quality measures can be estimated in these controls and
-removed from the test data first (--test-nuisance).  --diagnostics writes Q
-statistics and worm plots by age group of the training fit.
+adapted to a new site with its control subjects (--adjust).  Test data from several
+sites ('+'-joined test files or --test-site) are adapted per site, with the offsets
+of the sites shrunk toward the mean of all controls and a common scale.  Effects of
+nuisance variables such as image quality measures can be estimated in these
+controls and removed from the test data first (--test-nuisance).  --diagnostics
+writes Q statistics and worm plots by age group of the training fit.
 
 NormBrainAGE
 ------------
@@ -83,7 +85,8 @@ ind), named like s4rp1_8mm_<sample>_CAT12.9.mat.  --train and --test combine
 files in two ways:
 
   A.mat+B.mat+C.mat   '+' joins the files of several sites into one sample; every
-                      file becomes a site of the normative models
+                      file becomes a site of the normative models (--train) or a
+                      test site that is adapted with its own controls (--test)
   gm.mat wm.mat       spaces separate models of the same subjects, e.g. gray
                       (rp1) and white matter (rp2) or 4 and 8 mm; brain age
                       combines them, and --test needs one file per model in the
@@ -244,6 +247,7 @@ class Data:
     dim: np.ndarray | None = None  # volume dimensions stored in the mat-file
     C: np.ndarray | None = None    # (n_subjects, n_covariates) covariates
     cov_names: tuple = ()          # names of the columns of C
+    site_names: tuple = ()         # names of the site codes 0, 1, ... (default: the codes)
 
     @property
     def n(self):
@@ -326,17 +330,18 @@ def load_data(spec: str) -> Data:
     base = os.path.basename(parts[0])
     res = re.search(r'_(\d+)mm_', base)
     name = '+'.join(os.path.basename(p) for p in parts)
+    samples = tuple(re.sub(r'\.mat$', '', b[len(_model_key(b)):].lstrip('_') or b)
+                    for b in name.split('+'))
     age = np.concatenate(ages)
     bad = ~(np.isfinite(age) & (age > 0))
     if bad.any():                  # age 0 or NaN: unknown
         age[bad] = np.nan
-        sample = '+'.join(re.sub(r'\.mat$', '', b[len(_model_key(b)):].lstrip('_') or b)
-                          for b in name.split('+'))
-        _note(f"{sample}: {int(bad.sum())} subject(s) without a valid age (0 or NaN) are not "
-              "used for fitting, as controls or for evaluation; their BrainAGE and z-maps "
-              "are NaN.")
+        _note(f"{'+'.join(samples)}: {int(bad.sum())} subject(s) without a valid age (0 or "
+              "NaN) are not used for fitting, as controls or for evaluation; their BrainAGE "
+              "and z-maps are NaN.")
     return Data(np.vstack(Ys), age, np.concatenate(males), np.concatenate(sites), name,
-                ind, 'mesh' in base, res.group(1) if res else None, has_male, dim)
+                ind, 'mesh' in base, res.group(1) if res else None, has_male, dim,
+                site_names=samples)
 
 
 def read_table(spec):
@@ -1965,6 +1970,166 @@ class NormativeModel:
 
 
 # ---------------------------------------------------------------------------
+# Several sites of test data: shrunk offsets and a common scale
+# ---------------------------------------------------------------------------
+
+def site_codes(site, names=()):
+    """Codes 0..k-1 of the site labels of test subjects and the names of the k sites
+    (names[label] of Data.site_names, else the label)."""
+    levels, code = np.unique(np.asarray(site), return_inverse=True)
+    names = tuple(str(names[lv]) if 0 <= lv < len(names) else str(lv)
+                  for lv in levels.astype(np.int64))
+    return code.astype(np.int64), names
+
+
+def _site_sums(W, code, k):
+    """Number, mean and within-site sum of squares (k, p) of the finite values of W
+    (n, p) of every site code 0..k-1."""
+    fin = np.isfinite(W)
+    n, mean, ssw = (np.zeros((k, W.shape[1])) for _ in range(3))
+    for s in range(k):
+        rows = code == s
+        f, w = fin[rows], np.where(fin[rows], W[rows], 0.0)
+        n[s] = f.sum(axis=0)
+        mean[s] = w.sum(axis=0) / np.maximum(n[s], 1)
+        ssw[s] = np.where(f, (w - mean[s]) ** 2, 0.0).sum(axis=0)
+    return n, mean, ssw
+
+
+def _site_shrinkage(n, mean, ssw):
+    """Shrunk site offsets o (k, ...), common scale (...) and shrinkage factors lam
+    (k, ...) from the number n, mean and within-site sum of squares ssw (k, ...) of
+    the values of the controls of k sites (site_adaptation)."""
+    has = n > 0
+    N, K = n.sum(axis=0), has.sum(axis=0)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        m = np.where(has, n * mean, 0.0).sum(axis=0) / N
+        dev = np.where(has, mean - m, 0.0)
+        sig2 = np.where(N > K, ssw.sum(axis=0) / (N - K), np.nan)
+        tau2 = (((n * dev ** 2).sum(axis=0) - (K - 1) * sig2)
+                / (N - (n ** 2).sum(axis=0) / N))
+        tau2 = np.where((K > 1) & np.isfinite(tau2), np.maximum(tau2, 0.0), 0.0)
+        lam = tau2 / (tau2 + sig2 / n)
+        lam = np.where(has & np.isfinite(lam), lam, 0.0)
+        rss = ssw.sum(axis=0) + (n * (1 - lam) ** 2 * dev ** 2).sum(axis=0)
+        edf = 1 + (lam * (1 - n / N)).sum(axis=0)     # trace of the fit of the offsets
+        scale = np.sqrt(rss / (N - edf))
+    return m + lam * dev, scale, lam
+
+
+def site_adaptation(W, code, k):
+    """Adaptation to k test sites from the values W (n_c, p) of their controls, such as
+    their normal scores, at the site codes code (n_c,) in 0..k-1.
+
+    Every feature gets random site intercepts: the mean m_s of the n_s controls of a
+    site is shrunk toward the mean m of all controls,
+
+        o_s = m + lam_s (m_s - m),   lam_s = tau^2 / (tau^2 + sigma^2 / n_s),
+
+    with the within-site variance sigma^2 and the between-site variance tau^2 >= 0 of
+    the one-way analysis of variance (method of moments).  Sites without controls
+    get m.  The scale is common to all sites: the SD of the controls around the
+    offsets of their sites, with n_c - edf degrees of freedom, where edf = 1 +
+    sum_s lam_s (1 - n_s / n_c) is the trace of the fit of the offsets.  With one
+    site, o and the scale are the mean and SD of the controls (NormativeModel.adapt).
+    Returns o (k, p), the scale (p,) and lam (k, p).
+    """
+    o, scale, lam = _site_shrinkage(*_site_sums(np.asarray(W, dtype=np.float64), code, k))
+    o[~np.isfinite(o)] = 0
+    scale[~(np.isfinite(scale) & (scale > 0))] = 1
+    return o, scale, lam
+
+
+def _site_loo_scores(W, Z0, code, k, size=2_000_000):
+    """Leave-one-out scores of the controls of k sites: z_i = (Z0_i - o_-i) / r_-i,
+    where the offset of the site of control i and the common scale come from
+    site_adaptation of the other controls' values W (n_c, p).  Removing control i
+    changes the number, mean and within-site sum of squares of its site only, so all
+    other sites keep theirs (exact, in closed form).  NaN where fewer than two other
+    controls have a value.  Features are processed in chunks of about size values
+    per (k, controls of a site) array."""
+    W, Z0 = np.asarray(W, dtype=np.float64), np.asarray(Z0, dtype=np.float64)
+    n, mean, ssw = _site_sums(W, code, k)
+    out = np.full(W.shape, np.nan)
+    for s in range(k):
+        rows = np.flatnonzero(code == s)
+        if not rows.size:
+            continue
+        step = max(1, size // (k * rows.size))
+        for c0 in range(0, W.shape[1], step):
+            c = slice(c0, c0 + step)
+            f = np.isfinite(W[rows, c])
+            w = np.where(f, W[rows, c], 0.0)
+            n1 = n[s, c] - f
+            with np.errstate(invalid='ignore', divide='ignore'):
+                m1 = np.where(n1 > 0, (n[s, c] * mean[s, c] - w) / n1, 0.0)
+                ss1 = np.where(n1 > 0, ssw[s, c] - f * (w - mean[s, c]) ** 2 * n[s, c] / n1,
+                               0.0)
+            shape = (k, rows.size, n1.shape[1])
+            nn, mm, ss = (np.array(np.broadcast_to(a[:, None, c], shape))
+                          for a in (n, mean, ssw))
+            nn[s], mm[s], ss[s] = n1, m1, np.maximum(ss1, 0.0)
+            o, scale, _ = _site_shrinkage(nn, mm, ss)
+            o = np.where(np.isfinite(o[s]), o[s], 0.0)
+            scale = np.where(np.isfinite(scale) & (scale > 0), scale, 1.0)
+            ok = nn.sum(axis=0) >= 2
+            out[rows, c] = np.where(ok, (Z0[rows, c] - o) / scale, np.nan)
+    return out
+
+
+def _shared_sites(test):
+    """Test inputs of all models (Data) with the same sites: those of the inputs from
+    several sites, which must split the subjects in the same way, e.g. gm.mat with
+    A.mat+B.mat.  Unchanged if no input has several sites."""
+    multi = [d for d in test if np.unique(d.site).size > 1]
+    if not multi:
+        return test
+    ref = multi[0]
+    for d in multi[1:]:
+        pairs = set(zip(np.asarray(ref.site).tolist(), np.asarray(d.site).tolist()))
+        if not len(pairs) == np.unique(ref.site).size == np.unique(d.site).size:
+            raise ValueError(f"{d.name} and {ref.name} join different sites of the test "
+                             "subjects; give the sites with --test-site.")
+    return [replace(d, site=ref.site, site_names=ref.site_names) for d in test]
+
+
+def _site_folds(code, k, rng):
+    """Folds 0..k-1 of subjects with the site codes code, stratified by site: the
+    subjects of every site are spread evenly over the folds."""
+    order = np.concatenate([rng.permutation(np.flatnonzero(code == s))
+                            for s in np.unique(code)])
+    fold = np.empty(code.size, dtype=np.int64)
+    fold[order] = np.arange(code.size) % k
+    return fold
+
+
+def read_sites(path, n):
+    """Sites of n test subjects (--test-site): a text file with one label per line in
+    the order of the mat-files, text or numbers, without header.  Returns the codes
+    0..k-1 and the names of the sites, in numerical order if all labels are numbers."""
+    with open(os.path.expanduser(path)) as f:
+        labels = [ln.strip().strip('"\'') for ln in f
+                  if ln.strip() and not ln.lstrip().startswith('#')]
+    if len(labels) != n:
+        raise ValueError(f"--test-site has {len(labels)} labels for {n} test subjects (one "
+                         "per line, in the order of the mat-files, without header).")
+    missing = sum(lab.lower() in ('', 'nan', 'na') for lab in labels)
+    if missing:
+        raise ValueError(f"--test-site contains {missing} missing label(s) (empty, NaN or NA).")
+    try:
+        keys = [float(lab) for lab in labels]
+    except ValueError:
+        keys = labels
+    levels = sorted(set(keys))
+    index = {key: j for j, key in enumerate(levels)}
+    names = {}
+    for lab, key in zip(labels, keys):
+        names.setdefault(index[key], lab)
+    return (np.array([index[key] for key in keys], dtype=np.int64),
+            tuple(names[j] for j in range(len(levels))))
+
+
+# ---------------------------------------------------------------------------
 # NormBrainAGE: brain age from inverted normative models (NDMBrainAge)
 # ---------------------------------------------------------------------------
 
@@ -2598,6 +2763,40 @@ class NDMBrainAge:
                 prev = age
         return self
 
+    def adapt_sites(self, d: Data, k, agefree=False, n_iter=20, tol=0.01):
+        """Copies adapted to k test sites with the controls d, whose sites d.site are
+        codes 0..k-1: for every normative model, the offsets of the sites are shrunk
+        toward the mean of all controls and the scale is common (site_adaptation);
+        sites without controls get the mean.  agefree adapts at the controls'
+        estimated brain ages, alternating as adapt_agefree.  Returns a list of k
+        copies (predict_sites)."""
+        d = self._prep(d)
+        code = np.asarray(d.site)
+        ests = [self.copy() for _ in range(k)]
+        Cs = (lambda idx: None) if d.C is None else (lambda idx: d.C[idx])
+        for j, part in enumerate(self._models()):
+            F = part.model_input(d.Y)
+            X = part.features(d.Y) if agefree else None
+            raw = part.model.copy()
+            raw.offset[:], raw.scale[:] = 0, 1
+            copies = [e._models()[j] for e in ests]
+            age, prev = d.age, None
+            for _ in range(n_iter if agefree else 1):
+                if agefree:
+                    age = np.full(d.n, np.nan)
+                    for s, q in enumerate(copies):
+                        rows = np.flatnonzero(code == s)
+                        if rows.size:
+                            age[rows] = ests[s]._estimate(q, X[rows], d.male[rows],
+                                                          Cs(rows))[0]
+                o, scale, _ = site_adaptation(raw.zscores(F, age, d.male, C=d.C), code, k)
+                for s, q in enumerate(copies):
+                    q.model.offset, q.model.scale = o[s], scale.copy()
+                if prev is not None and np.max(np.abs(age - prev)) < tol:
+                    break
+                prev = age
+        return ests
+
     def _estimate(self, part, X, male, C=None, chunk=256):
         """Maximum likelihood age, Laplace SD and boundary flag for the features X
         of a part (C: covariates of the subjects)."""
@@ -2662,6 +2861,22 @@ class NDMBrainAge:
             if ok.size:
                 L[ok] = self._loss(raw.subset(ok), raw.age[ok])
             out['brainloss_age'], out['regional_brainloss_age'] = L[:, 0], L[:, 1:]
+        return out
+
+    @staticmethod
+    def predict_sites(ests, d: Data, chunk=256):
+        """predict of the subjects d with the estimator of their site, ests[d.site]
+        (adapt_sites)."""
+        out = {}
+        for s, est in enumerate(ests):
+            rows = np.flatnonzero(np.asarray(d.site) == s)
+            if not rows.size:
+                continue
+            for key, v in est.predict(d.subset(rows), chunk).items():
+                if key not in out:
+                    out[key] = (np.zeros((d.n,) + v.shape[1:], dtype=bool) if v.dtype == bool
+                                else np.full((d.n,) + v.shape[1:], np.nan))
+                out[key][rows] = v
         return out
 
     def get_state(self):
@@ -2757,15 +2972,21 @@ class VoxelModel:
 
         Given the indices ctrl of control subjects of d (and their ages ctrl_age,
         by default their chronological ages), a copy of the model is first
-        adapted to the site of d.  nuisance = dict(values (n, k), ctrl, df, names)
-        removes the effects of nuisance variables such as image quality measures on
-        the z-scores, estimated in the controls nuisance['ctrl'] as in
-        remove_nuisance (nuisance_design), before the adaptation.  Returns Z (n,
+        adapted to the site of d.  If d comes from several sites (d.site), every
+        site gets its own offset, shrunk toward the mean of all controls, and all
+        sites share one scale (site_adaptation).  nuisance = dict(values (n, k), ctrl,
+        df, names) removes the effects of nuisance variables such as image quality
+        measures on the z-scores, estimated in the controls nuisance['ctrl'] as in
+        remove_nuisance (nuisance_design, within the sites), before the adaptation.
+        Returns Z (n,
         n_features) as float32, with NaN for features without a model and for
         subjects without a valid age, the convergence of the fit per feature (1, 0
         or NaN without a model) and, with parcellation, the lobe-wise mean z (n,
         n_regions), the region labels and their names; with nuisance also the
-        median share of the variance of the controls' z-scores removed.
+        median share of the variance of the controls' z-scores removed.  With several
+        sites also the 1-based site of every subject, the site names, their numbers of
+        controls, the median over features of the shrinkage factor of their offsets
+        and the RMS over features of their offsets from the mean of all controls.
         mask_nonconverged sets the z-scores of features whose fit did not converge
         to NaN, so that they also drop out of the lobe-wise means.  Off by default:
         non-convergence mostly marks heavy-tailed, strongly skewed features on the
@@ -2781,11 +3002,13 @@ class VoxelModel:
         Y = d.Y if self.warper is None else self.warper.transform(d.Y)
         Cs = (lambda idx: None) if d.C is None else (lambda idx: d.C[idx])
         model = self.model.copy()
+        code, site_names = site_codes(d.site, d.site_names)
+        sites = code if len(site_names) > 1 else None          # several test sites
         N = G = None
         if nuisance is not None:
             nc = np.asarray(nuisance['ctrl'])
             N, P, _, _ = nuisance_design(nuisance['values'], d.age, d.male, nc,
-                                         nuisance.get('df', 1), nuisance.get('names'))
+                                         nuisance.get('df', 1), nuisance.get('names'), sites)
             raw = self.model.copy()
             raw.offset[:], raw.scale[:] = 0, 1
             Zc = raw.zscores(Y[nc], d.age[nc], d.male[nc], C=Cs(nc))
@@ -2793,14 +3016,23 @@ class VoxelModel:
             G = np.zeros((N.shape[1], Zc.shape[1]))
             G[:, fin] = P @ Zc[:, fin]
             folds = _nuisance_folds(nuisance['values'], d.age, d.male, nc,
-                                    nuisance.get('df', 1), nuisance.get('names'))
+                                    nuisance.get('df', 1), nuisance.get('names'), site=sites)
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', RuntimeWarning)
                 explained = float(np.nanmedian(np.var(N[nc] @ G, axis=0)[fin]
                                                / np.var(Zc[:, fin], axis=0)))
                 explained_cv = (float(np.nanmedian(_crossfit_share(Zc[:, fin], folds)))
                                 if folds and fin.any() else np.nan)
-        if ctrl is not None:
+        O = None                       # offsets of several sites (k, p_valid)
+        if ctrl is not None and sites is not None:
+            ctrl = np.asarray(ctrl)
+            model.offset[:], model.scale[:] = 0, 1
+            W = model.zscores(Y[ctrl], d.age[ctrl] if ctrl_age is None else ctrl_age,
+                              d.male[ctrl], C=Cs(ctrl))
+            if G is not None:
+                W = W - N[ctrl] @ G
+            O, r, lam = site_adaptation(W, code[ctrl], len(site_names))
+        elif ctrl is not None:
             model.adapt(Y[ctrl], d.age[ctrl] if ctrl_age is None else ctrl_age,
                         d.male[ctrl], C=Cs(ctrl), shift=None if G is None else N[ctrl] @ G)
         Z = np.full(d.Y.shape, np.nan, dtype=np.float32)
@@ -2808,11 +3040,13 @@ class VoxelModel:
         for c0 in range(0, ok.size, chunk):
             sub = ok[c0:c0 + chunk]
             z = model.zscores(Y[sub], d.age[sub], d.male[sub], C=Cs(sub))
-            if G is not None:                  # (z - nuisance - offset) / scale
+            if O is not None:                  # (z - nuisance - offset of the site) / scale
+                z = (z - (0 if G is None else N[sub] @ G) - O[code[sub]]) / r
+            elif G is not None:                # (z - nuisance - offset) / scale
                 z = z - (N[sub] @ G) / model.scale
             Z[np.ix_(sub, model.valid)] = z
         if ctrl is not None and loo_controls:
-            self._loo_controls(Z, model, Y, d, np.asarray(ctrl), ctrl_age, Cs, N, G)
+            self._loo_controls(Z, model, Y, d, np.asarray(ctrl), ctrl_age, Cs, N, G, sites)
         if mask_nonconverged:
             nc = model.valid[~np.asarray(model.converged, dtype=bool)]
             Z[:, nc] = np.nan
@@ -2823,6 +3057,14 @@ class VoxelModel:
         if G is not None:
             out['nuisance_explained'] = explained
             out['nuisance_explained_crossfit'] = explained_cv
+        if O is not None:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                dev = O - np.nanmean(W, axis=0)
+                out.update(site=code + 1, site_names=np.array(site_names, dtype=object),
+                           site_controls=np.bincount(code[ctrl], minlength=len(site_names)),
+                           site_shrinkage=np.median(lam, axis=1),
+                           site_offset_rms=np.sqrt(np.nanmean(dev ** 2, axis=1)))
         if parcellation:
             atlas, regions, names = lobe_atlas(d, atlas_dir)
             with warnings.catch_warnings():
@@ -2834,10 +3076,13 @@ class VoxelModel:
         return out
 
 
-    def _loo_controls(self, Z, model, Y, d, ctrl, ctrl_age, Cs, N, G):
+    def _loo_controls(self, Z, model, Y, d, ctrl, ctrl_age, Cs, N, G, sites=None):
         """Replace the z-scores of the controls ctrl in Z by leave-one-out adapted ones:
         z_i = (w_i - o_-i) / s_-i, with o_-i and s_-i the mean and SD (ddof=1) of the
-        other controls' unadapted values w (minus the nuisance part), in closed form."""
+        other controls' unadapted values w (minus the nuisance part), in closed form.
+        With the site codes sites of several test sites, o_-i is the shrunk offset of
+        the site of control i and s_-i the common scale, both without control i
+        (_site_loo_scores)."""
         raw = self.model.copy()
         raw.offset[:], raw.scale[:] = 0, 1
         a = d.age[ctrl] if ctrl_age is None else np.asarray(ctrl_age)
@@ -2845,6 +3090,13 @@ class VoxelModel:
         Z0 = raw.zscores(Y[ctrl], d.age[ctrl], d.male[ctrl], C=Cs(ctrl))  # at true age
         if G is not None:
             W, Z0 = W - N[ctrl] @ G, Z0 - N[ctrl] @ G
+        rows = np.isfinite(d.age[ctrl]) & (d.age[ctrl] > 0)
+        if sites is not None:
+            new = _site_loo_scores(W, Z0, sites[ctrl], int(sites.max()) + 1)
+            cur = Z[np.ix_(ctrl, model.valid)]
+            new = np.where(np.isfinite(new), new, cur)   # too few others: keep in-sample
+            Z[np.ix_(ctrl[rows], model.valid)] = new[rows]
+            return
         fin = np.isfinite(W)
         m = fin.sum(axis=0)                            # controls per feature
         Wf = np.where(fin, W, 0.0)
@@ -2857,8 +3109,8 @@ class VoxelModel:
         o[~np.isfinite(o)] = 0
         cur = Z[np.ix_(ctrl, model.valid)]
         new = np.where(m_i >= 2, (Z0 - o) / sd, cur)    # too few others: keep in-sample
-        rows = np.isfinite(d.age[ctrl]) & (d.age[ctrl] > 0)
         Z[np.ix_(ctrl[rows], model.valid)] = new[rows]
+
     def get_state(self):
         return dict(df_mu=self.df_mu, df_sigma=self.df_sigma, cov=asdict(self.cov),
                     site_sd=bool(self.site_sd), penalized=bool(self.penalized),
@@ -3494,21 +3746,48 @@ def gpr_baseline(Y_train, age_train, Y_test, mean_hyp=100.0, lik_hyp=-1.0):
     return mean_hyp + Mte @ Mtr.T @ alpha
 
 
-def correct_age(pred, age, ctrl, method):
+def correct_age(pred, age, ctrl, method, site=None):
     """Predicted age (n,) or (n, k) corrected with the control subjects ctrl (indices).
 
     'offset' subtracts the median BrainAGE of the controls (the offset-only
     correction of BA_gpr_ui.m), 'trend' subtracts a linear trend of BrainAGE on
     age estimated on the controls (trend_method = 1, trend_degree = 1),
     'none' returns the estimate unchanged.  Columns are corrected separately.
+    With the sites site (n,) of several test sites, every site subtracts the median
+    of its own controls ('offset'), and the trend has a common slope and an intercept
+    per site ('trend'); the slope comes from the age differences within the sites, or
+    across them if no site has controls of different ages.  Sites without controls
+    use all controls.
     """
     P = np.array(pred, dtype=np.float64).reshape(len(age), -1)
     ba = P - age[:, None]
-    if method == 'offset':
+    ctrl = np.asarray(ctrl)
+    levels, code = (None, None) if site is None else np.unique(site, return_inverse=True)
+    if levels is not None and levels.size < 2:
+        code = None
+    if method == 'offset' and code is None:
         P -= np.nanmedian(ba[ctrl], axis=0)
-    elif method == 'trend':
+    elif method == 'offset':
+        pooled = np.nanmedian(ba[ctrl], axis=0)
+        for s in range(levels.size):
+            c = ctrl[code[ctrl] == s]
+            P[code == s] -= np.nanmedian(ba[c], axis=0) if c.size else pooled
+    elif method == 'trend' and code is None:
         for j in range(P.shape[1]):
             P[:, j] -= np.polyval(np.polyfit(age[ctrl], ba[ctrl, j], 1), age)
+    elif method == 'trend':
+        cc = code[ctrl]
+        have = np.unique(cc)
+        D = np.column_stack([age[ctrl], cc[:, None] == have[None, :]])
+        if np.linalg.matrix_rank(D) == D.shape[1]:      # common slope within the sites
+            slope = np.linalg.lstsq(D, ba[ctrl], rcond=None)[0][0]
+        else:                                          # no age variation within any site
+            slope = np.polyfit(age[ctrl], ba[ctrl], 1)[0]
+        res = ba[ctrl] - age[ctrl, None] * slope
+        icpt = np.tile(res.mean(axis=0), (levels.size, 1))     # sites without controls
+        for s in have:
+            icpt[s] = res[cc == s].mean(axis=0)
+        P -= age[:, None] * slope + icpt[code]
     elif method != 'none':
         raise ValueError(f"Unknown correction {method!r}.")
     return P.reshape(np.shape(pred))
@@ -3779,13 +4058,26 @@ def fit_models(train, kw, brainage=True, voxel=False, vkw=None):
     return sets
 
 
-def nuisance_design(Q, age, male, ctrl, df=1, names=None):
+def _site_columns(site, ctrl):
+    """Indicator columns (n_controls, k - 1) of the k sites of the controls ctrl (none
+    for one site or site None), which the nuisance regression keeps like age and sex."""
+    if site is None:
+        return np.zeros((len(ctrl), 0))
+    sc = np.asarray(site)[ctrl]
+    levels = np.unique(sc)
+    return (sc[:, None] == levels[None, 1:]).astype(np.float64)
+
+
+def nuisance_design(Q, age, male, ctrl, df=1, names=None, site=None):
     """Regression of the nuisance correction (remove_nuisance, VoxelModel.zmaps).
 
     Returns the nuisance bases N (n, k) of all subjects, centred at their mean in the
     controls ctrl, the rows P (k, n_controls) of the pseudo-inverse of the controls'
     design that give the nuisance coefficients of any data of the controls, the names
-    of the variables used and the df of age.
+    of the variables used and the df of age.  With the sites site (n,) of several test
+    sites, the design also has an indicator of every site of the controls but one, so
+    that the nuisance effects are estimated within the sites; the site effects are
+    left to the adaptation with the controls.
     """
     Q = np.asarray(Q, dtype=np.float64).reshape(len(age), -1)
     names = [str(j + 1) for j in range(Q.shape[1])] if names is None else list(names)
@@ -3794,15 +4086,20 @@ def nuisance_design(Q, age, male, ctrl, df=1, names=None):
         warnings.simplefilter('ignore', RuntimeWarning)
         mean = np.nanmean(Q[ctrl], axis=0)
     Q = np.where(np.isfinite(Q), Q, mean)
+    sc = None if site is None else np.asarray(site)[ctrl]
+    groups = [] if sc is None or np.unique(sc).size < 2 else [sc == s for s in np.unique(sc)]
     bases, used = [], []
     for j, nm in enumerate(names):
         x = Q[ctrl, j]
-        if np.isfinite(mean[j]) and np.ptp(x) > 0:
+        if not (np.isfinite(mean[j]) and np.ptp(x) > 0):
+            _note(f"Nuisance variable {nm} does not vary in the controls and is not used.")
+        elif groups and not any(np.ptp(x[g]) > 0 for g in groups):
+            _note(f"Nuisance variable {nm} does not vary within the sites of the controls and "
+                  "is not used: the sites are adapted separately.")
+        else:
             b = NaturalSpline(x, df)
             bases.append(b(Q[:, j]) - b(x).mean(axis=0))
             used.append(nm)
-        else:
-            _note(f"Nuisance variable {nm} does not vary in the controls and is not used.")
     if not used:
         raise ValueError("No nuisance variable varies in the control subjects.")
     N = np.hstack(bases)
@@ -3813,28 +4110,34 @@ def nuisance_design(Q, age, male, ctrl, df=1, names=None):
         cols.append(NaturalSpline(a, age_df)(a))
     if np.unique(male[ctrl]).size > 1:
         cols.append(np.asarray(male[ctrl], dtype=np.float64)[:, None])
-    D = np.hstack(cols + [N[ctrl]])
+    D = np.hstack(cols + [_site_columns(site, ctrl), N[ctrl]])
     if ctrl.size <= D.shape[1]:
         raise ValueError(f"{ctrl.size} controls are too few for {D.shape[1]} regression terms "
                          "of the nuisance correction.")
     return N, np.linalg.pinv(D)[-N.shape[1]:], used, age_df
 
 
-def _nuisance_folds(Q, age, male, ctrl, df=1, names=None, k=5, seed=0):
+def _nuisance_folds(Q, age, male, ctrl, df=1, names=None, k=5, seed=0, site=None):
     """Designs of a k-fold cross-fit of the nuisance correction over the controls:
     list of (held-out, training) positions in ctrl with the bases N of the held-out
     controls and the rows P fitted on the training controls (nuisance_design).
-    Empty if the training folds are too small for the regression."""
+    With several sites, the folds are stratified by site.  Empty if the training
+    folds are too small for the regression."""
     ctrl = np.asarray(ctrl)
     k = min(k, ctrl.size)
     if k < 2:
         return []
-    f = np.random.default_rng(seed).permutation(np.arange(ctrl.size) % k)
+    rng = np.random.default_rng(seed)
+    sc = None if site is None else np.asarray(site)[ctrl]
+    if sc is None or np.unique(sc).size < 2:
+        f = rng.permutation(np.arange(ctrl.size) % k)
+    else:
+        f = _site_folds(sc, k, rng)
     folds = []
     for j in range(k):
         te, tr = np.flatnonzero(f == j), np.flatnonzero(f != j)
         try:
-            N, P, _, _ = nuisance_design(Q, age, male, ctrl[tr], df, names)
+            N, P, _, _ = nuisance_design(Q, age, male, ctrl[tr], df, names, site)
         except ValueError:
             return []
         folds.append((te, tr, N[ctrl[te]], P))
@@ -3854,10 +4157,11 @@ def _crossfit_share(Yc, folds):
         return np.where(v0 > 0, 1 - np.var(Yc - R, axis=0) / v0, np.nan)
 
 
-def nuisance_terms(Q, age, male, ctrl, df=1, names=None):
+def nuisance_terms(Q, age, male, ctrl, df=1, names=None, site=None):
     """Number of regression terms of the nuisance correction (as nuisance_design)."""
-    N, _, _, age_df = nuisance_design(Q, age, male, ctrl, df, names)
-    return 1 + age_df + int(np.unique(np.asarray(male)[ctrl]).size > 1) + N.shape[1]
+    N, _, _, age_df = nuisance_design(Q, age, male, ctrl, df, names, site)
+    return (1 + age_df + int(np.unique(np.asarray(male)[ctrl]).size > 1)
+            + _site_columns(site, ctrl).shape[1] + N.shape[1])
 
 
 def remove_nuisance(d: Data, Q, ctrl, df=1, names=None, chunk=20000):
@@ -3866,20 +4170,21 @@ def remove_nuisance(d: Data, Q, ctrl, df=1, names=None, chunk=20000):
 
     Every voxel/vertex of the controls is regressed on an intercept, a natural spline
     of age (up to 3 df by the number of controls; none if their ages span less than 5
-    years, as for repeated scans of one subject), sex and natural splines of the
-    nuisance variables with df degrees of
-    freedom (1 = linear).  The nuisance part, relative to its mean in the controls, is
-    removed from all test subjects, whose data then enter models fitted without these
-    variables.  Effects of age and sex are kept, and so are effects of a disease, which
-    the controls do not have.  Values outside the range of the controls are
-    extrapolated linearly, and missing values are set to the mean of the controls (no
-    correction).  Returns the corrected data and a record with the share of the
-    controls' variance removed (median over voxels/vertices; in-sample, optimistic)
-    and its 5-fold cross-fitted counterpart explained_crossfit (_crossfit_share).
+    years, as for repeated scans of one subject), sex, the sites of the controls if
+    there are several (d.site), and natural splines of the nuisance variables with df
+    degrees of freedom (1 = linear).  The nuisance part, relative to its mean in the
+    controls, is removed from all test subjects, whose data then enter models fitted
+    without these variables.  Effects of age and sex are kept, and so are effects of a
+    disease, which the controls do not have; site effects are left to the adaptation.
+    Values outside the range of the controls are extrapolated linearly, and missing
+    values are set to the mean of the controls (no correction).  Returns the corrected
+    data and a record with the share of the controls' variance removed (median over
+    voxels/vertices; in-sample, optimistic) and its 5-fold cross-fitted counterpart
+    explained_crossfit (_crossfit_share).
     """
     ctrl = np.asarray(ctrl)
-    N, P, used, age_df = nuisance_design(Q, d.age, d.male, ctrl, df, names)
-    folds = _nuisance_folds(Q, d.age, d.male, ctrl, df, names)
+    N, P, used, age_df = nuisance_design(Q, d.age, d.male, ctrl, df, names, d.site)
+    folds = _nuisance_folds(Q, d.age, d.male, ctrl, df, names, site=d.site)
     Y = np.array(d.Y, dtype=np.float32)
     share = np.full(Y.shape[1], np.nan)
     share_cv = np.full(Y.shape[1], np.nan)
@@ -3899,6 +4204,41 @@ def remove_nuisance(d: Data, Q, ctrl, df=1, names=None, chunk=20000):
                    explained=float(np.nanmedian(share)) if idx.size else np.nan,
                    explained_crossfit=float(np.nanmedian(share_cv)) if idx.size else np.nan)
     return replace(d, Y=Y), rec
+
+
+def _print_sites(names, code, ctrl, offsets=None, zmaps=None):
+    """Table of several test sites: subjects, controls, the median BrainAGE of their
+    controls before the correction (offsets (k, n_models)) and, for the z-maps of
+    every model, the median shrinkage factor of the site offsets and their RMS."""
+    k = len(names)
+
+    def cells(values, fmt):
+        return ['/'.join(format(v, fmt) if np.isfinite(v) else '-' for v in np.atleast_1d(row))
+                for row in values]
+    cols = [('subjects', [str(v) for v in np.bincount(code, minlength=k)]),
+            ('controls', [str(v) for v in np.bincount(code[ctrl], minlength=k)])]
+    if offsets is not None:
+        cols.append(('BrainAGE offset', cells(offsets, '+.1f')))
+    if zmaps:
+        cols.append(('z shrinkage', cells(np.column_stack([z['site_shrinkage'] for z in zmaps]),
+                                          '.2f')))
+        cols.append(('z offset', cells(np.column_stack([z['site_offset_rms'] for z in zmaps]),
+                                       '.2f')))
+    legend = []
+    if offsets is not None:
+        legend.append("BrainAGE offset: median BrainAGE of the controls of the site before "
+                      "the correction (per model)")
+    if zmaps:
+        legend.append("z-maps: site offsets between the mean of all controls (shrinkage 0) "
+                      "and that of the site's controls (1), with a common scale; z offset: "
+                      "their RMS over voxels/vertices")
+    print("Test sites. " + '; '.join(legend))
+    wn = max(len('site'), *(len(nm) for nm in names))
+    widths = [max(len(t), *(len(c) for c in cs)) for t, cs in cols]
+    print('  ' + 'site'.ljust(wn) + ''.join(f"  {t:>{wd}s}" for (t, _), wd in zip(cols, widths)))
+    for j, nm in enumerate(names):
+        print('  ' + nm.ljust(wn)
+              + ''.join(f"  {cs[j]:>{wd}s}" for (_, cs), wd in zip(cols, widths)))
 
 
 def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
@@ -3933,6 +4273,14 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
                      in-sample table evaluates the controls that estimated them; 0 skips
     controls_in_sample : adapt the controls' own z-maps with all controls (former
                      behaviour) instead of leave-one-out
+
+    Test data from several sites (Data.site, e.g. '+'-joined files or --test-site) are
+    adapted per site: the z-maps, the brain age models ('adapt', 'agefree') and
+    BrainLOSS get offsets per site, shrunk toward the mean of all controls, and a
+    common scale (site_adaptation), BrainAGE is corrected with the median of the
+    controls of every site ('offset') or a trend with an intercept per site ('trend'),
+    and the nuisance effects are estimated within the sites.  Sites without controls
+    are adapted with all controls.
     """
     _check_same_subjects(test)
     if len(sets) != len(test):
@@ -3943,6 +4291,7 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
             raise ValueError(f"No voxel/vertex-wise normative model for {d.name}.")
         if not normative_only and s.brainage is None:
             raise ValueError(f"No brain age model for {d.name}.")
+    test = _shared_sites(test)
     n = test[0].n
     age = test[0].age
     ok = np.isfinite(age) & (age > 0)
@@ -3953,6 +4302,19 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         ctrl = np.intersect1d(adjust, np.flatnonzero(ok))
         if not ctrl.size:
             raise ValueError("None of the control subjects has a valid age (0 or NaN).")
+    code, site_names = site_codes(test[0].site, test[0].site_names)
+    k = len(site_names)
+    sites = code if k > 1 else None            # several test sites
+    if sites is not None:
+        test = [replace(d, site=code, site_names=site_names) for d in test]
+        n_ctrl = np.bincount(code[ctrl], minlength=k) if adjust is not None else None
+        if adjust is None:
+            print(f"The test data come from {k} sites, which are not adapted without "
+                  "controls (--adjust).")
+        elif not n_ctrl.all():
+            _note(f"Site(s) {', '.join(nm for nm, c in zip(site_names, n_ctrl) if not c)} "
+                  "have no controls: their subjects are adapted with the controls of all "
+                  "sites.")
     zc = None if correction == 'none' else ctrl
     cov_names = test[0].cov_names
     nuis = nz = None
@@ -3962,10 +4324,10 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
             raise ValueError("The nuisance correction needs the control subjects (adjust).")
         nz = dict(nuisance, ctrl=ctrl)
         names = nuisance_design(nuisance['values'], age, test[0].male, ctrl,
-                                nuisance.get('df', 1), nuisance['names'])[2]
+                                nuisance.get('df', 1), nuisance['names'], sites)[2]
         nuis = dict(names=names, explained=[], explained_crossfit=[])
         n_terms = nuisance_terms(nuisance['values'], age, test[0].male, ctrl,
-                                 nuisance.get('df', 1), nuisance['names'])
+                                 nuisance.get('df', 1), nuisance['names'], sites)
         if not normative_only:
             res = [remove_nuisance(d, nuisance['values'], ctrl, nuisance.get('df', 1),
                                    nuisance['names']) for d in test]
@@ -3973,8 +4335,8 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
             nuis['explained'] = [r[1]['explained'] for r in res]
             nuis['explained_crossfit'] = [r[1]['explained_crossfit'] for r in res]
         print(f"Nuisance variables {', '.join(names)}: effects estimated in {ctrl.size} "
-              "controls and removed from the test data (brain age) and z-scores (z-maps)",
-              flush=True)
+              f"controls{'' if sites is None else f' within {k} sites'} and removed from the "
+              "test data (brain age) and z-scores (z-maps)", flush=True)
         if ctrl.size < 10 * n_terms:
             _note(f"The nuisance correction has {n_terms} regression terms for {ctrl.size} "
                   f"controls (fewer than 10 per term): its coefficients are noisy, and the "
@@ -4003,12 +4365,18 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         if zc is None:
             print("No adaptation to the test site: z-maps at the reference site of the "
                   "training data.")
-        else:
+        elif sites is None:
             print(f"z-maps adapted to the test site with {zc.size} controls.")
+        else:
+            _print_sites(site_names, code, ctrl, zmaps=zm)
         out = dict(age=age, male=test[0].male, models=np.array([d.name for d in test], dtype=object),
                    correction=correction, ind_control=ctrl + 1, normative_only=True, zmaps=zm)
         if cov_names:
             out['covariates'] = np.array(cov_names, dtype=object)
+        if sites is not None:
+            out.update(site=code + 1, site_names=np.array(site_names, dtype=object))
+            if adjust is not None:
+                out['site_controls'] = np.bincount(code[ctrl], minlength=k)
         _add_nuisance(out, nuis)
         return out
 
@@ -4021,28 +4389,40 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
     for i, (s, dte, draw) in enumerate(zip(sets, test_ba, test)):
         t0 = time.time()
         est = s.brainage.copy()
-        if correction == 'adapt':
-            est.adapt(dte.subset(ctrl))
-        elif correction == 'agefree':
-            est.adapt_agefree(dte.subset(ctrl))
-        out = est.predict(dte)
-        r = dict(name=dte.name, age_raw=out['age'], age=correct_age(out['age'], age, ctrl, post),
+        if sites is not None and correction in ('adapt', 'agefree'):
+            out = est.predict_sites(est.adapt_sites(dte.subset(ctrl), k,
+                                                    agefree=correction == 'agefree'), dte)
+        else:
+            if correction == 'adapt':
+                est.adapt(dte.subset(ctrl))
+            elif correction == 'agefree':
+                est.adapt_agefree(dte.subset(ctrl))
+            out = est.predict(dte)
+        r = dict(name=dte.name, age_raw=out['age'],
+                 age=correct_age(out['age'], age, ctrl, post, sites),
                  sd=out['sd'], at_bound=out['at_bound'], df_mu=est.df_mu, df_sigma=est.df_sigma,
                  mask_threshold=(est.mask_info or {}).get('threshold', np.nan),
-                 regional=correct_age(out['regional'], age, ctrl, post), regions=est.regions,
-                 region_names=est.region_names, gpr=np.full(n, np.nan),
+                 regional=correct_age(out['regional'], age, ctrl, post, sites),
+                 regions=est.regions, region_names=est.region_names, gpr=np.full(n, np.nan),
                  offset=np.nanmedian(out['age'][ctrl] - age[ctrl]) if ctrl.size else np.nan)
+        if sites is not None and adjust is not None:   # median BrainAGE of site controls
+            r['site_offset'] = np.array([
+                np.nanmedian(out['age'][c] - age[c]) if c.size else np.nan
+                for c in (ctrl[code[ctrl] == j] for j in range(k))])
         for key in ('deviation', 'deviation_age', 'regional_deviation', 'regional_deviation_age'):
             r[key] = out[key]
         for key in ('brainloss', 'brainloss_age'):
             if key in out:
                 L = np.column_stack([out[key], out['regional_' + key]])
-                if zc is not None:         # standardized with the controls of the test site
+                if zc is not None and sites is None:   # standardized with the controls
                     L = (L - np.nanmean(L[zc], axis=0)) / np.nanstd(L[zc], axis=0, ddof=1)
+                elif zc is not None:                   # offsets per site, common scale
+                    o, scale, _ = site_adaptation(L[zc], code[zc], k)
+                    L = (L - o[code]) / scale
                 r[key], r['regional_' + key] = L[:, 0], L[:, 1:]
         if gpr:
             r['gpr'] = gpr_baseline(train[i].Y, train[i].age, dte.Y)
-            r['gpr_ba'] = correct_age(r['gpr'], age, ctrl, gpr_post) - age
+            r['gpr_ba'] = correct_age(r['gpr'], age, ctrl, gpr_post, sites) - age
         if zmaps_out:
             r['zmaps'] = s.voxel.zmaps(
                 draw, zc, out['age'][zc] if correction == 'agefree' else None,
@@ -4052,8 +4432,13 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         print(f"  {dte.name}: {time.time() - t0:.1f}s", flush=True)
     if adjust is None:
         print("No --adjust given: no correction for the test site and equal ensemble weights.")
-    else:
+    elif sites is None:
         print(f"Correction for the test site: {correction} ({ctrl.size} controls)")
+    else:
+        print(f"Correction for {k} test sites: {correction} ({ctrl.size} controls)")
+        if correction != 'none':
+            _print_sites(site_names, code, ctrl, np.column_stack([r['site_offset'] for r in res]),
+                         [r['zmaps'] for r in res] if zmaps_out else None)
     gpr_label = {'offset': 'offset corr.', 'trend': 'trend corr.', 'none': 'uncorrected'}[gpr_post]
     title = ("Accuracy in all test subjects (their status is unknown; no --adjust)"
              if adjust is None else
@@ -4065,7 +4450,7 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
     if adjust is not None and crossfit_folds:
         try:
             cv = _crossfit_accuracy(sets, test, ctrl, age, correction, ensemble, gpr, train,
-                                    nuisance, res, k=crossfit_folds)
+                                    nuisance, res, k=crossfit_folds, sites=sites)
         except (ValueError, np.linalg.LinAlgError) as err:   # e.g. too few controls per fold
             _note(f"No cross-fitted accuracy: {err}")
             cv = None
@@ -4073,6 +4458,11 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
             out.update(cv)
     out['correction'] = correction
     out['offset'] = np.array([r['offset'] for r in res])  # median BrainAGE of controls before correction
+    if sites is not None:
+        out.update(site=code + 1, site_names=np.array(site_names, dtype=object))
+        if adjust is not None:
+            out.update(site_controls=np.bincount(code[ctrl], minlength=k),
+                       site_offset=np.column_stack([r['site_offset'] for r in res]))
     if cov_names:
         out['covariates'] = np.array(cov_names, dtype=object)
     if zmaps_out:
@@ -4086,14 +4476,16 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
 
 
 def _crossfit_accuracy(sets, test, ctrl, age, correction, ensemble, gpr, train, nuisance, res,
-                       k=5, seed=0):
+                       k=5, seed=0, sites=None):
     """Accuracy of the brain age in the controls ctrl by k-fold cross-fitting over them.
 
     For every fold, the site correction (offset, trend, adapt, agefree), the nuisance
     correction and the ensemble weights are estimated in the controls of the other
     folds and applied to the held-out controls, so that no control is evaluated with
-    an estimate it entered.  Prints the table and returns the cross-fitted BrainAGE of
-    the controls (NaN for the other subjects).
+    an estimate it entered.  With the site codes sites (n,) of several test sites, the
+    folds are stratified by site and the corrections are those of apply_models per
+    site.  Prints the table and returns the cross-fitted BrainAGE of the controls (NaN
+    for the other subjects).
     """
     n, nc, M = len(age), ctrl.size, len(res)
     k = min(k, nc // 5)
@@ -4104,7 +4496,9 @@ def _crossfit_accuracy(sets, test, ctrl, age, correction, ensemble, gpr, train, 
     gpr_post = 'offset' if correction in ('adapt', 'agefree') else post
     refit = correction in ('adapt', 'agefree') or nuisance is not None
     ac = age[ctrl]
-    f = np.random.default_rng(seed).permutation(np.arange(nc) % k)
+    sc = None if sites is None else sites[ctrl]
+    rng = np.random.default_rng(seed)
+    f = rng.permutation(np.arange(nc) % k) if sc is None else _site_folds(sc, k, rng)
     B = np.full((nc, M), np.nan)
     Bg = np.full((nc, M), np.nan)
     e, eg = np.full(nc, np.nan), np.full(nc, np.nan)
@@ -4118,18 +4512,23 @@ def _crossfit_accuracy(sets, test, ctrl, age, correction, ensemble, gpr, train, 
                     dc = remove_nuisance(dc, nuisance['values'][ctrl], tr,
                                          nuisance.get('df', 1), nuisance['names'])[0]
                 est = s.brainage.copy()
-                if correction == 'adapt':
-                    est.adapt(dc.subset(tr))
-                elif correction == 'agefree':
-                    est.adapt_agefree(dc.subset(tr))
-                pa = est.predict(dc)['age']
+                if sc is not None and correction in ('adapt', 'agefree'):
+                    pa = est.predict_sites(est.adapt_sites(
+                        dc.subset(tr), int(sites.max()) + 1, agefree=correction == 'agefree'),
+                        dc)['age']
+                else:
+                    if correction == 'adapt':
+                        est.adapt(dc.subset(tr))
+                    elif correction == 'agefree':
+                        est.adapt_agefree(dc.subset(tr))
+                    pa = est.predict(dc)['age']
                 pg = (gpr_baseline(train[i].Y, train[i].age, dc.Y)
                       if gpr and nuisance is not None else (r['gpr'][ctrl] if gpr else None))
             else:
                 pa, pg = r['age_raw'][ctrl], (r['gpr'][ctrl] if gpr else None)
-            P[:, i] = correct_age(pa, ac, tr, post)
+            P[:, i] = correct_age(pa, ac, tr, post, sc)
             if gpr:
-                Pg[:, i] = correct_age(pg, ac, tr, gpr_post)
+                Pg[:, i] = correct_age(pg, ac, tr, gpr_post, sc)
         B[te] = P[te] - ac[te, None]
         e[te] = P[te] @ ensemble_weights(P[tr], ac[tr], ensemble) - ac[te]
         if gpr:
@@ -4367,16 +4766,24 @@ def save_results(out, prefix):
         z = {k: (np.zeros(0) if v is None else v) for k, v in z.items()}
         savemat(f'{prefix}_zmaps_{nm}.mat', {'NDMzmap': z}, do_compression=True)
     zfiles = f"{len(zm)} z-map file(s) {prefix}_zmaps_*.mat" if zm else ''
+    # the site of every subject as a column after age and sex, with several test sites
+    site = ([] if 'site_names' not in out else
+            [str(out['site_names'][j - 1]).replace(',', ' ') for j in out['site']])
+    head = ['subject', 'age', 'male'] + (['site'] if site else [])
+
+    def row(i, vals):
+        cells = [f'{v:.4f}' for v in vals]
+        return ','.join([str(i + 1)] + cells[:2] + site[i:i + 1] + cells[2:]) + '\n'
     if out.get('normative_only'):
         saved = [zfiles]
         if zm and 'regional_z' in zm[0]:
             cols = [f"z_{nm}_{str(r).replace(' ', '_')}"
                     for nm, z in zip(names, zm) for r in z['region_names']]
             with open(prefix + '.csv', 'w') as f:
-                f.write(','.join(['subject', 'age', 'male'] + cols) + '\n')
+                f.write(','.join(head + cols) + '\n')
                 for i in range(len(out['age'])):
                     vals = [out['age'][i], out['male'][i]] + [v for z in zm for v in z['regional_z'][i]]
-                    f.write(','.join([str(i + 1)] + [f'{v:.4f}' for v in vals]) + '\n')
+                    f.write(row(i, vals))
             saved.insert(0, prefix + '.csv')
         print("\nSaved " + ' and '.join(saved))
         return
@@ -4387,14 +4794,14 @@ def save_results(out, prefix):
     if 'BrainAGE_GPR_ensemble' in out:
         cols.append('BrainAGE_GPR_ensemble')
     with open(prefix + '.csv', 'w') as f:
-        f.write(','.join(['subject'] + cols + [f'BrainAGE_{m}' for m in names]
+        f.write(','.join(head + cols[2:] + [f'BrainAGE_{m}' for m in names]
                          + [f'SD_{m}' for m in names] + [f'Deviation_{m}' for m in names]
                          + [f'{name}_{m}' for name in losses for m in names]) + '\n')
         for i in range(len(out['age'])):
             vals = ([out[c][i] for c in cols] + list(out['BrainAGE'][i])
                     + list(out['PredictedAge_sd'][i]) + list(out['Deviation'][i])
                     + [v for name in losses for v in out[name][i]])
-            f.write(','.join([str(i + 1)] + [f'{v:.4f}' for v in vals]) + '\n')
+            f.write(row(i, vals))
     print(f"\nSaved {prefix}.mat and {prefix}.csv" + (f" and {zfiles}" if zm else ''))
 
 
@@ -4447,6 +4854,12 @@ def _parser():
                         "are adapted to the test site unless none")
     p.add_argument('--test-male', help="text file with the sex of the test subjects "
                                        "(1 = male), if the mat-files contain none")
+    p.add_argument('--test-site',
+                   help="text file with the site of every test subject, one label per line "
+                        "in the order of the mat-files (text or numbers, e.g. the scanner or "
+                        "site ID); every site is adapted with its own --adjust controls, "
+                        "shrunk toward all controls.  Replaces the sites of '+'-joined test "
+                        "files, which are used by default")
     p.add_argument('--normative-only', action='store_true',
                    help="only the voxel/vertex-wise normative models (no PCA, no brain age, "
                         "no GPR): save them (--save-model) and/or z-maps of --test")
@@ -4591,6 +5004,8 @@ def _check_args(p, a):
         p.error("--cov-mean and --cov-sd need --train-cov.")
     if a.test_nuisance and not (a.test and a.adjust):
         p.error("--test-nuisance needs --test and the controls of the test sample (--adjust).")
+    if a.test_site and not a.test:
+        p.error("--test-site needs --test.")
     if a.nuisance_cols and not a.test_nuisance:
         p.error("--nuisance-cols needs --test-nuisance.")
     if a.nuisance_df < 1:
@@ -4637,6 +5052,23 @@ def main(argv=None):
             if male.size != test[0].n:
                 p.error(f"--test-male has {male.size} values for {test[0].n} test subjects.")
             test = [replace(d, male=male, has_male=True) for d in test]
+        if a.test_site:
+            try:
+                site, names = read_sites(a.test_site, test[0].n)
+            except ValueError as err:
+                p.error(str(err))
+            if any('+' in spec for spec in a.test):
+                print("--test-site replaces the sites of the '+'-joined test files.")
+            test = [replace(d, site=site, site_names=names) for d in test]
+        else:
+            try:
+                test = _shared_sites(test)
+            except ValueError as err:
+                p.error(str(err))
+        k = np.unique(test[0].site).size
+        if k > 1:
+            print(f"Test data from {k} sites ({'--test-site' if a.test_site else '+'}): they "
+                  "are adapted per site with their controls (--adjust).")
 
     if a.train:
         if test is not None and len(test) != len(a.train):
