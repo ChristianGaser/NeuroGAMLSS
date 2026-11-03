@@ -49,6 +49,11 @@ Variants of comcat and comcat_z
                                    subjects]
   comcat_dx, comcat_z_dx           fitted on all subjects with the diagnosis preserved,
                                    every subject cross-fitted [samples with patients]
+  comcat_iqm, comcat_z_iqm         IQMs only; the test sites only by the adaptation
+                                   [several sites]
+  comcat_iqm_dx, comcat_z_iqm_dx   the same, diagnosis preserved (ADNI design)
+Single-subject samples (Tohoku, Buchert) preserve nothing in ComCat: their age and TIV
+vary only with the scanning date or technically.
   *_perm                           IQMs permuted across scans (control for flexibility)
 
 Metrics (controls, held out in mode crossfit; final z unless stated; median over voxels)
@@ -56,8 +61,9 @@ Metrics (controls, held out in mode crossfit; final z unless stated; median over
                     voxel: comparable across all conditions (proper score)
   z_sd, z_mean      SD and mean of the controls' z (1 and 0 if calibrated)
   beyond_2.58       share of |z| > 2.58, pooled (1% if calibrated)
-  site_offset_rms   RMS of the deviations of the site means of the controls' z, sampling
-                    noise subtracted [several sites]
+  site_offset_rms   RMS of the deviations of the site means of the controls' corrected
+                    scores before the adaptation (which removes them), sampling noise
+                    subtracted: the site differences a correction leaves [several sites]
   site_scale_rms    RMS of the log SD of the controls' z per site, sampling noise
                     subtracted [several sites]
   within_sd         within-subject SD of the location-adapted z (before the common
@@ -145,6 +151,10 @@ CONDITIONS = {   # name: (label, spec); the order of the report
                                                              sites=True)),
     'comcat_subj': ("ComCat on the data, within subjects", dict(level='data', subj=True)),
     'comcat_dx': ("ComCat on the data, diagnosis preserved", dict(level='data', dx=True)),
+    'comcat_iqm': ("ComCat on the data, IQMs only", dict(level='data', nosites=True,
+                                                         sites=True)),
+    'comcat_iqm_dx': ("ComCat on the data, IQMs only, diagnosis preserved",
+                      dict(level='data', nosites=True, sites=True, dx=True)),
     'combat': ("ComBat on the data", dict(level='data', iqm=False, sites=True, cc=True)),
     # alternative: ComCat on the normal scores (comcat_zmaps.py)
     'comcat_z': ("ComCat on the normal scores", dict(level='z')),
@@ -154,6 +164,10 @@ CONDITIONS = {   # name: (label, spec); the order of the report
                                                                            subj=True)),
     'comcat_z_dx': ("ComCat on the normal scores, diagnosis preserved", dict(level='z',
                                                                              dx=True)),
+    'comcat_z_iqm': ("ComCat on the normal scores, IQMs only", dict(level='z', nosites=True,
+                                                                    sites=True)),
+    'comcat_z_iqm_dx': ("ComCat on the normal scores, IQMs only, diagnosis preserved",
+                        dict(level='z', nosites=True, sites=True, dx=True)),
     # approach 2: terms of the GAMLSS
     'gamlss_test_nuisance': ("GAMLSS: IQMs in the test controls", dict(level='nuisance')),
     'gamlss_iqm_model': ("GAMLSS: IQMs in the normative model", dict(model=1)),
@@ -193,9 +207,11 @@ def _iqm(path, n=None):
 
 
 def _write_table(path, header, columns):
+    """Table of the columns, with a header line unless header is None."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w') as f:
-        f.write(' '.join(header) + '\n')
+        if header is not None:
+            f.write(' '.join(header) + '\n')
         for row in np.column_stack(columns):
             f.write(' '.join('NaN' if not np.isfinite(v) else f'{v:.6g}' for v in row) + '\n')
 
@@ -218,8 +234,8 @@ def fit_models(args, trains):
                 iqm = _iqm(os.path.join(tdir, f'IQM{n}.txt'), tiv.size)
                 tiv = np.where(np.all(np.isfinite(iqm), axis=1), tiv, np.nan)
                 tab = os.path.join(args.out, 'tables', f'train_{key}_{cov}.txt')
-                if cov == 'tiv':
-                    _write_table(tab, ['TIV'], [tiv])
+                if cov == 'tiv':           # no header, as TIV<n>.txt of the test samples
+                    _write_table(tab, None, [tiv])
                 else:
                     _write_table(tab, ['TIV', *IQM4], [tiv, iqm])
                 tables.append(tab)
@@ -353,8 +369,9 @@ def prepare(S, models, args, rng):
             setattr(R, a, getattr(R, a)[keep])
         R.Z0, R.L0, R.Z1, R.L1 = R.Z0[:, keep], R.L0[:, keep], R.Z1[:, keep], R.L1[:, keep]
     R.Ydata = np.asarray(S.Y[:, R.feat], np.float64)
-    preserve = [S.age, male, S.tiv]
-    R.preserve = np.column_stack(preserve)
+    # one subject: age and TIV vary only with the scanning date or technically
+    preserve = [] if S.cfg.get('subject') == 'one' else [S.age, male, S.tiv]
+    R.preserve = np.column_stack(preserve) if preserve else None
     if S.group is not None:
         g = S.group
         dummies = [(g == lv).astype(float) for lv in np.unique(g[~S.ctrl])
@@ -422,6 +439,7 @@ def corrector(CC, S, R, spec):
     Q = Q if spec.get('iqm', True) else None
     P = R.preserve_dx if spec.get('dx') else R.preserve
     subject = S.subject if spec.get('subj') else None
+    batch = None if spec.get('nosites') else S.code
     opts = CZ.comcat_options(spec.get('loc', False), spec.get('cc', False))
 
     def correct(fit, rows):
@@ -430,7 +448,7 @@ def corrector(CC, S, R, spec):
                                              S.code if S.k > 1 else None)
             return R.Z0[rows] - N[rows] @ (Pm @ R.Z0[fit]), np.ones((rows.size, 1))
         X = R.Z0 if level == 'z' else R.Ydata
-        _, H, D = CZ.comcat_fit_apply(CC, X, fit, rows, S.code, Q, P, subject, slope=True,
+        _, H, D = CZ.comcat_fit_apply(CC, X, fit, rows, batch, Q, P, subject, slope=True,
                                       **opts)
         return H, D
     return correct
@@ -456,8 +474,9 @@ def inner_crossfit(CC, S, correct, fit, rows):
 
 
 def run_condition(CC, S, R, name, mode='crossfit'):
-    """Final z (n, p), location-adapted z before the common scale (n, p) and, for the
-    controls, the log density of their data (n, p).
+    """Final z (n, p), location-adapted z before the common scale (n, p), for the
+    controls the log density of their data (n, p), and the corrected scores before the
+    adaptation (n, p).
 
     In every pass, the correction is fitted on the fit rows and applied to the scored
     rows; the adaptation (offsets and common scale) is estimated from the controls'
@@ -468,7 +487,7 @@ def run_condition(CC, S, R, name, mode='crossfit'):
     level = spec.get('level')
     correct = corrector(CC, S, R, spec) if level else None
     shape = R.Z0.shape
-    Zf, Zl, LD = (np.full(shape, np.nan, dtype=np.float32) for _ in range(3))
+    Zf, Zl, LD, Zr = (np.full(shape, np.nan, dtype=np.float32) for _ in range(4))
     for fit, ad, ap in passes(S, spec.get('dx', False), mode):
         slope = 1.0                     # derivative of the harmonization (ComCat L/S)
         if level is None:
@@ -487,7 +506,7 @@ def run_condition(CC, S, R, name, mode='crossfit'):
             else:
                 Za, Zp, Zpre, Lp = Ha, Hp, R.Z0[ap], R.L0[ap]
         loc, fin, r = CZ.adapt(Za, S.code[ad], Zp, S.code[ap], S.k)
-        Zl[ap], Zf[ap] = loc, fin
+        Zl[ap], Zf[ap], Zr[ap] = loc, fin, Zp
         held = S.ctrl[ap]
         # log density of the data: log phi(z) + log |dz/dy|, with dz/dy = slope / r *
         # f(y_c) / phi(z_c) for the normal score z_c of the (harmonized) data y_c
@@ -495,7 +514,7 @@ def run_condition(CC, S, R, name, mode='crossfit'):
             ls = 0.0 if np.isscalar(slope) else np.log(np.broadcast_to(slope, fin.shape)[held])
             LD[ap[held]] = (-0.5 * fin[held] ** 2 - np.log(r) + Lp[held]
                             + 0.5 * Zpre[held] ** 2 + ls)
-    return Zf, Zl, LD
+    return Zf, Zl, LD, Zr
 
 
 # ---------------------------------------------------------------------------
@@ -570,7 +589,7 @@ def welch(a, b):
     return t, d
 
 
-def metrics(S, Zf, Zl, LD):
+def metrics(S, Zf, Zl, LD, Zr):
     z = Zf[S.ctrl].astype(np.float64)
     fin = np.isfinite(z)
     out = dict(log_density=float(np.nanmean(LD[S.ctrl])),
@@ -578,7 +597,9 @@ def metrics(S, Zf, Zl, LD):
                z_mean=_med(np.nanmean(z, axis=0)),
                **{'beyond_2.58': float(np.mean(np.abs(z[fin]) > 2.58))})
     if S.k > 1:
-        out['site_offset_rms'], out['site_scale_rms'] = site_spread(z, S.code[S.ctrl], S.k)
+        out['site_scale_rms'] = site_spread(z, S.code[S.ctrl], S.k)[1]
+        out['site_offset_rms'] = site_spread(Zr[S.ctrl].astype(np.float64), S.code[S.ctrl],
+                                             S.k)[0]
     if S.repeated:
         w, b = within_between(Zl, S.subject)
         out['within_sd'] = _med(w)
@@ -629,8 +650,8 @@ def compare(args):
         for mode in args.modes:
             for c in names:
                 t1 = time.time()
-                Zf, Zl, LD = run_condition(CC, S, R, c, mode)
-                m = metrics(S, Zf, Zl, LD)
+                Zf, Zl, LD, Zr = run_condition(CC, S, R, c, mode)
+                m = metrics(S, Zf, Zl, LD, Zr)
                 m.update(n_scans=S.n, n_controls=int(S.ctrl.sum()),
                          n_voxels=int(R.feat.size), seconds=round(time.time() - t1, 1))
                 rows += [dict(sample=name, mode=mode, condition=c, metric=k, value=v)
@@ -669,7 +690,7 @@ REPORT_COLUMNS = (   # metric, header, format
     ('log_density', 'Δ log density (10⁻³ nat)', 'rel'),
     ('z_sd', 'z SD', '.3f'),
     ('beyond_2.58', 'z beyond ±2.58 (%)', 'pct'),
-    ('site_offset_rms', 'site offset', '.3f'),
+    ('site_offset_rms', 'site offset before adaptation', '.3f'),
     ('site_scale_rms', 'site log-scale', '.3f'),
     ('within_sd', 'within-subject SD', '.3f'),
     ('between_sd', 'between-subject SD', '.3f'),
@@ -762,7 +783,8 @@ def main(argv=None):
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--jobs', type=int, default=0, help="threads of neurogamlss.py")
     p.add_argument('--ng-options', default='',
-                   help="further options for fitting the models, e.g. '--site-random'")
+                   help="further options for fitting the models, e.g. "
+                        "--ng-options=--site-random (with '=')")
     p.add_argument('--comcat-dir', help="folder of comcat.py")
     a = p.parse_args(argv)
     a.root, a.out = os.path.expanduser(a.root), os.path.expanduser(a.out)

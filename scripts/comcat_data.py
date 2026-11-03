@@ -35,9 +35,12 @@ the test data, with the usual adaptation with the controls:
 
 Several mat-files of the same subjects (e.g. the four feature sets of BrainAGE) are
 harmonized with the same design and folds.  Subjects without a valid age or without
-values of the nuisance or preserved covariates are not harmonized and get NaN.  Columns
-1, 2, 3 and 5 of a CAT12 IQM table (no header) are ICR, NCR, res_ECR and contrastr.
-The alternative, ComCat on the normal scores, is comcat_zmaps.py.
+values of the nuisance or preserved covariates are not harmonized and get NaN; leave
+them out of --adjust in neurogamlss.py.  With repeated scans, neurogamlss.py adapts the
+controls' own z-maps leaving out the scan, not the subject, which is optimistic;
+comcat_zmaps.py leaves out the subject.  Columns 1, 2, 3 and 5 of a CAT12 IQM table (no
+header) are ICR, NCR, res_ECR and contrastr.  The alternative, ComCat on the normal
+scores, is comcat_zmaps.py.
 """
 
 import argparse
@@ -69,7 +72,7 @@ def write_mat(src, dst, Y):
     stored transposed) is copied and its Y overwritten, a v5 file is written again."""
     from scipy.io import loadmat, savemat
     try:
-        m = loadmat(src)
+        m = loadmat(src, mat_dtype=True)          # keep the MATLAB classes
     except NotImplementedError:
         import h5py
         shutil.copyfile(src, dst)
@@ -132,6 +135,9 @@ def main(argv=None):
     p.add_argument('--within-subjects', action='store_true',
                    help="with --subject: site and nuisance effects estimated within "
                         "subjects (subject terms, location only), e.g. for few subjects")
+    p.add_argument('--single-subject', action='store_true',
+                   help="scans of one subject: preserve nothing (age, sex and covariates "
+                        "vary only with the scanning date or technically)")
     p.add_argument('--location-only', action='store_true',
                    help="no site variances (ComCat mean_only)")
     p.add_argument('--combat-compatible', action='store_true',
@@ -149,6 +155,21 @@ def main(argv=None):
     a = p.parse_args(argv)
     if not a.nuisance and not a.test_site:
         p.error("Nothing to remove: give --nuisance, --test-site or both.")
+    if a.preserve_group and not a.adjust:
+        p.error("--preserve-group needs the controls (--adjust): the groups not among them "
+                "are preserved.")
+    if a.single_subject and a.preserve:
+        p.error("--single-subject preserves nothing; leave out --preserve.")
+    srcs = [os.path.expanduser(t) for t in a.test]
+    if any('+' in os.path.basename(t) for t in srcs):
+        p.error("Give the mat-files of one sample separately, not joined with '+'.")
+    names = [os.path.basename(t) for t in srcs]
+    if len(set(names)) < len(names):
+        p.error("The inputs must have different file names (outputs keep them).")
+    dsts = [os.path.join(os.path.expanduser(a.out_dir), nm) for nm in names]
+    for src, dst in zip(srcs, dsts):
+        if os.path.exists(dst) and os.path.samefile(src, dst):
+            p.error(f"--out-dir would overwrite the input {src}.")
     CC = CZ.import_comcat(a.comcat_dir)
 
     datas = [NG.load_data(t) for t in a.test]
@@ -163,7 +184,7 @@ def main(argv=None):
     site, site_names = np.zeros(n, dtype=np.int64), ('1',)
     if a.test_site:
         site, site_names = NG.read_sites(a.test_site, n)
-    ctrl = np.arange(n) if not a.adjust else NG._parse_index(a.adjust, n)
+    ctrl = np.arange(n) if not a.adjust else np.unique(NG._parse_index(a.adjust, n))
     ok = np.isfinite(d.age) & (d.age > 0)
     Q = C = None
     qcols = ccols = []
@@ -187,41 +208,28 @@ def main(argv=None):
 
     rows = np.flatnonzero(ok)
     if rows.size < n:
-        print(f"{n - rows.size} subject(s) without valid age, nuisance or preserved values "
-              "are not harmonized (NaN).")
+        print(f"{n - rows.size} subject(s) without valid age, sex, nuisance or preserved "
+              "values are not harmonized (NaN); leave them out of --adjust in "
+              f"neurogamlss.py: {(np.flatnonzero(~ok) + 1).tolist()}")
     pos = {r: i for i, r in enumerate(rows)}
     ctrl_r = np.array([pos[c] for c in ctrl if c in pos], dtype=np.int64)
     if not ctrl_r.size:
         p.error("None of the controls has valid values.")
-    preserve = np.column_stack([d.age[rows]] + ([male[rows]] if male is not None else [])
-                               + ([C[rows]] if C is not None else []))
+    kept = [] if a.single_subject else ['age'] + (['sex'] if male is not None else []) + ccols
+    preserve = (None if a.single_subject else np.column_stack(
+        [d.age[rows]] + ([male[rows]] if male is not None else [])
+        + ([C[rows]] if C is not None else [])))
     _, code = np.unique(site[rows], return_inverse=True)
-    k = int(code.max()) + 1
-    kept = ['age'] + (['sex'] if male is not None else []) + ccols
-    parts = []
-    if k > 1:                       # with subject terms, ComCat corrects the location only
-        scale = ('location' if a.location_only or terms else
-                 'location and scale, ComBat site variances' if a.combat_compatible else
-                 'location and scale')
-        parts.append(f"sites (empirical Bayes, {scale})")
-    if Q is not None:
-        parts.append(f"nuisance {', '.join(qcols)}")
-    parts.append(f"preserved: {', '.join(kept)}")
-    design = ('ComCat on the data: ' + ', '.join(parts)
-              + ('; fitted on all subjects, groups preserved' if group is not None
-                 else '; fitted on the controls')
-              + ('; in-sample (no cross-fit)' if a.insample
-                 else f'; cross-fitted ({a.folds} folds)')
-              + ('; within subjects' if terms else
-                 '; across subjects, folds over subjects' if subject is not None else ''))
-    print(f"{rows.size} subjects, {ctrl_r.size} controls, {k} site(s): {design}")
+    sites_fit = np.unique(code if group is not None else code[ctrl_r]).size
+    design = CZ.describe('data', sites_fit, qcols, kept, a.location_only, a.combat_compatible,
+                         terms, subject is not None, group is not None, a.insample, a.folds)
+    print(f"{rows.size} subjects, {ctrl_r.size} controls, {sites_fit} site(s) in the fit: "
+          f"{design}")
+    options = dict(CZ.comcat_options(a.location_only, a.combat_compatible),
+                   **(dict(mean_only=True, subject_terms=True) if terms else {}))
 
     os.makedirs(os.path.expanduser(a.out_dir), exist_ok=True)
-    for path, dd in zip(a.test, datas):
-        src = os.path.expanduser(path)
-        dst = os.path.join(os.path.expanduser(a.out_dir), os.path.basename(src))
-        if os.path.exists(dst) and os.path.samefile(src, dst):
-            p.error(f"--out-dir would overwrite the input {src}.")
+    for src, dst, dd in zip(srcs, dsts, datas):
         t0 = time.time()
         H, fold = CZ.harmonize(CC, dd.Y[rows], ctrl_r, code, None if Q is None else Q[rows],
                                preserve, None if subject is None else subject[rows],
@@ -237,7 +245,7 @@ def main(argv=None):
                     harmonization=design, n_subjects=n, n_harmonized=int(rows.size),
                     n_controls=int(ctrl_r.size), sites=[str(s) for s in site_names],
                     nuisance=qcols, preserved=kept,
-                    options=CZ.comcat_options(a.location_only, a.combat_compatible),
+                    options=options,
                     comcat=_comcat_version(CC), seed=a.seed,
                     created=time.strftime('%Y-%m-%d %H:%M:%S'),
                     command=['comcat_data.py'] + list(sys.argv[1:] if argv is None else argv),

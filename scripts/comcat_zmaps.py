@@ -56,11 +56,28 @@ def import_comcat(path=None):
             sys.path.insert(0, os.path.expanduser(d))
             break
     import comcat
-    import inspect
-    if 'combat_compatible' not in inspect.signature(comcat.comcat).parameters:
-        raise ImportError("ComCat of 2026-11-02 or later is needed (df-consistent site "
-                          "variances, option combat_compatible).")
+    if not _current_comcat(comcat):
+        raise ImportError("ComCat of 2026-11-03 or later is needed (df-consistent site "
+                          "variances; no site correction for sites with a single subject).")
     return comcat
+
+
+def _current_comcat(CC):
+    """True for ComCat of 2026-11-03 or later: option combat_compatible, and a site with a
+    single subject keeps that subject's deviation (before, its site effect removed it)."""
+    import inspect
+    import warnings
+    if 'combat_compatible' not in inspect.signature(CC.comcat).parameters:
+        return False
+    rng = np.random.default_rng(0)
+    site = np.r_[np.zeros(8), np.ones(8), 2]
+    Y = rng.normal(size=(20, site.size)) + site
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        H0 = CC.comcat(Y, site, None, None, eb=False)[0]
+        Y[:, -1] += 1.0
+        H1 = CC.comcat(Y, site, None, None, eb=False)[0]
+    return abs(np.mean(H1[:, -1] - H0[:, -1]) - 1) < 0.2
 
 
 def comcat_options(location_only=False, combat_compatible=False):
@@ -234,11 +251,13 @@ def harmonize(CC, X, ctrl, site=None, nuisance=None, preserve=None, subject=None
     is fitted on all subjects instead, with indicators of every group not among the
     controls preserved, and every subject is harmonized cross-fitted.  subject (n,)
     labels of repeated scans keep the scans of a subject in one fold and, with
-    subject_terms, estimate the effects within subjects.  insample: fitted on all
-    controls (all subjects with group) and applied to every subject, the fitted ones
-    included (fold labels -1); for comparison only, because the harmonized values of
-    the fitted subjects are optimistic.  Returns the harmonized X (n, p) and the fold
-    labels (n,)."""
+    subject_terms, estimate the effects within subjects; the other scans of a subject
+    with control scans are harmonized by the model of its fold.  Columns with missing
+    values are left unchanged for all subjects.  insample: fitted on all controls (all
+    subjects with group) and applied to every subject, the fitted ones included (fold
+    labels -1); for comparison only, because the harmonized values of the fitted
+    subjects are optimistic.  Returns the harmonized X (n, p) and the fold labels (n,):
+    the fold whose model harmonized the subject, -1 for the model of all controls."""
     n = X.shape[0]
     is_ctrl = np.zeros(n, dtype=bool)
     is_ctrl[np.asarray(ctrl)] = True
@@ -254,19 +273,28 @@ def harmonize(CC, X, ctrl, site=None, nuisance=None, preserve=None, subject=None
         fit = np.ones(n, dtype=bool)
     opts = comcat_options(location_only, combat_compatible)
     terms = subject if subject_terms else None
+    good = np.all(np.isfinite(X), axis=0)
+    H = np.array(X, dtype=np.float64)
     if insample:
-        H = comcat_fit_apply(CC, X, np.flatnonzero(fit), np.arange(n), code, nuisance, P,
-                             terms, **opts)[1]
+        H[:, good] = comcat_fit_apply(CC, X[:, good], np.flatnonzero(fit), np.arange(n), code,
+                                      nuisance, P, terms, **opts)[1]
         return H, np.full(n, -1)
+    units = np.unique(subject[fit]).size if subject is not None else int(fit.sum())
+    if int(folds) < 2 or units < 2:
+        raise ValueError(f"The cross-fit needs at least 2 folds and 2 subjects to fit on "
+                         f"({int(folds)} folds, {units} subject(s)).")
     fold = CC._make_folds(code, subject, fit, int(folds), seed)
-    H = np.full(X.shape, np.nan)
+    if subject is not None:            # other scans of subjects with control scans
+        of = dict(zip(np.asarray(subject)[fit].tolist(), fold[fit].tolist()))
+        fold = np.where(fit, fold, [of.get(s, -1) for s in np.asarray(subject).tolist()])
     for f in np.unique(fold[fold >= 0]):
         tr, te = np.flatnonzero(fit & (fold != f)), np.flatnonzero(fold == f)
-        H[te] = comcat_fit_apply(CC, X, tr, te, code, nuisance, P, terms, **opts)[1]
-    rest = np.flatnonzero(~fit)
+        H[np.ix_(te, good)] = comcat_fit_apply(CC, X[:, good], tr, te, code, nuisance, P,
+                                               terms, **opts)[1]
+    rest = np.flatnonzero(fold < 0)
     if rest.size:
-        H[rest] = comcat_fit_apply(CC, X, np.flatnonzero(fit), rest, code, nuisance, P,
-                                   terms, **opts)[1]
+        H[np.ix_(rest, good)] = comcat_fit_apply(CC, X[:, good], np.flatnonzero(fit), rest,
+                                                 code, nuisance, P, terms, **opts)[1]
     return H, fold
 
 
@@ -275,7 +303,8 @@ def harmonize_zscores(CC, Z, ctrl, site=None, nuisance=None, preserve=None, subj
                       combat_compatible=False, insample=False, subject_terms=False):
     """ComCat on normal scores Z (n, p) (harmonize) and adaptation with the controls
     ctrl (indices).  Returns the final z-scores (n, p): (z - offset of the site) /
-    common scale, with the controls' adaptation leave-one-out, and the fold labels.
+    common scale, with the controls' adaptation leave-one-out (leaving out all scans
+    of the subject with subject labels), and the fold labels.
 
     insample: ComCat fitted on all controls (all subjects with group) and applied to
     every subject, the fitted ones included, and the controls adapted with all
@@ -295,8 +324,37 @@ def harmonize_zscores(CC, Z, ctrl, site=None, nuisance=None, preserve=None, subj
     others = np.flatnonzero(~is_ctrl)
     if others.size:
         out[others] = adapt(H[ctrl], code[ctrl], H[others], code[others], k)[1]
-    out[ctrl] = NG._site_loo_scores(H[ctrl], H[ctrl], code[ctrl], k)
+    if subject is None:
+        out[ctrl] = NG._site_loo_scores(H[ctrl], H[ctrl], code[ctrl], k)
+    else:                              # leave out all scans of the subject
+        sub = np.asarray(subject)[ctrl]
+        for s in np.unique(sub):
+            m = sub == s
+            if np.all(m):
+                raise ValueError("The adaptation needs controls of at least 2 subjects.")
+            out[ctrl[m]] = adapt(H[ctrl[~m]], code[ctrl[~m]], H[ctrl[m]], code[ctrl[m]], k)[1]
     return out, fold
+
+
+def describe(level, sites, nuisance, preserved, location_only=False, combat_compatible=False,
+             terms=False, subject_folds=False, grouped=False, insample=False, folds=5):
+    """Description of the ComCat design for the outputs; sites: number of sites among
+    the subjects ComCat is fitted on (one site: no site correction)."""
+    parts = []
+    if sites > 1:                      # with subject terms, ComCat corrects the location only
+        scale = ('location' if location_only or terms else
+                 'location and scale, ComBat site variances' if combat_compatible else
+                 'location and scale')
+        parts.append(f"sites (empirical Bayes, {scale})")
+    if nuisance:
+        parts.append(f"nuisance {', '.join(nuisance)}")
+    parts.append(f"preserved: {', '.join(preserved) if preserved else 'nothing'}")
+    return (f'ComCat on the {level}: ' + ', '.join(parts)
+            + ('; fitted on all subjects, groups preserved' if grouped
+               else '; fitted on the controls')
+            + ('; in-sample (no cross-fit)' if insample else f'; cross-fitted ({folds} folds)')
+            + ('; within subjects' if terms else
+               '; across subjects, folds over subjects' if subject_folds else ''))
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +393,9 @@ def main(argv=None):
     p.add_argument('--within-subjects', action='store_true',
                    help="with --subject: site and nuisance effects estimated within "
                         "subjects (subject terms, location only), e.g. for few subjects")
+    p.add_argument('--single-subject', action='store_true',
+                   help="scans of one subject: preserve nothing (age, sex and covariates "
+                        "vary only with the scanning date or technically)")
     p.add_argument('--location-only', action='store_true',
                    help="no site variances (ComCat mean_only)")
     p.add_argument('--combat-compatible', action='store_true',
@@ -373,13 +434,13 @@ def main(argv=None):
         names, values, _ = NG.read_table(a.test_cov)
         C = NG.covariate_matrix(names, values, cov, d.n, a.test_cov)
         cov_cols = list(cov.names)
-    ok = np.isfinite(d.age) & (d.age > 0)
+    ok = np.isfinite(d.age) & (d.age > 0) & np.isfinite(male)
     if C is not None:
         ok &= np.all(np.isfinite(C), axis=1)
     site, site_names = np.zeros(d.n, dtype=np.int64), ('1',)
     if a.test_site:
         site, site_names = NG.read_sites(a.test_site, d.n)
-    ctrl = NG._parse_index(a.adjust, d.n)
+    ctrl = np.unique(NG._parse_index(a.adjust, d.n))
     Q = None
     if a.nuisance:
         names, values, numeric = NG.read_table(a.nuisance)
@@ -399,11 +460,14 @@ def main(argv=None):
 
     rows = np.flatnonzero(ok)
     if rows.size < d.n:
-        print(f"{d.n - rows.size} subject(s) without valid age, covariates or nuisance "
-              "values get no z-scores.")
+        print(f"{d.n - rows.size} subject(s) without valid age, sex, covariates or nuisance "
+              f"values get no z-scores: {(np.flatnonzero(~ok) + 1).tolist()}")
     pos = {r: i for i, r in enumerate(rows)}
-    ctrl_r = np.array([pos[c] for c in ctrl if c in pos])
-    preserve = [d.age[rows]] + [male[rows]] + ([C[rows]] if C is not None else [])
+    ctrl_r = np.array([pos[c] for c in ctrl if c in pos], dtype=np.int64)
+    if not ctrl_r.size:
+        p.error("None of the controls (--adjust) has valid values.")
+    preserve = (None if a.single_subject else np.column_stack(
+        [d.age[rows], male[rows]] + ([C[rows]] if C is not None else [])))
     Z = reference_scores(vm, d.Y[rows], d.age[rows], male[rows],
                          None if C is None else C[rows])
     fin = np.all(np.isfinite(Z), axis=0)
@@ -411,9 +475,10 @@ def main(argv=None):
     Zh = np.full(Z.shape, np.nan)
     Zh[:, fin], _ = harmonize_zscores(
         CC, Z[:, fin], ctrl_r, code, None if Q is None else Q[rows],
-        np.column_stack(preserve), None if subject is None else subject[rows],
+        preserve, None if subject is None else subject[rows],
         None if group is None else group[rows], a.folds, a.seed, a.location_only,
         a.combat_compatible, a.insample, terms)
+    sites_fit = np.unique(code if group is not None else code[ctrl_r]).size
 
     full = np.full(d.Y.shape, np.nan, dtype=np.float32)
     full[np.ix_(rows, vm.model.valid)] = Zh
@@ -424,21 +489,11 @@ def main(argv=None):
                male=male, df_mu=vm.model.df_mu, df_sigma=vm.model.df_sigma,
                site=site + 1, site_names=np.array(site_names, dtype=object),
                ind_control=ctrl + 1,
-               harmonization=('ComCat on the normal scores: sites (empirical Bayes, '
-                              + ('location' if a.location_only or terms
-                                 else 'location and scale')
-                              + (', ComBat site variances' if a.combat_compatible
-                                 and not a.location_only and not terms else '')
-                              + ')' + (', nuisance ' + ', '.join(cols) if Q is not None else '')
-                              + ', preserved: age, sex'
-                              + (', ' + ', '.join(cov_cols) if cov_cols else '')
-                              + ('; fitted on all subjects, groups preserved' if group is not None
-                                 else '; fitted on the controls')
-                              + ('; in-sample (no cross-fit)' if a.insample
-                                 else '; cross-fitted')
-                              + ('; within subjects' if terms else
-                                 '; across subjects, folds over subjects'
-                                 if subject is not None else '')))
+               harmonization=describe(
+                   'normal scores', sites_fit, cols if Q is not None else [],
+                   [] if a.single_subject else ['age', 'sex'] + cov_cols, a.location_only,
+                   a.combat_compatible, terms, subject is not None, group is not None,
+                   a.insample, a.folds))
     from scipy.io import savemat
     path = f'{a.out}_zmaps_{test_name}.mat'
     savemat(path, {'NDMzmap': {k: (np.zeros(0) if v is None else v) for k, v in out.items()}},
