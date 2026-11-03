@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """ComCat harmonization of the normal scores (z-maps) of NeuroGAMLSS.
 
-The voxel/vertex-wise normative models give every test subject its normal scores at
-the reference site, without adaptation.  ComCat (github.com/ChristianGaser/ComCat)
-then removes from these scores the effects of the test sites (location and scale with
-empirical Bayes, as ComBat, but with df-consistent site variances from the residuals after
-the nuisance effects, which do not shrink small sites) and of nuisance variables such as
-the image quality measures ICR, NCR,
+The alternative to harmonizing the test data themselves (scripts/comcat_data.py, the
+main approach, as for BrainAGE): the voxel/vertex-wise normative models give every test
+subject its normal scores at the reference site, without adaptation.  ComCat
+(github.com/ChristianGaser/ComCat) then removes from these scores the effects of the
+test sites (location and scale with empirical Bayes, as ComBat, but with df-consistent
+site variances from the residuals after the nuisance effects, which do not shrink small
+sites) and of nuisance variables such as the image quality measures ICR, NCR,
 res_ECR and contrastr (penalized splines whose smoothness REML estimates).  Age, sex
 and the covariates of the normative models are preserved.
 
@@ -31,7 +32,7 @@ writes adni_zcomcat_zmaps_<test>.mat (struct NDMzmap, as neurogamlss.py), which
 mat2image.py converts to images.  Columns 1, 2, 3 and 5 of a CAT12 IQM table (no
 header) are ICR, NCR, res_ECR and contrastr.
 
-The functions are also used by harmonization_comparison.py.
+The functions are also used by comcat_data.py and harmonization_comparison.py.
 """
 
 import argparse
@@ -221,28 +222,25 @@ def adapt(Zc_adapt, code_adapt, Zc_apply, code_apply, k):
     return loc, loc / r, r
 
 
-def harmonize_zscores(CC, Z, ctrl, site=None, nuisance=None, preserve=None, subject=None,
-                      group=None, folds=5, seed=0, location_only=False,
-                      combat_compatible=False, insample=False):
-    """ComCat on normal scores Z (n, p) and adaptation with the controls ctrl (indices).
+def harmonize(CC, X, ctrl, site=None, nuisance=None, preserve=None, subject=None,
+              group=None, folds=5, seed=0, location_only=False, combat_compatible=False,
+              insample=False):
+    """ComCat on X (n, p), the data of the test subjects (comcat_data.py) or their
+    normal scores (harmonize_zscores), with the effects estimated on the controls ctrl
+    (indices).
 
     The controls are harmonized cross-fitted (folds over subjects, stratified by
     site), all others by the model of all controls.  With group (n,) labels, ComCat
     is fitted on all subjects instead, with indicators of every group not among the
-    controls preserved, and every subject is harmonized cross-fitted.  Returns the
-    final z-scores (n, p): (z - offset of the site) / common scale, with the
-    controls' adaptation leave-one-out, and the fold labels.
-
-    insample: ComCat fitted on all controls (all subjects with group) and applied to
-    every subject, the fitted ones included, and the controls adapted with all
-    controls including themselves (fold labels -1).  For comparison with the
-    cross-fitted scores only: in-sample scores of the controls are optimistic."""
-    n = Z.shape[0]
-    ctrl = np.asarray(ctrl)
+    controls preserved, and every subject is harmonized cross-fitted.  insample:
+    fitted on all controls (all subjects with group) and applied to every subject,
+    the fitted ones included (fold labels -1); for comparison only, because the
+    harmonized values of the fitted subjects are optimistic.  Returns the harmonized
+    X (n, p) and the fold labels (n,)."""
+    n = X.shape[0]
     is_ctrl = np.zeros(n, dtype=bool)
-    is_ctrl[ctrl] = True
+    is_ctrl[np.asarray(ctrl)] = True
     code = np.zeros(n, dtype=np.int64) if site is None else np.asarray(site, np.int64)
-    k = int(code.max()) + 1
     P = None if preserve is None else np.asarray(preserve, np.float64).reshape(n, -1)
     fit = is_ctrl
     if group is not None:
@@ -254,19 +252,42 @@ def harmonize_zscores(CC, Z, ctrl, site=None, nuisance=None, preserve=None, subj
         fit = np.ones(n, dtype=bool)
     opts = comcat_options(location_only, combat_compatible)
     if insample:
-        H = comcat_fit_apply(CC, Z, np.flatnonzero(fit), np.arange(n), code, nuisance, P,
+        H = comcat_fit_apply(CC, X, np.flatnonzero(fit), np.arange(n), code, nuisance, P,
                              subject, **opts)[1]
-        out = adapt(H[ctrl], code[ctrl], H, code, k)[1]
-        return out, np.full(n, -1)
+        return H, np.full(n, -1)
     fold = CC._make_folds(code, subject, fit, int(folds), seed)
-    H = np.full(Z.shape, np.nan)
+    H = np.full(X.shape, np.nan)
     for f in np.unique(fold[fold >= 0]):
         tr, te = np.flatnonzero(fit & (fold != f)), np.flatnonzero(fold == f)
-        H[te] = comcat_fit_apply(CC, Z, tr, te, code, nuisance, P, subject, **opts)[1]
+        H[te] = comcat_fit_apply(CC, X, tr, te, code, nuisance, P, subject, **opts)[1]
     rest = np.flatnonzero(~fit)
     if rest.size:
-        H[rest] = comcat_fit_apply(CC, Z, np.flatnonzero(fit), rest, code, nuisance, P,
+        H[rest] = comcat_fit_apply(CC, X, np.flatnonzero(fit), rest, code, nuisance, P,
                                    subject, **opts)[1]
+    return H, fold
+
+
+def harmonize_zscores(CC, Z, ctrl, site=None, nuisance=None, preserve=None, subject=None,
+                      group=None, folds=5, seed=0, location_only=False,
+                      combat_compatible=False, insample=False):
+    """ComCat on normal scores Z (n, p) (harmonize) and adaptation with the controls
+    ctrl (indices).  Returns the final z-scores (n, p): (z - offset of the site) /
+    common scale, with the controls' adaptation leave-one-out, and the fold labels.
+
+    insample: ComCat fitted on all controls (all subjects with group) and applied to
+    every subject, the fitted ones included, and the controls adapted with all
+    controls including themselves (fold labels -1).  For comparison with the
+    cross-fitted scores only: in-sample scores of the controls are optimistic."""
+    n = Z.shape[0]
+    ctrl = np.asarray(ctrl)
+    is_ctrl = np.zeros(n, dtype=bool)
+    is_ctrl[ctrl] = True
+    code = np.zeros(n, dtype=np.int64) if site is None else np.asarray(site, np.int64)
+    k = int(code.max()) + 1
+    H, fold = harmonize(CC, Z, ctrl, site, nuisance, preserve, subject, group, folds, seed,
+                        location_only, combat_compatible, insample)
+    if insample:
+        return adapt(H[ctrl], code[ctrl], H, code, k)[1], fold
     out = np.full(Z.shape, np.nan)
     others = np.flatnonzero(~is_ctrl)
     if others.size:
@@ -395,9 +416,10 @@ def main(argv=None):
                site=site + 1, site_names=np.array(site_names, dtype=object),
                ind_control=ctrl + 1,
                harmonization=('ComCat on the normal scores: sites (empirical Bayes, '
-                              + ('location' if a.location_only else 'location and scale')
+                              + ('location' if a.location_only or subject is not None
+                                 else 'location and scale')
                               + (', ComBat site variances' if a.combat_compatible
-                                 and not a.location_only else '')
+                                 and not a.location_only and subject is None else '')
                               + ')' + (', nuisance ' + ', '.join(cols) if Q is not None else '')
                               + ', preserved: age, sex'
                               + (', ' + ', '.join(cov_cols) if cov_cols else '')

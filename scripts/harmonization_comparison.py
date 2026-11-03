@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Sites and image quality in NeuroGAMLSS z-maps: terms of the GAMLSS or ComCat.
+"""Sites and image quality in NeuroGAMLSS z-maps: ComCat on the data, or terms of the GAMLSS.
 
 Compares, on the samples of neuroGAMLSS-TestData, where the effects of the test sites
-and of image quality measures (IQMs) are handled: in the normative models and their
-adaptation to the test sites (neurogamlss.py), or by ComCat harmonization of the test
-data or of their normal scores (scripts/comcat_zmaps.py).
+and of image quality measures (IQMs) are handled.  Approach 1, the main one, is the same
+as for BrainAGE: ComCat harmonizes the test data (scripts/comcat_data.py), and the
+normative models, trained on raw data, score them.  Its alternative applies ComCat to
+the normal scores instead (scripts/comcat_zmaps.py).  Approach 2 leaves the data
+unchanged and handles sites and IQMs in the normative models and their adaptation to the
+test sites (neurogamlss.py).
 
 All conditions share the normative models (s6mwp1 4 mm, SHASH, TIV in the mean, the
 training samples as sites) and the adaptation to the test sites (offsets shrunk toward
@@ -25,25 +28,28 @@ the mean of all controls, one common scale).  Two modes (--modes):
             noise.
 
 Conditions
-  gamlss                training sites in the mean, test sites adapted; no IQMs
-  gamlss_iqm_model      + ICR, NCR, res_ECR and contrastr in the mean of the normative
-                        models (--train-cov, --cov-mean)
+  gamlss                training sites in the mean, test sites adapted; no IQMs (the
+                        reference of the report)
+  approach 1: ComCat on the test data, then the adaptation
+  comcat                sites (location and scale, EB, df-consistent site variances after
+                        the IQM effects) and the four IQMs (P-splines, REML) removed, age,
+                        sex and TIV preserved, fitted on the controls (comcat_data.py)
+  combat                ComBat on the test data (location and scale, empirical Bayes,
+                        ComBat's site variances) [several sites]
+  alternative to approach 1: ComCat on the normal scores, then the adaptation
+  comcat_z              as comcat (comcat_zmaps.py)
+  approach 2: terms of the GAMLSS
   gamlss_test_nuisance  + IQM effects estimated in the controls within the sites and
                         removed from the normal scores (--test-nuisance)
-  combat                ComBat on the test data (location and scale, empirical Bayes,
-                        ComBat's site variances), then the adaptation [several sites]
-  comcat                ComCat on the test data: sites (location and scale, EB,
-                        df-consistent site variances after the IQM effects) and the four
-                        IQMs (P-splines, REML), age, sex and TIV preserved; then the
-                        adaptation
-  comcat_z              the same on the normal scores
-Variants
+  gamlss_iqm_model      + ICR, NCR, res_ECR and contrastr in the mean of the normative
+                        models (--train-cov, --cov-mean)
+Variants of comcat and comcat_z
   comcat_loc, comcat_z_loc         location only [several sites]
-  *_perm                           IQMs permuted across scans (control for flexibility)
   comcat_subj, comcat_z_subj       effects within subjects [repeated scans of several
                                    subjects]
   comcat_dx, comcat_z_dx           fitted on all subjects with the diagnosis preserved,
                                    every subject cross-fitted [samples with patients]
+  *_perm                           IQMs permuted across scans (control for flexibility)
 
 Metrics (controls, held out in mode crossfit; final z unless stated; median over voxels)
   log_density       mean log density of the data of the controls, nats per subject and
@@ -119,7 +125,8 @@ TEST = {
     'MR-ART': dict(file='MR-ART436', train='adult', tables='MR-ART/tables', n=436,
                    motion='motion436.txt', subject=r'sub-([A-Za-z0-9]+)', folds=5),
     'ON-Harmony': dict(file='ON-Harmony80', train='adult', tables='ON-Harmony/tables', n=80,
-                       site_table='scanner80.txt', subject=r'sub-([A-Za-z0-9]+)', folds=10),
+                       male='male80.txt', site_table='scanner80.txt',
+                       subject=r'sub-([A-Za-z0-9]+)', folds=10),
     'ABIDE': dict(file='ABIDE437', train='child', tables='ABIDE', n=437,
                   site_table='Scanner437.txt', group='DX_group437.txt', control=2,
                   groups={1: 'ASD', 2: 'TD'}, contrasts=(('ASD', 'TD'),), folds=5),
@@ -130,23 +137,26 @@ TEST = {
                  contrasts=(('AD', 'CN'), ('pMCI', 'sMCI')), folds=5),
 }
 
-CONDITIONS = {   # name: (label, spec)
+CONDITIONS = {   # name: (label, spec); the order of the report
     'gamlss': ("GAMLSS: sites only", dict(model=0)),
-    'gamlss_iqm_model': ("GAMLSS: IQMs in the normative model", dict(model=1)),
-    'gamlss_test_nuisance': ("GAMLSS: IQMs in the test controls", dict(level='nuisance')),
-    'combat': ("ComBat on the data", dict(level='data', iqm=False, sites=True, cc=True)),
+    # approach 1: ComCat on the data (comcat_data.py), as for BrainAGE
     'comcat': ("ComCat on the data", dict(level='data')),
     'comcat_loc': ("ComCat on the data, location only", dict(level='data', loc=True,
                                                              sites=True)),
+    'comcat_subj': ("ComCat on the data, within subjects", dict(level='data', subj=True)),
+    'comcat_dx': ("ComCat on the data, diagnosis preserved", dict(level='data', dx=True)),
+    'combat': ("ComBat on the data", dict(level='data', iqm=False, sites=True, cc=True)),
+    # alternative: ComCat on the normal scores (comcat_zmaps.py)
     'comcat_z': ("ComCat on the normal scores", dict(level='z')),
     'comcat_z_loc': ("ComCat on the normal scores, location only", dict(level='z', loc=True,
                                                                         sites=True)),
-    'comcat_subj': ("ComCat on the data, within subjects", dict(level='data', subj=True)),
     'comcat_z_subj': ("ComCat on the normal scores, within subjects", dict(level='z',
                                                                            subj=True)),
-    'comcat_dx': ("ComCat on the data, diagnosis preserved", dict(level='data', dx=True)),
     'comcat_z_dx': ("ComCat on the normal scores, diagnosis preserved", dict(level='z',
                                                                              dx=True)),
+    # approach 2: terms of the GAMLSS
+    'gamlss_test_nuisance': ("GAMLSS: IQMs in the test controls", dict(level='nuisance')),
+    'gamlss_iqm_model': ("GAMLSS: IQMs in the normative model", dict(model=1)),
     'gamlss_test_nuisance_perm': ("GAMLSS: permuted IQMs in the test controls",
                                   dict(level='nuisance', perm=True)),
     'comcat_perm': ("ComCat on the data, permuted IQMs", dict(level='data', perm=True)),
@@ -677,6 +687,9 @@ def report(args):
     val = {(r['sample'], r['mode'], r['condition'], r['metric']): float(r['value'])
            for r in rows}
     lines = ["# Sites and image quality in NeuroGAMLSS z-maps", "",
+             "Approach 1, the main one: ComCat on the test data (`comcat*`, `combat`), as "
+             "for BrainAGE; its alternative: ComCat on the normal scores (`comcat_z*`); "
+             "approach 2: sites and IQMs as terms of the GAMLSS (`gamlss*`).", "",
              "Controls held out (cross-fitted) or in-sample (every estimate fitted on the "
              "scans it is applied to; optimistic); Δ log density relative to `gamlss` of "
              "the same mode, in thousandths of a nat per subject and voxel (higher is "
