@@ -11,8 +11,8 @@ comparison and checks that the conditions recover what was simulated: IQM effect
 motion removed held out (and not with permuted IQMs), site scales equalized by the
 location-scale model, the AD effect kept and the pMCI-sMCI difference unchanged.  In
 mode insample, it checks the optimism: higher log densities than held out, variance
-removed by permuted IQMs, and IQM models across ten subjects that look good in-sample
-but make held-out subjects worse.
+removed by permuted IQMs, and IQM models across the six subjects of ON-Harmony that
+look good in-sample but make held-out subjects worse.
 
     python tests/test_harmonization_comparison.py <folder>
 
@@ -261,13 +261,17 @@ def test_harmonization_comparison(tmp_path):
     for c in ('gamlss_test_nuisance', 'comcat', 'comcat_z', 'comcat_subj', 'comcat_z_subj'):
         assert abs(g('MR-ART', c, 'motion_strong')) < 0.5 * m0, c
     assert abs(g('MR-ART', 'comcat_z_perm', 'motion_strong')) > 0.8 * m0
-    # site scales: the location-scale model equalizes them, location only does not
+    # site scales: the scale step reduces them relative to location only
     for s in ('Buchert', 'ABIDE'):
         assert g(s, 'comcat', 'site_scale_rms') < g(s, 'comcat_loc', 'site_scale_rms'), s
         assert g(s, 'comcat_z', 'site_scale_rms') < g(s, 'comcat_z_loc', 'site_scale_rms'), s
-    # site offsets: adapted in every condition
+    # site offsets before the adaptation: removed by ComCat with sites, not with IQMs only
     for s in ('Buchert', 'ABIDE', 'ADNI'):
-        assert g(s, 'gamlss', 'site_offset_rms') < 0.3, s
+        raw = g(s, 'gamlss', 'site_offset_rms')
+        for c in ('comcat', 'comcat_z'):
+            assert g(s, c, 'site_offset_rms') < 0.5 * raw, (s, c)
+    for s in ('ABIDE', 'ADNI'):
+        assert g(s, 'comcat_iqm', 'site_offset_rms') > g(s, 'comcat', 'site_offset_rms'), s
     # AD effect kept; the IQM correction removes the quality part of AD-CN (mean difference
     # of the location-adapted z), not the difference of pMCI and sMCI, whose IQMs agree
     d0 = g('ADNI', 'gamlss', 'diff_AD_CN')
@@ -289,10 +293,11 @@ def test_harmonization_comparison(tmp_path):
     w1 = g('Tohoku', 'gamlss', 'within_sd', 'insample')
     for c in ('gamlss_test_nuisance_perm', 'comcat_perm', 'comcat_z_perm'):
         assert g('Tohoku', c, 'within_sd', 'insample') < 0.97 * w1, c
-    # IQMs across ten subjects: in-sample hides that held-out subjects get worse
+    # IQMs across six subjects: in-sample hides that held-out subjects get worse
     for c in ('comcat', 'comcat_z'):
         assert (g('ON-Harmony', c, 'within_sd', 'insample')
                 < 0.5 * g('ON-Harmony', c, 'within_sd')), c
+        assert g('ON-Harmony', c, 'within_sd') > g('ON-Harmony', 'gamlss', 'within_sd'), c
 
 
 if __name__ == '__main__':
