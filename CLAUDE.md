@@ -12,8 +12,8 @@ NeuroGAMLSS is a single Python module, `neurogamlss.py`, with two parts. It fits
 - `docs/NeuroGAMLSS Method Scheme.html` explains the z-maps, NormBrainAGE and BrainLOSS step by step, with figures; `docs/NeuroGAMLSS Method Scheme.md` is its Markdown version.
 - `scripts/iqm_comparison.py` compares image quality measures as covariates and site effects on the log SD on the real CAT12 samples, which live outside the repository.
 - `scripts/test_sites_comparison.py` compares adaptations of test data from several scanners on ABIDE, the evidence for the test sites.
-- `scripts/comcat_zmaps.py` harmonizes the normal scores of test data with ComCat (sites in location and scale with df-consistent site variances, IQMs), fitted on the controls and cross-fitted, then adapts them as `neurogamlss.py` does; it imports ComCat (2026-11-02 or later) from `COMCAT_DIR` or `~/GitHub/ComCat`.
-- `scripts/harmonization_comparison.py` (run by `scripts/run_harmonization_comparison.sh`) compares, held out on neuroGAMLSS-TestData, sites and IQMs as terms of the GAMLSS with ComCat on the test data or on their normal scores; `tests/test_harmonization_comparison.py` runs it on simulated data (skipped without ComCat).
+- `scripts/comcat_zmaps.py` harmonizes the normal scores of test data with ComCat (sites in location and scale with df-consistent site variances, IQMs), fitted on the controls and cross-fitted (`--insample` for comparison), then adapts them as `neurogamlss.py` does; it imports ComCat (2026-11-02 or later) from `COMCAT_DIR` or `~/GitHub/ComCat`.
+- `scripts/harmonization_comparison.py` (run by `scripts/run_harmonization_comparison.sh`) compares, on neuroGAMLSS-TestData, sites and IQMs as terms of the GAMLSS with ComCat on the test data or on their normal scores, held out (cross-fitted) and in-sample (`--modes`); `tests/test_harmonization_comparison.py` runs it on simulated data (skipped without ComCat).
 
 ## Commands
 
