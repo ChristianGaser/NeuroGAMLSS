@@ -16,8 +16,10 @@ The effects are estimated in the controls (--adjust, default all subjects), so t
 disease effect cannot enter them; every control is harmonized by a model fitted on the
 controls of the other folds (folds over subjects, stratified by site), all other
 subjects by the model of all controls.  With --preserve-group, all subjects are used
-and their groups are preserved instead (few controls per site); with --subject, the
-effects are estimated within subjects (repeated scans).
+and their groups are preserved instead (few controls per site).  Repeated scans need
+--subject, which keeps the scans of a subject in one fold; the effects are estimated
+across subjects as for single scans, or with --within-subjects within subjects (few
+subjects, e.g. a traveling-subject sample).
 
 Every input is written with its name and all its fields to --out-dir, with Y
 harmonized, and a JSON file with the design next to it.  The harmonized file is then
@@ -126,11 +128,10 @@ def main(argv=None):
                    "fit ComCat on all subjects with the groups preserved instead of on the "
                    "controls only")
     p.add_argument('--subject', help="subject of every scan (repeated scans): the scans of a "
-                   "subject stay in one fold, and site and nuisance effects are estimated "
-                   "within subjects (location only)")
-    p.add_argument('--across-subjects', action='store_true',
-                   help="with --subject: effects estimated across subjects (no subject "
-                        "terms), the scans of a subject still in one fold")
+                   "subject stay in one fold; the effects are estimated across subjects")
+    p.add_argument('--within-subjects', action='store_true',
+                   help="with --subject: site and nuisance effects estimated within "
+                        "subjects (subject terms, location only), e.g. for few subjects")
     p.add_argument('--location-only', action='store_true',
                    help="no site variances (ComCat mean_only)")
     p.add_argument('--combat-compatible', action='store_true',
@@ -180,9 +181,9 @@ def main(argv=None):
     group = None if not a.preserve_group else CZ._read_column(a.preserve_group, n,
                                                                '--preserve-group', str)
     subject = None if not a.subject else CZ._read_column(a.subject, n, '--subject', str)
-    if a.across_subjects and subject is None:
-        p.error("--across-subjects needs --subject.")
-    terms = subject is not None and not a.across_subjects      # effects within subjects
+    if a.within_subjects and subject is None:
+        p.error("--within-subjects needs --subject.")
+    terms = subject is not None and a.within_subjects          # effects within subjects
 
     rows = np.flatnonzero(ok)
     if rows.size < n:
@@ -225,8 +226,7 @@ def main(argv=None):
         H, fold = CZ.harmonize(CC, dd.Y[rows], ctrl_r, code, None if Q is None else Q[rows],
                                preserve, None if subject is None else subject[rows],
                                None if group is None else group[rows], a.folds, a.seed,
-                               a.location_only, a.combat_compatible, a.insample,
-                               not a.across_subjects)
+                               a.location_only, a.combat_compatible, a.insample, terms)
         Y = np.full(dd.Y.shape, np.nan, dtype=np.float32)
         Y[rows] = H
         write_mat(src, dst, Y)

@@ -224,7 +224,7 @@ def adapt(Zc_adapt, code_adapt, Zc_apply, code_apply, k):
 
 def harmonize(CC, X, ctrl, site=None, nuisance=None, preserve=None, subject=None,
               group=None, folds=5, seed=0, location_only=False, combat_compatible=False,
-              insample=False, subject_terms=True):
+              insample=False, subject_terms=False):
     """ComCat on X (n, p), the data of the test subjects (comcat_data.py) or their
     normal scores (harmonize_zscores), with the effects estimated on the controls ctrl
     (indices).
@@ -272,7 +272,7 @@ def harmonize(CC, X, ctrl, site=None, nuisance=None, preserve=None, subject=None
 
 def harmonize_zscores(CC, Z, ctrl, site=None, nuisance=None, preserve=None, subject=None,
                       group=None, folds=5, seed=0, location_only=False,
-                      combat_compatible=False, insample=False, subject_terms=True):
+                      combat_compatible=False, insample=False, subject_terms=False):
     """ComCat on normal scores Z (n, p) (harmonize) and adaptation with the controls
     ctrl (indices).  Returns the final z-scores (n, p): (z - offset of the site) /
     common scale, with the controls' adaptation leave-one-out, and the fold labels.
@@ -331,11 +331,10 @@ def main(argv=None):
                    "fit ComCat on all subjects with the groups preserved instead of on the "
                    "controls only")
     p.add_argument('--subject', help="subject of every scan (repeated scans): the scans of a "
-                   "subject stay in one fold, and site and nuisance effects are estimated "
-                   "within subjects (location only)")
-    p.add_argument('--across-subjects', action='store_true',
-                   help="with --subject: effects estimated across subjects (no subject "
-                        "terms), the scans of a subject still in one fold")
+                   "subject stay in one fold; the effects are estimated across subjects")
+    p.add_argument('--within-subjects', action='store_true',
+                   help="with --subject: site and nuisance effects estimated within "
+                        "subjects (subject terms, location only), e.g. for few subjects")
     p.add_argument('--location-only', action='store_true',
                    help="no site variances (ComCat mean_only)")
     p.add_argument('--combat-compatible', action='store_true',
@@ -394,9 +393,9 @@ def main(argv=None):
     group = None if not a.preserve_group else _read_column(a.preserve_group, d.n,
                                                             '--preserve-group', str)
     subject = None if not a.subject else _read_column(a.subject, d.n, '--subject', str)
-    if a.across_subjects and subject is None:
-        p.error("--across-subjects needs --subject.")
-    terms = subject is not None and not a.across_subjects      # effects within subjects
+    if a.within_subjects and subject is None:
+        p.error("--within-subjects needs --subject.")
+    terms = subject is not None and a.within_subjects          # effects within subjects
 
     rows = np.flatnonzero(ok)
     if rows.size < d.n:
@@ -414,7 +413,7 @@ def main(argv=None):
         CC, Z[:, fin], ctrl_r, code, None if Q is None else Q[rows],
         np.column_stack(preserve), None if subject is None else subject[rows],
         None if group is None else group[rows], a.folds, a.seed, a.location_only,
-        a.combat_compatible, a.insample, not a.across_subjects)
+        a.combat_compatible, a.insample, terms)
 
     full = np.full(d.Y.shape, np.nan, dtype=np.float32)
     full[np.ix_(rows, vm.model.valid)] = Zh
