@@ -53,7 +53,9 @@ Variants of comcat and comcat_z
                                    [several sites]
   comcat_iqm_dx, comcat_z_iqm_dx   the same, diagnosis preserved (ADNI design)
 Single-subject samples (Tohoku, Buchert) preserve nothing in ComCat: their age and TIV
-vary only with the scanning date or technically.
+vary only with the scanning date or technically.  They are scored at their mean age: the
+scanning date, and with it the age, varies mostly between the scanners (Buchert: 94% of
+the variance of age), so that the age of every scan would bring the scanners back.
   *_perm                           IQMs permuted across scans (control for flexibility)
 
 Metrics (controls, held out in mode crossfit; final z unless stated; median over voxels)
@@ -306,7 +308,10 @@ def load_sample(args, name, rng):
         return None if a is None else np.asarray(a)[rows]
 
     _, code = np.unique(sub(site).astype(str), return_inverse=True)
-    S = SimpleNamespace(name=name, cfg=cfg, Y=d.Y[rows], age=d.age[rows], male=sub(male),
+    age = d.age[rows]
+    if cfg.get('subject') == 'one':          # one subject: its mean age (see above)
+        age = np.full(rows.size, age.mean())
+    S = SimpleNamespace(name=name, cfg=cfg, Y=d.Y[rows], age=age, male=sub(male),
                         tiv=tiv[rows], iqm=iqm[rows], code=code.astype(np.int64),
                         k=int(code.max()) + 1, subject=sub(subject), units=sub(units),
                         motion=sub(motion), group=sub(group))

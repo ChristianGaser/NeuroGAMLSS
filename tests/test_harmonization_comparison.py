@@ -300,6 +300,22 @@ def test_harmonization_comparison(tmp_path):
         assert g('ON-Harmony', c, 'within_sd') > g('ON-Harmony', 'gamlss', 'within_sd'), c
 
 
+@pytest.mark.skipif(not _comcat_available(), reason="ComCat not found (COMCAT_DIR)")
+def test_single_subject_scored_at_mean_age(tmp_path):
+    """One subject: every scan gets the mean age (its age varies only with the date)."""
+    from types import SimpleNamespace
+    import harmonization_comparison as HC
+    import neurogamlss as NG
+    data = simulate(str(tmp_path))
+    args = SimpleNamespace(root=data, seed=0, inner_folds=5, folds=0)
+    S = HC.load_sample(args, 'Buchert', np.random.default_rng(0))
+    age = NG.load_data(os.path.join(data, 'TestData', 's6mwp1_4mm_Buchert531_CAT12.9.mat')).age
+    assert np.ptp(age) > 1
+    assert np.ptp(S.age) == 0 and S.age[0] == pytest.approx(age.mean())
+    S = HC.load_sample(args, 'MR-ART', np.random.default_rng(0))
+    assert np.ptp(S.age) > 10
+
+
 if __name__ == '__main__':
     folder = sys.argv[1] if len(sys.argv) > 1 else 'harmonization_simulation'
     run(folder)
