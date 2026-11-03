@@ -125,8 +125,12 @@ def main(argv=None):
     p.add_argument('--preserve-group', help="group of every test subject (e.g. diagnosis): "
                    "fit ComCat on all subjects with the groups preserved instead of on the "
                    "controls only")
-    p.add_argument('--subject', help="subject of every scan (repeated scans): site and "
-                   "nuisance effects are estimated within subjects")
+    p.add_argument('--subject', help="subject of every scan (repeated scans): the scans of a "
+                   "subject stay in one fold, and site and nuisance effects are estimated "
+                   "within subjects (location only)")
+    p.add_argument('--across-subjects', action='store_true',
+                   help="with --subject: effects estimated across subjects (no subject "
+                        "terms), the scans of a subject still in one fold")
     p.add_argument('--location-only', action='store_true',
                    help="no site variances (ComCat mean_only)")
     p.add_argument('--combat-compatible', action='store_true',
@@ -176,6 +180,9 @@ def main(argv=None):
     group = None if not a.preserve_group else CZ._read_column(a.preserve_group, n,
                                                                '--preserve-group', str)
     subject = None if not a.subject else CZ._read_column(a.subject, n, '--subject', str)
+    if a.across_subjects and subject is None:
+        p.error("--across-subjects needs --subject.")
+    terms = subject is not None and not a.across_subjects      # effects within subjects
 
     rows = np.flatnonzero(ok)
     if rows.size < n:
@@ -192,7 +199,7 @@ def main(argv=None):
     kept = ['age'] + (['sex'] if male is not None else []) + ccols
     parts = []
     if k > 1:                       # with subject terms, ComCat corrects the location only
-        scale = ('location' if a.location_only or subject is not None else
+        scale = ('location' if a.location_only or terms else
                  'location and scale, ComBat site variances' if a.combat_compatible else
                  'location and scale')
         parts.append(f"sites (empirical Bayes, {scale})")
@@ -204,7 +211,8 @@ def main(argv=None):
                  else '; fitted on the controls')
               + ('; in-sample (no cross-fit)' if a.insample
                  else f'; cross-fitted ({a.folds} folds)')
-              + ('; within subjects' if subject is not None else ''))
+              + ('; within subjects' if terms else
+                 '; across subjects, folds over subjects' if subject is not None else ''))
     print(f"{rows.size} subjects, {ctrl_r.size} controls, {k} site(s): {design}")
 
     os.makedirs(os.path.expanduser(a.out_dir), exist_ok=True)
@@ -217,7 +225,8 @@ def main(argv=None):
         H, fold = CZ.harmonize(CC, dd.Y[rows], ctrl_r, code, None if Q is None else Q[rows],
                                preserve, None if subject is None else subject[rows],
                                None if group is None else group[rows], a.folds, a.seed,
-                               a.location_only, a.combat_compatible, a.insample)
+                               a.location_only, a.combat_compatible, a.insample,
+                               not a.across_subjects)
         Y = np.full(dd.Y.shape, np.nan, dtype=np.float32)
         Y[rows] = H
         write_mat(src, dst, Y)

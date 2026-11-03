@@ -172,6 +172,37 @@ def test_v73_same_as_v5(adni, tmp_path):
                                   NG.load_data(adni['out']).Y)
 
 
+def test_subject_folds(adni, tmp_path):
+    """MR-ART: with --subject, the scans of a subject stay in one fold, with the effects
+    estimated within subjects or, with --across-subjects, across subjects."""
+    import comcat_data as CD
+    import comcat_zmaps as CZ
+    mat = os.path.join(adni['data'], 'TestData', 's6mwp1_4mm_MR-ART436_CAT12.9.mat')
+    names = [str(x) for x in np.ravel(loadmat(mat, squeeze_me=True,
+                                              struct_as_record=False)['sample'].data)]
+    subject = np.array([nm.split('_')[0][4:] for nm in names])        # sub-<id>
+    subj_file = os.path.join(str(tmp_path), 'subject.txt')
+    np.savetxt(subj_file, subject, fmt='%s')
+    tdir = os.path.join(adni['data'], 'TestData', 'MR-ART', 'tables')
+    args = ['--test', mat, '--nuisance', os.path.join(tdir, 'IQM436.txt'), '--nuisance-cols',
+            '1,2,3,5', '--preserve', os.path.join(tdir, 'TIV436.txt'), '--subject', subj_file]
+    out = {}
+    for tag, extra in (('within', []), ('across', ['--across-subjects'])):
+        CD.main(args + extra + ['--out-dir', os.path.join(str(tmp_path), tag)])
+        base = os.path.join(str(tmp_path), tag, os.path.basename(mat))
+        with open(os.path.splitext(base)[0] + '.json') as f:
+            fold = np.array(json.load(f)['fold'])
+        assert all(np.unique(fold[subject == s]).size == 1 for s in np.unique(subject)), tag
+        out[tag] = NG.load_data(base).Y
+    d = NG.load_data(mat)
+    tiv = np.loadtxt(os.path.join(tdir, 'TIV436.txt'))
+    Q = np.loadtxt(os.path.join(tdir, 'IQM436.txt'))[:, [0, 1, 2, 4]]
+    H = CZ.harmonize(CZ.import_comcat(), d.Y, np.arange(d.n), None, Q,
+                     np.column_stack([d.age, d.male, tiv]), subject, subject_terms=False)[0]
+    np.testing.assert_allclose(out['across'], H, rtol=1e-6, atol=1e-6)
+    assert not np.allclose(out['across'], out['within'])
+
+
 def test_refuses_to_overwrite_input(adni):
     import comcat_data as CD
     with pytest.raises(SystemExit):
