@@ -379,7 +379,7 @@ The test-sample corrections were estimated in two ways:
 - **In-sample.** All scans of a test sample served as controls, and the same scans were scored, as when a whole sample is harmonized.
 - **Held-out half.** The effects were estimated on one half of the subjects (the scans, for Tohoku and Buchert) and removed from the other half, which shows how they carry over to new subjects.
 
-`--test-nuisance` used the four ratings ICR, NCR, res_ECR and contrastr. ComCat harmonized every test sample as one site, with all seven IQMs as B-splines (5 to 10 df per IQM, as ComCat chooses them) and age preserved where the subjects differ. These are the IQM-only conditions of the ComCat evaluation; scanners as sites were not used. Brain age:
+`--test-nuisance` used the four ratings ICR, NCR, res_ECR and contrastr. ComCat harmonized every test sample as one site, with all seven IQMs as B-splines (5 to 10 df per IQM, as ComCat chooses them) and age preserved where the subjects differ. These are the IQM-only conditions of the ComCat evaluation; scanners as sites were not used. This was the ComCat of 2026-10, with a variance step also for one site; the current ComCat (four IQMs, P-splines with REML, location only with one site, cross-fitted) is applied by `scripts/comcat_data.py` and compared held out by `scripts/harmonization_comparison.py`. Brain age:
 
 | IQMs | BrainAGE SD, Tohoku | BrainAGE SD, Buchert | BrainAGE SD, ON-Harmony | BrainAGE SD, MR-ART | Motion effect |
 |---|---|---|---|---|---|
