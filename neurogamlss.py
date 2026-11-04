@@ -5200,16 +5200,19 @@ def main(argv=None):
             p.error(str(err))
         if not cols:
             p.error("--test-nuisance contains no numeric column.")
-        # a covariate of the models cannot also be a nuisance: the same name, unless the
-        # table has no header (its columns are then named by number, as those of any
-        # table without header, e.g. a CAT12 IQM table and a TIV table), or the same values
+        # a covariate of the models cannot also be a nuisance: the same name, unless one
+        # of the tables has no header (its columns are then named by number, as those of
+        # any table without header, e.g. a CAT12 IQM table and a TIV table), or the same
+        # values
         numbered = names == [str(j + 1) for j in range(len(names))]
+        by_name = not numbered and (cov is None or list(cov.names)
+                                    != [str(j + 1) for j in range(len(cov.names))])
         both = [(c, nm) for c in cols for nm in sorted(used)
-                if (c == nm and not numbered)
+                if (c == nm and by_name)
                 or _same_variable(values[:, names.index(c)], test[0].C[:, cov.names.index(nm)])]
         if both:
             p.error("Covariates of the models cannot also be removed as nuisance: "
-                    + ', '.join(nm if c == nm and not numbered else
+                    + ', '.join(nm if c == nm and by_name else
                                 f"{nm} (values of {'column ' if numbered else ''}{c} of "
                                 "--test-nuisance)" for c, nm in both) + ".")
         nuisance = dict(names=cols, values=values[:, [names.index(nm) for nm in cols]],
