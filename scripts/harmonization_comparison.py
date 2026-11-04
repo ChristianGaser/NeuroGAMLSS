@@ -61,10 +61,9 @@ the variance of age), so that the age of every scan would bring the scanners bac
 Metrics (controls, held out in mode crossfit; final z unless stated; median over voxels)
   log_density       mean log density of the data of the controls, nats per subject and
                     voxel: comparable across all conditions (proper score); for ComCat on
-                    the data, the scored values are harmonized without clipping (ComCat
-                    sets negative values to 0 if the data have none, and the clipped
-                    transformation has no density), with the adaptation estimated from
-                    the clipped values of the controls, as for the z-maps
+                    the data, computed without clipping, for the scored values and the
+                    controls' values of the adaptation alike, i.e. as before ComCat set
+                    negative values to 0 (the clipped transformation has no density)
   clipped           share of the controls' values that ComCat set to 0 [ComCat on the
                     data]
   z_sd, z_mean      SD and mean of the controls' z (1 and 0 if calibrated)
@@ -469,20 +468,23 @@ def corrector(CC, S, R, spec):
 def inner_crossfit(CC, S, correct, fit, rows):
     """Corrected values of rows (a subset of fit), each from a correction fitted on the
     fit rows of the other inner folds (folds over subjects, stratified by site), so
-    that the adaptation is estimated from held-out values as for new subjects."""
+    that the adaptation is estimated from held-out values as for new subjects; with
+    clipping and without it (from the same fits)."""
     units = None if S.units is None else S.units[fit]
     fold = CC._make_folds(S.code[fit], units, np.ones(fit.size, dtype=bool), S.inner,
                           S.seed + 7)
-    out = None
+    out = outu = None
     for f in np.unique(fold):
         te, tr = fit[fold == f], fit[fold != f]
         tgt = te[np.isin(te, rows)]
         if tgt.size:
-            H = correct(tr, tgt)[0]
+            H, _, Hu = correct(tr, tgt)
             if out is None:
                 out = np.full((rows.size, H.shape[1]), np.nan)
-            out[np.searchsorted(rows, tgt)] = H
-    return out
+                outu = out.copy()
+            k = np.searchsorted(rows, tgt)
+            out[k], outu[k] = H, Hu
+    return out, outu
 
 
 def run_condition(CC, S, R, name, mode='crossfit'):
@@ -503,37 +505,41 @@ def run_condition(CC, S, R, name, mode='crossfit'):
     Zf, Zl, LD, Zr, CL = (np.full(shape, np.nan, dtype=np.float32) for _ in range(5))
     for fit, ad, ap in passes(S, spec.get('dx', False), mode):
         slope = 1.0                     # derivative of the harmonization (ComCat L/S)
-        shift = 0.0                     # normal score without clipping minus with it
+        Zau = None                      # ComCat on the data: adaptation rows unclipped
         if level is None:
             Zr, Lr = (R.Z1, R.L1) if spec.get('model') == 1 else (R.Z0, R.L0)
             Za, Zp, Zpre, Lp = Zr[ad], Zr[ap], Zr[ap], Lr[ap]
         else:
             Hp, slope, Hu = correct(fit, ap)
             if mode == 'insample':
-                Ha = Hp[np.searchsorted(ap, ad)]        # ad is a subset of ap = all rows
+                pos = np.searchsorted(ap, ad)           # ad is a subset of ap = all rows
+                Ha, Hau = Hp[pos], Hu[pos]
             else:
-                Ha = inner_crossfit(CC, S, correct, fit, ad)
+                Ha, Hau = inner_crossfit(CC, S, correct, fit, ad)
             if level == 'data':
                 Za = data_scores(S, R, ad, Ha)[0]
                 Zp, Lp = data_scores(S, R, ap, Hp)
-                Zpre = Zp
-                clipped = (Hp != Hu) & np.isfinite(Hu)
-                CL[ap] = clipped
-                if clipped.any():       # the density of the affine harmonization
+                CL[ap] = (Hp != Hu) & np.isfinite(Hu)
+                # the log density of the affine harmonization (the clipped one has none):
+                # the scored values and the controls of the adaptation without clipping
+                Zau, Zpre = Za, Zp
+                if not (np.array_equal(Hau, Ha, equal_nan=True)
+                        and np.array_equal(Hu, Hp, equal_nan=True)):
+                    Zau = data_scores(S, R, ad, Hau)[0]
                     Zpre, Lp = data_scores(S, R, ap, Hu)
-                    shift = Zpre - Zp
             else:
                 Za, Zp, Zpre, Lp = Ha, Hp, R.Z0[ap], R.L0[ap]
         loc, fin, r = CZ.adapt(Za, S.code[ad], Zp, S.code[ap], S.k)
         Zl[ap], Zf[ap], Zr[ap] = loc, fin, Zp
+        zu, ru = fin, r
+        if Zau is not None:             # the adaptation of the unclipped values
+            _, zu, ru = CZ.adapt(Zau, S.code[ad], Zpre, S.code[ap], S.k)
         held = S.ctrl[ap]
         # log density of the data: log phi(z) + log |dz/dy|, with dz/dy = slope / r *
-        # f(y_c) / phi(z_c) for the normal score z_c of the (harmonized) data y_c; the
-        # final score of the unclipped data under the same adaptation
-        zu = fin + shift / r
+        # f(y_c) / phi(z_c) for the normal score z_c of the (harmonized) data y_c
         with np.errstate(invalid='ignore', divide='ignore'):
             ls = 0.0 if np.isscalar(slope) else np.log(np.broadcast_to(slope, fin.shape)[held])
-            LD[ap[held]] = (-0.5 * zu[held] ** 2 - np.log(r) + Lp[held]
+            LD[ap[held]] = (-0.5 * zu[held] ** 2 - np.log(ru) + Lp[held]
                             + 0.5 * Zpre[held] ** 2 + ls)
     return Zf, Zl, LD, Zr, CL
 

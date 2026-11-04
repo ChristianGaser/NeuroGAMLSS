@@ -51,34 +51,14 @@ LOG2PI = np.log(2 * np.pi)
 
 
 def import_comcat(path=None):
-    """The comcat module, from path, COMCAT_DIR, ~/GitHub/ComCat or the Python path."""
+    """The comcat module, from path, COMCAT_DIR, ~/GitHub/ComCat or the Python path (its
+    current version: the options min_scale_n and clip are used)."""
     for d in (path, os.environ.get('COMCAT_DIR'), '~/GitHub/ComCat'):
         if d and os.path.isfile(os.path.join(os.path.expanduser(d), 'comcat.py')):
             sys.path.insert(0, os.path.expanduser(d))
             break
     import comcat
-    if not _current_comcat(comcat):
-        raise ImportError("ComCat of 2026-11-03 or later is needed (df-consistent site "
-                          "variances; no site correction for sites with a single subject).")
     return comcat
-
-
-def _current_comcat(CC):
-    """True for ComCat of 2026-11-03 or later: option combat_compatible, and a site with a
-    single subject keeps that subject's deviation (before, its site effect removed it)."""
-    import inspect
-    import warnings
-    if 'combat_compatible' not in inspect.signature(CC.comcat).parameters:
-        return False
-    rng = np.random.default_rng(0)
-    site = np.r_[np.zeros(8), np.ones(8), 2]
-    Y = rng.normal(size=(20, site.size)) + site
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        H0 = CC.comcat(Y, site, None, None, eb=False)[0]
-        Y[:, -1] += 1.0
-        H1 = CC.comcat(Y, site, None, None, eb=False)[0]
-    return abs(np.mean(H1[:, -1] - H0[:, -1]) - 1) < 0.2
 
 
 def comcat_options(location_only=False, combat_compatible=False):
@@ -216,6 +196,9 @@ def comcat_fit_apply(CC, X, fit, apply, batch=None, nuisance=None, preserve=None
     Ha = np.array(X[apply], dtype=np.float64)
     b = None if batch is None or np.unique(batch[fit]).size < 2 else np.asarray(batch)
     P = _columns(preserve, fit)
+    if b is None and nuisance is None and P is None and subject is None:
+        D = np.ones(Ha.shape) if slope else None          # nothing to estimate
+        return (Hf, Ha, D, Ha.copy()) if slope else (Hf, Ha)
 
     def sub(a, r):
         return None if a is None else np.asarray(a)[r]

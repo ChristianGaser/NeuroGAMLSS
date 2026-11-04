@@ -6,8 +6,11 @@ ComCat (github.com/ChristianGaser/ComCat) harmonizes the data of the test sample
 BA_data2mat mat-files), and the models that turn the data into scores, the normative
 GAMLSS of neurogamlss.py or the GPR of BrainAGE, stay trained on raw data.  ComCat
 removes the effects of the test sites (location and scale with empirical Bayes and the
-df-consistent site variances of ComCat, which do not shrink small sites; location only
-with one site or with subject terms) and of nuisance variables such as the image quality
+df-consistent site variances of ComCat, which do not shrink small sites, for every site
+with at least two subjects in the fit: min_scale_n=2, as the adaptation of the z-maps has
+one common scale, whereas ComCat and ComCat/comcat_mat.py, which BrainAGE uses, correct
+sites with fewer than four subjects in location only; location only with one site or
+with subject terms) and of nuisance variables such as the image quality
 measures ICR, NCR, res_ECR and contrastr (P-splines whose smoothness REML estimates).
 Age, sex and the covariates of --preserve (e.g. TIV, if the normative models use it)
 are preserved.
