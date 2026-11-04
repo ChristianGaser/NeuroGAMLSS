@@ -261,15 +261,15 @@ def test_harmonization_comparison(tmp_path):
     for c in ('gamlss_test_nuisance', 'comcat', 'comcat_z', 'comcat_subj', 'comcat_z_subj'):
         assert abs(g('MR-ART', c, 'motion_strong')) < 0.5 * m0, c
     assert abs(g('MR-ART', 'comcat_z_perm', 'motion_strong')) > 0.8 * m0
-    # site scales: the scale step reduces them relative to location only (ABIDE); with
-    # 2-3 training scans per scanner (Buchert), ComCat corrects in location only
-    # (min_scale_n, ComCat 2026-11-04)
-    s = 'ABIDE'
-    assert g(s, 'comcat', 'site_scale_rms') < g(s, 'comcat_loc', 'site_scale_rms'), s
-    assert g(s, 'comcat_z', 'site_scale_rms') < g(s, 'comcat_z_loc', 'site_scale_rms'), s
-    for c in ('comcat', 'comcat_z'):
-        assert np.isclose(g('Buchert', c, 'site_scale_rms'),
-                          g('Buchert', c + '_loc', 'site_scale_rms')), c
+    # site scales: the scale step reduces them relative to location only, also with 2-3
+    # training scans per scanner (Buchert): the z-map routes use min_scale_n=2
+    # (comcat_zmaps.comcat_options)
+    for s in ('Buchert', 'ABIDE'):
+        assert g(s, 'comcat', 'site_scale_rms') < g(s, 'comcat_loc', 'site_scale_rms'), s
+        assert g(s, 'comcat_z', 'site_scale_rms') < g(s, 'comcat_z_loc', 'site_scale_rms'), s
+    # share of clipped values (ComCat on the data only): a fraction
+    assert all(0 <= val < 1 for k, val in v.items() if k[2] == 'clipped')
+    assert not any(k[2] == 'clipped' and k[1].startswith(('comcat_z', 'gamlss')) for k in v)
     # site offsets before the adaptation: removed by ComCat with sites, not with IQMs only
     for s in ('Buchert', 'ABIDE', 'ADNI'):
         raw = g(s, 'gamlss', 'site_offset_rms')

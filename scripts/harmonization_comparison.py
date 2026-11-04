@@ -60,7 +60,13 @@ the variance of age), so that the age of every scan would bring the scanners bac
 
 Metrics (controls, held out in mode crossfit; final z unless stated; median over voxels)
   log_density       mean log density of the data of the controls, nats per subject and
-                    voxel: comparable across all conditions (proper score)
+                    voxel: comparable across all conditions (proper score); for ComCat on
+                    the data, the scored values are harmonized without clipping (ComCat
+                    sets negative values to 0 if the data have none, and the clipped
+                    transformation has no density), with the adaptation estimated from
+                    the clipped values of the controls, as for the z-maps
+  clipped           share of the controls' values that ComCat set to 0 [ComCat on the
+                    data]
   z_sd, z_mean      SD and mean of the controls' z (1 and 0 if calibrated)
   beyond_2.58       share of |z| > 2.58, pooled (1% if calibrated)
   site_offset_rms   RMS of the deviations of the site means of the controls' corrected
@@ -437,8 +443,8 @@ def passes(S, dx=False, mode='crossfit'):
 
 def corrector(CC, S, R, spec):
     """correct(fit, rows) -> the corrected values of rows (normal scores, or data for
-    ComCat on the data) and their derivative with respect to the uncorrected values,
-    with the correction fitted on the rows fit."""
+    ComCat on the data), their derivative with respect to the uncorrected values and
+    the corrected values without clipping, with the correction fitted on the rows fit."""
     level = spec['level']
     Q = S.iqm_perm if spec.get('perm') else S.iqm
     Q = Q if spec.get('iqm', True) else None
@@ -451,11 +457,12 @@ def corrector(CC, S, R, spec):
         if level == 'nuisance':
             N, Pm, _, _ = NG.nuisance_design(Q, S.age, S.male_used, fit, 1, list(IQM4),
                                              S.code if S.k > 1 else None)
-            return R.Z0[rows] - N[rows] @ (Pm @ R.Z0[fit]), np.ones((rows.size, 1))
+            H = R.Z0[rows] - N[rows] @ (Pm @ R.Z0[fit])
+            return H, np.ones((rows.size, 1)), H
         X = R.Z0 if level == 'z' else R.Ydata
-        _, H, D = CZ.comcat_fit_apply(CC, X, fit, rows, batch, Q, P, subject, slope=True,
-                                      **opts)
-        return H, D
+        _, H, D, Hu = CZ.comcat_fit_apply(CC, X, fit, rows, batch, Q, P, subject,
+                                          slope=True, **opts)
+        return H, D, Hu
     return correct
 
 
@@ -480,8 +487,9 @@ def inner_crossfit(CC, S, correct, fit, rows):
 
 def run_condition(CC, S, R, name, mode='crossfit'):
     """Final z (n, p), location-adapted z before the common scale (n, p), for the
-    controls the log density of their data (n, p), and the corrected scores before the
-    adaptation (n, p).
+    controls the log density of their data (n, p), the corrected scores before the
+    adaptation (n, p), and for ComCat on the data whether the controls' values were
+    clipped (n, p; NaN otherwise).
 
     In every pass, the correction is fitted on the fit rows and applied to the scored
     rows; the adaptation (offsets and common scale) is estimated from the controls'
@@ -492,14 +500,15 @@ def run_condition(CC, S, R, name, mode='crossfit'):
     level = spec.get('level')
     correct = corrector(CC, S, R, spec) if level else None
     shape = R.Z0.shape
-    Zf, Zl, LD, Zr = (np.full(shape, np.nan, dtype=np.float32) for _ in range(4))
+    Zf, Zl, LD, Zr, CL = (np.full(shape, np.nan, dtype=np.float32) for _ in range(5))
     for fit, ad, ap in passes(S, spec.get('dx', False), mode):
         slope = 1.0                     # derivative of the harmonization (ComCat L/S)
+        shift = 0.0                     # normal score without clipping minus with it
         if level is None:
             Zr, Lr = (R.Z1, R.L1) if spec.get('model') == 1 else (R.Z0, R.L0)
             Za, Zp, Zpre, Lp = Zr[ad], Zr[ap], Zr[ap], Lr[ap]
         else:
-            Hp, slope = correct(fit, ap)
+            Hp, slope, Hu = correct(fit, ap)
             if mode == 'insample':
                 Ha = Hp[np.searchsorted(ap, ad)]        # ad is a subset of ap = all rows
             else:
@@ -508,18 +517,25 @@ def run_condition(CC, S, R, name, mode='crossfit'):
                 Za = data_scores(S, R, ad, Ha)[0]
                 Zp, Lp = data_scores(S, R, ap, Hp)
                 Zpre = Zp
+                clipped = (Hp != Hu) & np.isfinite(Hu)
+                CL[ap] = clipped
+                if clipped.any():       # the density of the affine harmonization
+                    Zpre, Lp = data_scores(S, R, ap, Hu)
+                    shift = Zpre - Zp
             else:
                 Za, Zp, Zpre, Lp = Ha, Hp, R.Z0[ap], R.L0[ap]
         loc, fin, r = CZ.adapt(Za, S.code[ad], Zp, S.code[ap], S.k)
         Zl[ap], Zf[ap], Zr[ap] = loc, fin, Zp
         held = S.ctrl[ap]
         # log density of the data: log phi(z) + log |dz/dy|, with dz/dy = slope / r *
-        # f(y_c) / phi(z_c) for the normal score z_c of the (harmonized) data y_c
+        # f(y_c) / phi(z_c) for the normal score z_c of the (harmonized) data y_c; the
+        # final score of the unclipped data under the same adaptation
+        zu = fin + shift / r
         with np.errstate(invalid='ignore', divide='ignore'):
             ls = 0.0 if np.isscalar(slope) else np.log(np.broadcast_to(slope, fin.shape)[held])
-            LD[ap[held]] = (-0.5 * fin[held] ** 2 - np.log(r) + Lp[held]
+            LD[ap[held]] = (-0.5 * zu[held] ** 2 - np.log(r) + Lp[held]
                             + 0.5 * Zpre[held] ** 2 + ls)
-    return Zf, Zl, LD, Zr
+    return Zf, Zl, LD, Zr, CL
 
 
 # ---------------------------------------------------------------------------
@@ -594,13 +610,15 @@ def welch(a, b):
     return t, d
 
 
-def metrics(S, Zf, Zl, LD, Zr):
+def metrics(S, Zf, Zl, LD, Zr, CL=None):
     z = Zf[S.ctrl].astype(np.float64)
     fin = np.isfinite(z)
     out = dict(log_density=float(np.nanmean(LD[S.ctrl])),
                z_sd=_med(np.nanstd(z, axis=0, ddof=1)),
                z_mean=_med(np.nanmean(z, axis=0)),
                **{'beyond_2.58': float(np.mean(np.abs(z[fin]) > 2.58))})
+    if CL is not None and np.any(np.isfinite(CL[S.ctrl])):
+        out['clipped'] = float(np.nanmean(CL[S.ctrl]))
     if S.k > 1:
         out['site_scale_rms'] = site_spread(z, S.code[S.ctrl], S.k)[1]
         out['site_offset_rms'] = site_spread(Zr[S.ctrl].astype(np.float64), S.code[S.ctrl],
@@ -655,8 +673,7 @@ def compare(args):
         for mode in args.modes:
             for c in names:
                 t1 = time.time()
-                Zf, Zl, LD, Zr = run_condition(CC, S, R, c, mode)
-                m = metrics(S, Zf, Zl, LD, Zr)
+                m = metrics(S, *run_condition(CC, S, R, c, mode))
                 m.update(n_scans=S.n, n_controls=int(S.ctrl.sum()),
                          n_voxels=int(R.feat.size), seconds=round(time.time() - t1, 1))
                 rows += [dict(sample=name, mode=mode, condition=c, metric=k, value=v)
@@ -695,6 +712,7 @@ REPORT_COLUMNS = (   # metric, header, format
     ('log_density', 'Δ log density (10⁻³ nat)', 'rel'),
     ('z_sd', 'z SD', '.3f'),
     ('beyond_2.58', 'z beyond ±2.58 (%)', 'pct'),
+    ('clipped', 'clipped (%)', 'pct3'),
     ('site_offset_rms', 'site offset before adaptation', '.3f'),
     ('site_scale_rms', 'site log-scale', '.3f'),
     ('within_sd', 'within-subject SD', '.3f'),
@@ -747,6 +765,8 @@ def report(args):
                         cells.append(f"{1000 * (v - v0):+.1f}")
                     elif fmt == 'pct':
                         cells.append(f"{100 * v:.2f}")
+                    elif fmt == 'pct3':
+                        cells.append(f"{100 * v:.3f}" if np.isfinite(v) else '-')
                     else:
                         cells.append(format(v, fmt) if np.isfinite(v) else '-')
                 for m in tcols:

@@ -85,10 +85,15 @@ def comcat_options(location_only=False, combat_compatible=False):
     """Options of comcat(): P-splines with REML, empirical Bayes for the sites and, unless
     location_only, their scale step with the df-consistent site variances of ComCat
     (residual df n_i minus leverage, after the nuisance effects), which do not shrink the
-    residuals of small sites.  combat_compatible: the site variances of ComBat instead
-    (from the residuals).  With one site, comcat() corrects the location only in any
-    case."""
-    opts = dict(nuisance_model='pspline', eb=True, mean_only=bool(location_only))
+    residuals of small sites.  The scale step applies to every site with at least two
+    subjects in the fit (min_scale_n=2; ComCat's default 4 corrects smaller sites in
+    location only): the site adaptation of the z-maps has one common scale, so unequal
+    site variances cost more than the noise of small sites' variances (Buchert, held-out
+    log density +64 vs. -52 with 4, 10^-3 nat relative to the adaptation alone).
+    combat_compatible: the site variances of ComBat instead (from the residuals).  With
+    one site, comcat() corrects the location only in any case."""
+    opts = dict(nuisance_model='pspline', eb=True, mean_only=bool(location_only),
+                min_scale_n=2)
     if combat_compatible:
         opts.update(combat_compatible=True, residual_delta=True)
     return opts
@@ -200,8 +205,10 @@ def comcat_fit_apply(CC, X, fit, apply, batch=None, nuisance=None, preserve=None
     site among the fit rows means no site correction.  Preserved columns that do not
     vary in the fit rows are left out.  Columns of X with non-finite values in these
     rows are returned unchanged.  With slope, also the derivative of the harmonized
-    apply rows with respect to X (the transformation is affine: 1 / sqrt(delta) of
-    the site, 1 with location only)."""
+    apply rows with respect to X and these rows without clipping: ComCat sets negative
+    values to 0 if X has none, and the clipped transformation has no density, while
+    the unclipped one is affine (derivative 1 / sqrt(delta) of the site, 1 with
+    location only)."""
     fit, apply = np.asarray(fit), np.asarray(apply)
     rows = np.concatenate([fit, apply])
     cols = np.flatnonzero(np.all(np.isfinite(X[rows]), axis=0))
@@ -214,6 +221,7 @@ def comcat_fit_apply(CC, X, fit, apply, batch=None, nuisance=None, preserve=None
         return None if a is None else np.asarray(a)[r]
 
     D = np.ones(Ha.shape) if slope else None
+    Hu = Ha.copy() if slope else None
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)
         res = CC.comcat(X[np.ix_(fit, cols)].T, sub(b, fit), sub(nuisance, fit), sub(P, fit),
@@ -222,13 +230,15 @@ def comcat_fit_apply(CC, X, fit, apply, batch=None, nuisance=None, preserve=None
         if apply.size:
             bb = np.ones(apply.size, dtype=int) if b is None else b[apply]
 
-            def to(Xa):
+            def to(Xa, clip=True):
                 return CC.comcat_from_training(Xa.T, bb, sub(nuisance, apply), sub(P, apply),
-                                               estimates=res[4], unseen_batch='mean').T
+                                               estimates=res[4], unseen_batch='mean',
+                                               clip=clip).T
             Ha[:, cols] = to(X[np.ix_(apply, cols)])
             if slope:
-                D[:, cols] = to(X[np.ix_(apply, cols)] + 1.0) - Ha[:, cols]
-    return (Hf, Ha, D) if slope else (Hf, Ha)
+                Hu[:, cols] = to(X[np.ix_(apply, cols)], clip=False)
+                D[:, cols] = to(X[np.ix_(apply, cols)] + 1.0, clip=False) - Hu[:, cols]
+    return (Hf, Ha, D, Hu) if slope else (Hf, Ha)
 
 
 def adapt(Zc_adapt, code_adapt, Zc_apply, code_apply, k):
