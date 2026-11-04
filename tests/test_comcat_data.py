@@ -117,19 +117,26 @@ def test_same_as_harmonize(adni):
     np.testing.assert_allclose(NG.load_data(adni['out']).Y, H, rtol=1e-6, atol=1e-6)
 
 
-def test_neurogamlss_on_harmonized(adni):
-    """neurogamlss.py scores the harmonized file with normative models of raw data."""
+@pytest.fixture(scope='module')
+def model(adni):
+    """Normative models of raw training data with TIV in the mean (--save-model)."""
     root, data = adni['root'], adni['data']
     tr = os.path.join(data, 'TrainingData')
     keys = (('CamCan651', 'CamCan', 651), ('IXI547', 'IXI', 547), ('SALD494', 'SALD', 494))
-    model = os.path.join(root, 'model.npz')
+    path = os.path.join(root, 'model.npz')
     NG.main(['--normative-only', '--family', 'normal', '--df-mu', '3', '--df-sigma', '1',
              '--train', '+'.join(os.path.join(tr, f's6mwp1_4mm_{k}_CAT12.9.mat')
                                  for k, _, _ in keys),
              '--train-cov', '+'.join(os.path.join(tr, f, 'tables', f'TIV{n}.txt')
                                      for _, f, n in keys),
-             '--age-range', '18', '100', '--save-model', model, '--out',
+             '--age-range', '18', '100', '--save-model', path, '--out',
              os.path.join(root, 'model')])
+    return path
+
+
+def test_neurogamlss_on_harmonized(adni, model):
+    """neurogamlss.py scores the harmonized file with normative models of raw data."""
+    root, data = adni['root'], adni['data']
     prefix = os.path.join(root, 'z')
     NG.main(['--normative-only', '--model', model, '--test', adni['out'], '--test-cov',
              os.path.join(data, 'TestData', 'ADNI', 'TIV835.txt'), '--test-site',
@@ -139,6 +146,53 @@ def test_neurogamlss_on_harmonized(adni):
     z = Z[adni['group'] == 4]
     assert np.all(np.isfinite(Z))
     assert 0.85 < np.median(np.std(z, axis=0, ddof=1)) < 1.2
+
+
+def test_site_adaptation_only(adni, model, tmp_path):
+    """comcat_zmaps.py --site-adaptation-only (the ADNI design of the alternative): ComCat
+    removes the IQMs only, with the folds stratified by site as with site effects, and
+    the sites are left to the adaptation."""
+    import comcat_zmaps as CZ
+    d, group = adni['d'], adni['group']
+    tdir = os.path.join(adni['data'], 'TestData', 'ADNI')
+    Q = np.loadtxt(os.path.join(tdir, 'IQM835.txt'))[:, [0, 1, 2, 4]]
+    tiv = np.loadtxt(os.path.join(tdir, 'TIV835.txt'))
+    code = NG.read_sites(adni['site_file'], d.n)[0]
+    site = np.loadtxt(adni['site_file'], dtype=str)
+    Y = d.Y.astype(np.float64)
+    ctrl = np.flatnonzero(group == 4)
+    CC = CZ.import_comcat()
+    P = np.column_stack([d.age, d.male, tiv])
+    (H0, f0), (H1, f1) = (CZ.harmonize(CC, Y, ctrl, code, Q, P, group=group, site_effects=s)
+                          for s in (True, False))
+    assert np.array_equal(f0, f1)
+    dummies = (group[:, None] == np.array([1, 2, 3, 5])[None]).astype(float)
+    X = np.column_stack([np.ones(d.n), d.age, d.male, tiv, dummies])
+    r_raw, r0, r1 = (_site_r2(M, site, X) for M in (Y, H0, H1))
+    print(f"site R2: raw {r_raw:.3f}, sites removed {r0:.3f}, sites kept {r1:.3f}")
+    assert r0 < 0.5 * r_raw and r1 > 2 * r0
+
+    args = ['--model', model, '--test', adni['mat'], '--test-cov',
+            os.path.join(tdir, 'TIV835.txt'), '--adjust', adni['adjust'], '--nuisance',
+            os.path.join(tdir, 'IQM835.txt'), '--nuisance-cols', '1,2,3,5', '--preserve-group',
+            os.path.join(tdir, 'groups_sc-1.5T_1-AD_2-pMCI_3-sMCI_4-No_5-unclearMCI.txt')]
+    z, desc = {}, {}
+    for tag, extra in (('one site', []), ('adapted', ['--test-site', adni['site_file'],
+                                                      '--site-adaptation-only'])):
+        prefix = os.path.join(str(tmp_path), tag.replace(' ', '_'))
+        CZ.main(args + extra + ['--out', prefix])
+        m = loadmat(glob.glob(prefix + '_zmaps_*.mat')[0], squeeze_me=True,
+                    struct_as_record=False)['NDMzmap']
+        z[tag], desc[tag] = m.Z[ctrl], str(m.harmonization)
+    assert desc['adapted'] == desc['one site'] and 'sites' not in desc['adapted']
+    keep = np.all(np.isfinite(z['adapted']) & np.isfinite(z['one site']), axis=0)
+    z = {tag: v[:, keep] for tag, v in z.items()}
+    Xc = np.ones((ctrl.size, 1))
+    r = {tag: _site_r2(v, site[ctrl], Xc) for tag, v in z.items()}
+    print(f"controls' z, site R2: {r}")
+    assert r['adapted'] < 0.5 * r['one site']
+    with pytest.raises(SystemExit):                       # needs --test-site
+        CZ.main(args + ['--site-adaptation-only', '--out', os.path.join(str(tmp_path), 'x')])
 
 
 def _write_v73(path, m):

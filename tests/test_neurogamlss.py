@@ -907,6 +907,22 @@ def test_command_line_test_nuisance(tmp_path):
     with pytest.raises(SystemExit):                             # also a covariate of the models
         NG.main(base + ['--train-cov', trcov, '--test-cov', table, '--test-nuisance', table,
                         '--nuisance-cols', 'IQR'])
+    # tables without header (CAT12): their columns are named by number, the TIV of the
+    # models as 1 like the first IQM, so only a column with the values of TIV is refused
+    tiv_tr, tiv_te, iqm = (str(tmp_path / f) for f in ('tiv_tr.txt', 'tiv_te.txt', 'iqm.txt'))
+    np.savetxt(tiv_tr, rng.normal(1500, 150, 300))
+    tiv = rng.normal(1500, 150, d.n)
+    np.savetxt(tiv_te, tiv)
+    np.savetxt(iqm, np.column_stack([q, tiv / 1000]))          # IQR, TIV in litres
+    cov = base + ['--train-cov', tiv_tr, '--test-cov', tiv_te, '--test-nuisance']
+    zs = []
+    for extra in ([iqm, '--nuisance-cols', '1'], [table, '--nuisance-cols', 'IQR']):
+        NG.main(cov + extra)
+        zs.append(loadmat(out + '_zmaps_s4rp1_8mm_TE_CAT12.9.mat', squeeze_me=True,
+                          struct_as_record=False)['NDMzmap'].Z)
+    np.testing.assert_allclose(zs[0], zs[1])
+    with pytest.raises(SystemExit):                             # column 2 is the TIV
+        NG.main(cov + [iqm])
 
 
 def write_brain(tmp_path, name, d, sel, age):

@@ -17,7 +17,8 @@ the other folds.  With --preserve-group, all subjects are used and their groups 
 preserved instead, for samples with few controls per site.  Finally the scores are
 adapted with the controls as by neurogamlss.py (offsets per site shrunk toward the
 mean of all controls and one common scale; the controls' own scores leave-one-out),
-so that the controls' z-scores have mean 0 and SD 1.
+so that the controls' z-scores have mean 0 and SD 1.  With --site-adaptation-only,
+ComCat removes the nuisance effects only and the sites are left to this adaptation.
 
 Removing the effects from the normal scores instead of the data matters for skewed
 (SHASH) models, in which a shift of the data is not a constant shift of the score.
@@ -241,7 +242,7 @@ def adapt(Zc_adapt, code_adapt, Zc_apply, code_apply, k):
 
 def harmonize(CC, X, ctrl, site=None, nuisance=None, preserve=None, subject=None,
               group=None, folds=5, seed=0, location_only=False, combat_compatible=False,
-              insample=False, subject_terms=False):
+              insample=False, subject_terms=False, site_effects=True):
     """ComCat on X (n, p), the data of the test subjects (comcat_data.py) or their
     normal scores (harmonize_zscores), with the effects estimated on the controls ctrl
     (indices).
@@ -256,12 +257,16 @@ def harmonize(CC, X, ctrl, site=None, nuisance=None, preserve=None, subject=None
     values are left unchanged for all subjects.  insample: fitted on all controls (all
     subjects with group) and applied to every subject, the fitted ones included (fold
     labels -1); for comparison only, because the harmonized values of the fitted
-    subjects are optimistic.  Returns the harmonized X (n, p) and the fold labels (n,):
-    the fold whose model harmonized the subject, -1 for the model of all controls."""
+    subjects are optimistic.  site_effects False: the sites stratify the folds, but
+    ComCat removes the nuisance effects only (the sites are left to the adaptation of
+    harmonize_zscores or neurogamlss.py).  Returns the harmonized X (n, p) and the fold
+    labels (n,): the fold whose model harmonized the subject, -1 for the model of all
+    controls."""
     n = X.shape[0]
     is_ctrl = np.zeros(n, dtype=bool)
     is_ctrl[np.asarray(ctrl)] = True
     code = np.zeros(n, dtype=np.int64) if site is None else np.asarray(site, np.int64)
+    batch = code if site_effects else None
     P = None if preserve is None else np.asarray(preserve, np.float64).reshape(n, -1)
     fit = is_ctrl
     if group is not None:
@@ -276,7 +281,7 @@ def harmonize(CC, X, ctrl, site=None, nuisance=None, preserve=None, subject=None
     good = np.all(np.isfinite(X), axis=0)
     H = np.array(X, dtype=np.float64)
     if insample:
-        H[:, good] = comcat_fit_apply(CC, X[:, good], np.flatnonzero(fit), np.arange(n), code,
+        H[:, good] = comcat_fit_apply(CC, X[:, good], np.flatnonzero(fit), np.arange(n), batch,
                                       nuisance, P, terms, **opts)[1]
         return H, np.full(n, -1)
     units = np.unique(subject[fit]).size if subject is not None else int(fit.sum())
@@ -289,22 +294,24 @@ def harmonize(CC, X, ctrl, site=None, nuisance=None, preserve=None, subject=None
         fold = np.where(fit, fold, [of.get(s, -1) for s in np.asarray(subject).tolist()])
     for f in np.unique(fold[fold >= 0]):
         tr, te = np.flatnonzero(fit & (fold != f)), np.flatnonzero(fold == f)
-        H[np.ix_(te, good)] = comcat_fit_apply(CC, X[:, good], tr, te, code, nuisance, P,
+        H[np.ix_(te, good)] = comcat_fit_apply(CC, X[:, good], tr, te, batch, nuisance, P,
                                                terms, **opts)[1]
     rest = np.flatnonzero(fold < 0)
     if rest.size:
         H[np.ix_(rest, good)] = comcat_fit_apply(CC, X[:, good], np.flatnonzero(fit), rest,
-                                                 code, nuisance, P, terms, **opts)[1]
+                                                 batch, nuisance, P, terms, **opts)[1]
     return H, fold
 
 
 def harmonize_zscores(CC, Z, ctrl, site=None, nuisance=None, preserve=None, subject=None,
                       group=None, folds=5, seed=0, location_only=False,
-                      combat_compatible=False, insample=False, subject_terms=False):
+                      combat_compatible=False, insample=False, subject_terms=False,
+                      site_effects=True):
     """ComCat on normal scores Z (n, p) (harmonize) and adaptation with the controls
     ctrl (indices).  Returns the final z-scores (n, p): (z - offset of the site) /
     common scale, with the controls' adaptation leave-one-out (leaving out all scans
-    of the subject with subject labels), and the fold labels.
+    of the subject with subject labels), and the fold labels.  site_effects False:
+    ComCat removes the nuisance effects only, and the sites are only adapted.
 
     insample: ComCat fitted on all controls (all subjects with group) and applied to
     every subject, the fitted ones included, and the controls adapted with all
@@ -317,7 +324,8 @@ def harmonize_zscores(CC, Z, ctrl, site=None, nuisance=None, preserve=None, subj
     code = np.zeros(n, dtype=np.int64) if site is None else np.asarray(site, np.int64)
     k = int(code.max()) + 1
     H, fold = harmonize(CC, Z, ctrl, site, nuisance, preserve, subject, group, folds, seed,
-                        location_only, combat_compatible, insample, subject_terms)
+                        location_only, combat_compatible, insample, subject_terms,
+                        site_effects)
     if insample:
         return adapt(H[ctrl], code[ctrl], H, code, k)[1], fold
     out = np.full(Z.shape, np.nan)
@@ -379,6 +387,11 @@ def main(argv=None):
     p.add_argument('--test-male', help="sex of the test subjects (1 = male), if the "
                    "mat-file contains none")
     p.add_argument('--test-site', help="site of every test subject, one label per line")
+    p.add_argument('--site-adaptation-only', action='store_true',
+                   help="with --test-site: ComCat removes the nuisance effects only, and the "
+                        "sites are only adapted, as by neurogamlss.py --test-site after "
+                        "comcat_data.py without --test-site (e.g. many sites with few "
+                        "controls, ADNI)")
     p.add_argument('--adjust', required=True, help="1-based indices of the test controls, "
                    "e.g. 1:108,150")
     p.add_argument('--nuisance', help="table of nuisance variables, e.g. image quality "
@@ -411,6 +424,8 @@ def main(argv=None):
                    "~/GitHub/ComCat)")
     p.add_argument('--out', default='comcat_zmaps', help="output prefix")
     a = p.parse_args(argv)
+    if a.site_adaptation_only and not a.test_site:
+        p.error("--site-adaptation-only needs --test-site.")
     CC = import_comcat(a.comcat_dir)
 
     sets, desc = NG.load_models(os.path.expanduser(a.model))
@@ -477,8 +492,9 @@ def main(argv=None):
         CC, Z[:, fin], ctrl_r, code, None if Q is None else Q[rows],
         preserve, None if subject is None else subject[rows],
         None if group is None else group[rows], a.folds, a.seed, a.location_only,
-        a.combat_compatible, a.insample, terms)
-    sites_fit = np.unique(code if group is not None else code[ctrl_r]).size
+        a.combat_compatible, a.insample, terms, not a.site_adaptation_only)
+    sites_fit = (1 if a.site_adaptation_only else
+                 np.unique(code if group is not None else code[ctrl_r]).size)
 
     full = np.full(d.Y.shape, np.nan, dtype=np.float32)
     full[np.ix_(rows, vm.model.valid)] = Zh
