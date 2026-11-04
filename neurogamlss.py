@@ -414,6 +414,15 @@ def _parse_columns(spec, names, numeric):
     return out
 
 
+def _same_variable(x, y):
+    """True if x and y (n,) are the same variable up to a linear transformation, e.g. the
+    TIV of two tables or in another unit: |correlation| above 0.999 where both are known."""
+    ok = np.isfinite(x) & np.isfinite(y)
+    if ok.sum() < 3 or np.ptp(x[ok]) == 0 or np.ptp(y[ok]) == 0:
+        return False
+    return abs(np.corrcoef(x[ok], y[ok])[0, 1]) > 0.999
+
+
 def covariates_from_table(names, values, numeric, mean=None, sd=None, df=1):
     """Covariates of a table (read_table).  mean and sd are comma-separated column
     names or numbers as for --cov-mean and --cov-sd; by default all numeric
@@ -5191,10 +5200,18 @@ def main(argv=None):
             p.error(str(err))
         if not cols:
             p.error("--test-nuisance contains no numeric column.")
-        both = sorted(set(cols) & used)
+        # a covariate of the models cannot also be a nuisance: the same name, unless the
+        # table has no header (its columns are then named by number, as those of any
+        # table without header, e.g. a CAT12 IQM table and a TIV table), or the same values
+        numbered = names == [str(j + 1) for j in range(len(names))]
+        both = [(c, nm) for c in cols for nm in sorted(used)
+                if (c == nm and not numbered)
+                or _same_variable(values[:, names.index(c)], test[0].C[:, cov.names.index(nm)])]
         if both:
-            p.error(f"Covariate(s) {', '.join(both)} of the models cannot also be removed as "
-                    "nuisance.")
+            p.error("Covariates of the models cannot also be removed as nuisance: "
+                    + ', '.join(nm if c == nm and not numbered else
+                                f"{nm} (values of {'column ' if numbered else ''}{c} of "
+                                "--test-nuisance)" for c, nm in both) + ".")
         nuisance = dict(names=cols, values=values[:, [names.index(nm) for nm in cols]],
                         df=a.nuisance_df)
     out = apply_models(sets, test, adjust, a.correction, a.ensemble, a.zmaps,
