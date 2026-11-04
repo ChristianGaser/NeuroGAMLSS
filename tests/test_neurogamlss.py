@@ -923,6 +923,11 @@ def test_command_line_test_nuisance(tmp_path):
     np.testing.assert_allclose(zs[0], zs[1])
     with pytest.raises(SystemExit):                             # column 2 is the TIV
         NG.main(cov + [iqm])
+    # names are compared only where both tables have a header: a nuisance column named
+    # '1' (not the TIV) is accepted next to the TIV of a table without header
+    hdr = str(tmp_path / 'iqm_hdr.csv')
+    np.savetxt(hdr, np.column_stack([q, d.age]), delimiter=',', header='1,age', comments='')
+    NG.main(cov + [hdr, '--nuisance-cols', '1'])
 
 
 def write_brain(tmp_path, name, d, sel, age):

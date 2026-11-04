@@ -38,7 +38,7 @@ IQM_SD = np.array([0.05, 0.25, 0.30, 0.10, 0.04])
 
 
 class Sim:
-    def __init__(self, seed=0):
+    def __init__(self, seed=0, low=False):
         self.rng = rng = np.random.default_rng(seed)
         self.base = rng.uniform(0.35, 0.6, P)
         self.age1 = rng.normal(-0.0025, 0.0007, P)
@@ -52,6 +52,13 @@ class Sim:
                                                                     0.003)])
         self.ad = np.where(rng.random(P) < 0.4, rng.normal(-0.03, 0.008, P), 0.0)
         self.asd = np.where(rng.random(P) < 0.3, -0.006, 0.0)
+        self.floor = 0.01
+        if low:     # a quarter of the voxels with little gray matter: ComCat clips values
+            k = P // 4
+            self.base[:k] = rng.uniform(0.09, 0.11, k)
+            self.age1[:k] = rng.normal(-0.0004, 0.0001, k)
+            self.age2[:k] = 0.0
+            self.floor = 0.0
 
     def sites(self, k, loc=0.012, scale=0.25):
         return (self.rng.normal(0, loc, (k, P)), np.exp(self.rng.normal(0, scale, k)),
@@ -86,7 +93,7 @@ class Sim:
              + rng.normal(0, 1, (n, P)) * self.tech * site_scale[:, None])
         if effect is not None:
             y = y + effect
-        return np.clip(y, 0.01, 0.99).astype(np.float32)
+        return np.clip(y, self.floor, 0.99).astype(np.float32)
 
 
 def _mat(path, Y, age, male=None, names=None):
@@ -105,9 +112,10 @@ def _txt(path, values, fmt='%.6g'):
     np.savetxt(path, np.asarray(values), fmt=fmt)
 
 
-def simulate(root, seed=0):
-    """Training and test data of neuroGAMLSS-TestData with small samples."""
-    s = Sim(seed)
+def simulate(root, seed=0, low=False):
+    """Training and test data of neuroGAMLSS-TestData with small samples (low: a quarter
+    of the voxels with little gray matter)."""
+    s = Sim(seed, low)
     rng = s.rng
     tr = os.path.join(root, 'TrainingData')
     tsd = os.path.join(root, 'TestData')
@@ -267,9 +275,11 @@ def test_harmonization_comparison(tmp_path):
     for s in ('Buchert', 'ABIDE'):
         assert g(s, 'comcat', 'site_scale_rms') < g(s, 'comcat_loc', 'site_scale_rms'), s
         assert g(s, 'comcat_z', 'site_scale_rms') < g(s, 'comcat_z_loc', 'site_scale_rms'), s
-    # share of clipped values (ComCat on the data only): a fraction
-    assert all(0 <= val < 1 for k, val in v.items() if k[2] == 'clipped')
-    assert not any(k[2] == 'clipped' and k[1].startswith(('comcat_z', 'gamlss')) for k in v)
+    # share of clipped values: reported for ComCat on the data only, as a fraction
+    clipped = {k: val for k, val in v.items() if k[2] == 'clipped'}
+    assert ('Tohoku', 'comcat', 'clipped', 'crossfit') in clipped
+    assert all(0 <= val < 1 for val in clipped.values())
+    assert not any(k[1].startswith(('comcat_z', 'gamlss')) for k in clipped)
     # site offsets before the adaptation: removed by ComCat with sites, not with IQMs only
     for s in ('Buchert', 'ABIDE', 'ADNI'):
         raw = g(s, 'gamlss', 'site_offset_rms')
@@ -303,6 +313,62 @@ def test_harmonization_comparison(tmp_path):
         assert (g('ON-Harmony', c, 'within_sd', 'insample')
                 < 0.5 * g('ON-Harmony', c, 'within_sd')), c
         assert g('ON-Harmony', c, 'within_sd') > g('ON-Harmony', 'gamlss', 'within_sd'), c
+
+
+@pytest.mark.skipif(not _comcat_available(), reason="ComCat not found (COMCAT_DIR)")
+def test_log_density_at_clipped_values(tmp_path, monkeypatch):
+    """Voxels with little gray matter, so that ComCat sets some harmonized values to 0:
+    the log density of ComCat on the data must still be that of the data under the
+    affine harmonization, log phi(z) + log dz/dy, with dz/dy from a central difference
+    of the raw data of the scored scans (estimates of ComCat and the adaptation of the
+    unclipped controls fixed), and equal to that of a run without clipping."""
+    import contextlib
+    import io
+    from types import SimpleNamespace
+    import harmonization_comparison as HC
+    import comcat_zmaps as CZ
+    data, out = str(tmp_path / 'data'), str(tmp_path / 'results')
+    simulate(data, low=True)
+    args = SimpleNamespace(root=data, out=out, seed=0, inner_folds=5, folds=0, features=0)
+    with contextlib.redirect_stdout(io.StringIO()):
+        HC.main(['--root', data, '--out', out, '--part', 'models', '--jobs', '2',
+                 '--samples', 'ADNI'])
+        rng = np.random.default_rng(0)
+        S = HC.load_sample(args, 'ADNI', rng)
+        models = [HC.load_model(HC.model_path(out, S.cfg['train'], c))
+                  for c in ('tiv', 'tiv_iqm')]
+        R = HC.prepare(S, models, args, rng)
+    CC = CZ.import_comcat()
+    rec, adapt = [], CZ.adapt
+
+    def recording(Za, ca, Zp, cp, k):
+        loc, fin, r = adapt(Za, ca, Zp, cp, k)
+        rec.append((Zp - loc, r))
+        return loc, fin, r
+    monkeypatch.setattr(CZ, 'adapt', recording)
+    Zf, Zl, LD, Zr, CL = HC.run_condition(CC, S, R, 'comcat', 'crossfit')
+    assert HC.metrics(S, Zf, Zl, LD, Zr, CL)['clipped'] > 0
+    spec, eps, err = HC.CONDITIONS['comcat'][1], 1e-6, []
+    # two adaptations per pass: of the clipped values (z) and of the unclipped (density)
+    for (fit, ad, ap), (O, r) in zip(HC.passes(S, False, 'crossfit'), rec[1::2]):
+        held = S.ctrl[ap]
+        z = []
+        for e in (0.0, eps, -eps):
+            R2 = SimpleNamespace(**vars(R))
+            R2.Ydata = R.Ydata.copy()
+            R2.Ydata[ap] += e
+            Hu = HC.corrector(CC, S, R2, spec)(fit, ap)[2]
+            z.append((HC.data_scores(S, R2, ap, Hu)[0] - O) / r)
+        ld = -0.5 * z[0] ** 2 - 0.5 * np.log(2 * np.pi) + np.log((z[1] - z[2]) / (2 * eps))
+        err.append(np.abs(ld[held] - LD[ap[held]])[CL[ap][held].astype(bool)])
+    err = np.concatenate(err)
+    assert err.size and err.max() < 1e-4, (err.size, err.max())
+    # the same as without any clipping, as before ComCat clipped
+    monkeypatch.setattr(CZ, 'adapt', adapt)
+    with monkeypatch.context() as m:
+        m.setattr(CC, '_nonnegative', lambda Y: False)
+        LD0 = HC.run_condition(CC, S, R, 'comcat', 'crossfit')[2]
+    np.testing.assert_allclose(LD[S.ctrl], LD0[S.ctrl], rtol=0, atol=1e-5)
 
 
 @pytest.mark.skipif(not _comcat_available(), reason="ComCat not found (COMCAT_DIR)")
