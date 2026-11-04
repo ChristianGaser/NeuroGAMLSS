@@ -223,7 +223,8 @@ Covariates are centred at their training median, and z-scores condition on every
 
 - **Regression.** Every voxel of the controls is regressed on the nuisance variables, age, sex and, with several test sites, the sites. Age enters as a natural spline with up to 3 df, and not at all if the controls' ages span less than 5 years. Nuisance variables that do not vary within the sites are dropped.
 - **What is removed.** Only the nuisance part, relative to the controls' mean, is removed from every test subject. Effects of age and sex stay, and so do effects of a disease, because the controls have none.
-- **Options.** `--nuisance-cols` selects the columns, by default all numeric ones, and `--nuisance-df` uses natural splines instead of linear terms.
+- **Options.** `--nuisance-cols` selects the columns, by default all numeric ones, and `--nuisance-df` uses natural splines instead of linear terms. The columns of a table without header are named by number, so `--nuisance-cols 1,2,3,5` selects ICR, NCR, res_ECR and contrastr of a CAT12 IQM table.
+- **Covariates of the models.** A covariate of the models cannot also be a nuisance. A column is refused if it has the covariate's name (in a table with a header) or its values up to a linear transformation, such as TIV in other units.
 - **Order.** The usual adaptation with the controls (`--correction`) follows.
 
 ```bash
