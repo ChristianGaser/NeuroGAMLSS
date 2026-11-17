@@ -47,21 +47,37 @@ Every run evaluates three sets of subjects:
 
 and these methods:
 
-  ndm_loglik, ndm_mae   NormBrainAGE with the df chosen by the held-out log-likelihood
-             or by the mean absolute error of the brain age (no correction)
-  ndm_bc     ndm_loglik minus its bias at the brain age, by parametric bootstrap
+  ndm        NormBrainAGE without any correction, the df chosen as in the pipeline
   gpr_raw    replica of the GPR BrainAGE (gpr_baseline) without correction
-  gpr_trend  with the linear trend correction: for the test sample estimated in one
-             half of it (its "controls") and applied to the other half, out of fold
-             from the out-of-fold estimates of the other folds (as cross_validate)
-  ndm_trend  ndm_loglik with the same trend correction, for a comparison of the two
-             methods on equal terms
+  ndm_trend, gpr_trend   with the linear trend correction, which needs controls: for
+             the test sample estimated in one half of it (its "controls") and applied
+             to the other half, out of fold from the out-of-fold estimates of the other
+             folds (as cross_validate)
+
+and, for the test sample, corrections that need no controls of the test sample.  All
+of them subtract a function of the chronological age:
+
+  ndm_model  minus the bias of the estimate at the chronological age by parametric
+             bootstrap from the fitted models (BrainAGE_bias of neurogamlss.py): the
+             BrainAGE that the models let expect for a subject typical of its age
+  ndm_train, gpr_train   minus the linear trend of the out-of-fold BrainAGE of the
+             training sample on age
+  ndm_model_train   minus the bootstrap bias and the linear trend that it leaves in
+             the out-of-fold BrainAGE of the training sample
+  ndm_model_hat   minus the bootstrap bias at the brain age instead (PredictedAge_bias
+             of neurogamlss.py), for comparison
 
 Reported per method and set: the mean BrainAGE (bias) and the slope of BrainAGE on age
 within the deciles of the reference (uniform) age distribution, the overall slope and
 the mean absolute error; for NormBrainAGE also the coverage of the 95% likelihood-
 ratio and Laplace intervals, the share of estimates at the ends of the age grid, the
-df chosen by both criteria and the bias that the parametric bootstrap predicts.
+df chosen and the bias that the parametric bootstrap predicts.
+
+A true difference in brain age must survive.  A second test sample is drawn at ages
+8 years above its chronological ages; "recovery" is the difference of its mean
+BrainAGE from that of test subjects of the same chronological ages, divided by 8
+years.  Corrections that subtract a function of the chronological age do not change
+it, so it is reported for ndm, gpr_raw and ndm_model_hat.
 
 Sources of the bias (--sources)
 ------------------------------
@@ -119,7 +135,9 @@ AGE_RANGE = (18.0, 88.0)
 SCENARIOS = ('gm', 'wm')
 DISTRIBUTIONS = ('uniform', 'young', 'old', 'bimodal', 'middle')
 SETS = ('test', 'oof', 'insample')
-METHODS = ('ndm_loglik', 'ndm_mae', 'ndm_bc', 'ndm_trend', 'gpr_raw', 'gpr_trend')
+METHODS = ('ndm', 'ndm_trend', 'ndm_model', 'ndm_train', 'ndm_model_train', 'ndm_model_hat',
+           'gpr_raw', 'gpr_trend', 'gpr_train')
+SHIFT = 8.0            # years by which the brains of the shifted test sample are older
 N_BINS = 10
 
 
@@ -224,6 +242,16 @@ def crossfit_trend(pred, age, fold):
     return out
 
 
+def model_bias(curves, age, male):
+    """Bias of the brain age by parametric bootstrap (curves of age_curves) at the given
+    ages of subjects of the given sex."""
+    out = np.full(len(age), np.nan)
+    for c, m in enumerate(curves['male']):
+        sel = male == m if curves['male'].size > 1 else np.ones(len(age), bool)
+        out[sel] = np.interp(age[sel], curves['age'], curves['bias'][:, c])
+    return out
+
+
 def run(world, dist, n, seed, args):
     """One training sample: errors of all methods on the three sets, summarized."""
     rng = np.random.default_rng(seed)
@@ -233,64 +261,68 @@ def run(world, dist, n, seed, args):
     kw = dict(pca=args.pca)
     fold = folds_by_age(train.age, args.kfold, rng)
     half = rng.permutation(test.n) % 2            # halves of the test sample
-    res = dict(dist=dist, n=n, seed=seed, scenario=world.scenario)
-    err = {s: {} for s in SETS}
-    ests = {}
-    for crit in ('loglik', 'mae'):
-        dm, ds, rec = NG.select_df_brainage(train, kw, criterion=crit)
-        res[f'df_{crit}'] = [dm, ds]
-        res[f'cv_{crit}'] = {key: rec['stages'][-1][key][rec['stages'][-1]['df_sigma'].index(ds)]
-                             for key in ('loglik', 'mae', 'slope', 'bias_young', 'bias_old')}
-        if (dm, ds) not in ests:
-            est = NG.NDMBrainAge(df_mu=dm, df_sigma=ds, **kw).fit(train)
-            out = est.predict(test)
-            oof = np.full(train.n, np.nan)
-            for f in range(args.kfold):
-                tr, te = np.flatnonzero(fold != f), np.flatnonzero(fold == f)
-                oof[te] = NG.NDMBrainAge(df_mu=dm, df_sigma=ds, **kw).fit(
-                    train.subset(tr)).predict(train.subset(te))['age']
-            ests[(dm, ds)] = dict(est=est, out=out, oof=oof, ins=est.predict(train)['age'])
-        e = ests[(dm, ds)]
-        err['test'][f'ndm_{crit}'] = e['out']['age'] - test.age
-        err['oof'][f'ndm_{crit}'] = e['oof'] - train.age
-        err['insample'][f'ndm_{crit}'] = e['ins'] - train.age
-    e = ests[tuple(res['df_loglik'])]
-    est, out = e['est'], e['out']
+    # test subjects whose brains are SHIFT years older than their chronological age
+    chron = rng.uniform(AGE_RANGE[0], AGE_RANGE[1] - SHIFT, args.n_test // 2)
+    shifted = world.sample(chron + SHIFT, rng)
+    same = test.age <= AGE_RANGE[1] - SHIFT       # test subjects of these chronological ages
+    dm, ds, rec = NG.select_df_brainage(train, kw)
+    last = rec['stages'][-1]
+    res = dict(dist=dist, n=n, seed=seed, scenario=world.scenario, df=[dm, ds],
+               cv={key: last[key][last['df_sigma'].index(ds)]
+                   for key in ('mae', 'slope', 'bias_young', 'bias_old')})
+    est = NG.NDMBrainAge(df_mu=dm, df_sigma=ds, **kw).fit(train)
+    out, out_s = est.predict(test), est.predict(shifted)
+    oof = np.full(train.n, np.nan)
+    for f in range(args.kfold):
+        tr, te = np.flatnonzero(fold != f), np.flatnonzero(fold == f)
+        oof[te] = NG.NDMBrainAge(df_mu=dm, df_sigma=ds, **kw).fit(
+            train.subset(tr)).predict(train.subset(te))['age']
+    ins = est.predict(train)['age']
+    ba, ba_oof = out['age'] - test.age, oof - train.age
+    err = dict(test=dict(ndm=ba, ndm_trend=crossfit_trend(out['age'], test.age, half)),
+               oof=dict(ndm=ba_oof, ndm_trend=crossfit_trend(oof, train.age, fold)),
+               insample=dict(ndm=ins - train.age,
+                             ndm_trend=NG.trend_correct(ins, train.age, np.arange(train.n))))
     res.update(
         cover_lr=float(np.mean((out['ci_low'] <= test.age) & (test.age <= out['ci_high']))),
-        cover_laplace=float(np.nanmean(np.abs(out['age'] - test.age) < 1.96 * out['sd'])),
+        cover_laplace=float(np.nanmean(np.abs(ba) < 1.96 * out['sd'])),
         at_bound=float(np.mean(out['at_bound'])), ci_open=float(np.mean(out['ci_open'])),
         deviation=float(np.mean(out['deviation_age'])))
-    # age information and bias predicted by the model at the centres of the age bins
-    centres = (edges[:-1] + edges[1:]) / 2
-    cur = est.age_curves(centres, n_rep=args.bias_replicates, seed=seed)
-    res['info_se'] = np.mean(cur['se'], axis=1)
+    recovery = dict(ndm=(np.mean(out_s['age'] - chron) - np.mean(ba[same])) / SHIFT)
+    # corrections without controls of the test sample: functions of chronological age
+    err['test']['ndm_train'] = ba - np.polyval(np.polyfit(train.age, ba_oof, 1), test.age)
     if args.bias_replicates:
-        res['boot_bias'], res['boot_sd'] = np.mean(cur['bias'], axis=1), np.mean(cur['sd'], axis=1)
-        res['boot_cover'] = np.mean(cur['cover'], axis=1)
-        fine = est.age_curves(n_rep=args.bias_replicates, seed=seed)     # along the grid
-        bias = np.full(test.n, np.nan)
-        for c, m in enumerate(fine['male']):
-            sel = test.male == m if fine['male'].size > 1 else np.ones(test.n, bool)
-            bias[sel] = np.interp(out['age'][sel], fine['age'], fine['bias'][:, c])
-        err['test']['ndm_bc'] = out['age'] - bias - test.age
-    err['test']['ndm_trend'] = crossfit_trend(out['age'], test.age, half)
-    err['oof']['ndm_trend'] = crossfit_trend(e['oof'], train.age, fold)
-    err['insample']['ndm_trend'] = NG.trend_correct(e['ins'], train.age, np.arange(train.n))
+        cur = est.age_curves(n_rep=args.bias_replicates, seed=seed)
+        centres = (edges[:-1] + edges[1:]) / 2
+        for key in ('bias', 'sd', 'cover'):       # at the centres of the age bins
+            res['boot_' + key] = np.interp(centres, cur['age'], np.mean(cur[key], axis=1))
+        err['test']['ndm_model'] = ba - model_bias(cur, test.age, test.male)
+        rest = ba_oof - model_bias(cur, train.age, train.male)
+        err['test']['ndm_model_train'] = (err['test']['ndm_model']
+                                          - np.polyval(np.polyfit(train.age, rest, 1), test.age))
+        err['test']['ndm_model_hat'] = ba - model_bias(cur, out['age'], test.male)
+        hat_s = out_s['age'] - model_bias(cur, out_s['age'], shifted.male) - chron
+        recovery['ndm_model_hat'] = (np.mean(hat_s)
+                                     - np.mean(err['test']['ndm_model_hat'][same])) / SHIFT
     # GPR replica
-    g_test = NG.gpr_baseline(train.Y, train.age, test.Y)
+    g = NG.gpr_baseline(train.Y, train.age, np.vstack([test.Y, shifted.Y]))
+    g_test, g_shifted = g[:test.n], g[test.n:]
+    recovery['gpr_raw'] = (np.mean(g_shifted - chron) - np.mean((g_test - test.age)[same])) / SHIFT
     err['test']['gpr_raw'] = g_test - test.age
     err['test']['gpr_trend'] = crossfit_trend(g_test, test.age, half)
     g_oof = np.full(train.n, np.nan)
     for f in range(args.kfold):
         tr, te = np.flatnonzero(fold != f), np.flatnonzero(fold == f)
         g_oof[te] = NG.gpr_baseline(train.Y[tr], train.age[tr], train.Y[te])
+    err['test']['gpr_train'] = (g_test - test.age
+                                - np.polyval(np.polyfit(train.age, g_oof - train.age, 1), test.age))
     err['oof']['gpr_raw'] = g_oof - train.age
     err['oof']['gpr_trend'] = crossfit_trend(g_oof, train.age, fold)
     g_ins = NG.gpr_baseline(train.Y, train.age, train.Y)
     err['insample']['gpr_raw'] = g_ins - train.age
     err['insample']['gpr_trend'] = NG.trend_correct(g_ins, train.age, np.arange(train.n))
     ages = dict(test=test.age, oof=train.age, insample=train.age)
+    res['recovery'] = {key: float(v) for key, v in recovery.items()}
     res['summary'] = {s: {m: summarize(v, ages[s], edges) for m, v in err[s].items()}
                       for s in SETS}
     return res
@@ -369,7 +401,7 @@ def sources(world, dist, n, args):
             if k >= n * (1 - 1 / NG.DF_FOLDS) - 1:      # more components than subjects
                 continue
             kw = dict(pca=k)
-            dm, ds, _ = NG.select_df_brainage(train, kw, criterion='loglik')
+            dm, ds, _ = NG.select_df_brainage(train, kw)
             est = NG.NDMBrainAge(df_mu=dm, df_sigma=ds, **kw).fit(train)
             name = 'pipeline' if k == args.pca else ('no PCA' if not k else f'{k} components')
             res[name], dfs[name] = measure(est, test, edges), f'{dm}/{ds}'
@@ -427,15 +459,15 @@ def aggregate(runs):
         for m in runs[0]['summary'][s]:
             out['summary'][s][m] = {key: stats([r['summary'][s][m][key] for r in runs])
                                     for key in ('bias', 'slope', 'slope_all', 'mae', 'mean')}
-    for key in ('cover_lr', 'cover_laplace', 'at_bound', 'ci_open', 'deviation', 'info_se',
+    for key in ('cover_lr', 'cover_laplace', 'at_bound', 'ci_open', 'deviation',
                 'boot_bias', 'boot_sd', 'boot_cover'):
         if key in runs[0]:
             out[key] = stats([r[key] for r in runs])
-    for crit in ('loglik', 'mae'):
-        dfs = [tuple(r[f'df_{crit}']) for r in runs]
-        out[f'df_{crit}'] = {f'{a}/{b}': dfs.count((a, b)) for a, b in sorted(set(dfs))}
-        out[f'cv_{crit}'] = {key: stats([r[f'cv_{crit}'][key] for r in runs])
-                             for key in runs[0][f'cv_{crit}']}
+    dfs = [tuple(r['df']) for r in runs]
+    out['df'] = {f'{a}/{b}': dfs.count((a, b)) for a, b in sorted(set(dfs))}
+    out['cv'] = {key: stats([r['cv'][key] for r in runs]) for key in runs[0]['cv']}
+    out['recovery'] = {key: stats([r['recovery'][key] for r in runs])
+                       for key in runs[0]['recovery']}
     return out
 
 
@@ -469,12 +501,14 @@ def report(conditions, edges):
     for key, agg in conditions.items():
         scenario, dist, n = key
         lines += [f"### {scenario}, training ages {dist}, n = {n} ({agg['reps']} samples)", '']
-        lines += [f"df of mu/sigma chosen by the log-likelihood: {agg['df_loglik']}; by the MAE: "
-                  f"{agg['df_mae']}.  Test sample: coverage of the 95% intervals "
-                  f"{agg['cover_lr']['mean']:.3f} (likelihood ratio), "
+        lines += [f"df of mu/sigma chosen: {agg['df']}.  Test sample: coverage of the 95% "
+                  f"intervals {agg['cover_lr']['mean']:.3f} (likelihood ratio), "
                   f"{agg['cover_laplace']['mean']:.3f} (Laplace); "
                   f"{100 * agg['at_bound']['mean']:.1f}% of the estimates at an end of the grid, "
-                  f"{100 * agg['ci_open']['mean']:.1f}% of the intervals open.", '']
+                  f"{100 * agg['ci_open']['mean']:.1f}% of the intervals open.  Recovery of a "
+                  f"true difference of {SHIFT:.0f} years: "
+                  + ', '.join(f"{m} {v['mean']:.2f}" for m, v in agg['recovery'].items()) + '.',
+                  '']
         for s in SETS:
             lines += [f"**{s}**: mean BrainAGE [years] by age (true value 0), mean ± SE over the "
                       "samples", '',
@@ -492,13 +526,11 @@ def report(conditions, edges):
                          + ' |')
         lines.append('')
         if 'boot_bias' in agg:
-            lines += ["**Model-based curves** of ndm_loglik at the centres of the age deciles: "
-                      "standard error from the Fisher information, and bias, SD and coverage of "
-                      "the likelihood-ratio intervals by parametric bootstrap", '',
+            lines += ["**Parametric bootstrap** from the fitted models at the centres of the "
+                      "age deciles: bias, SD and coverage of the likelihood-ratio intervals", '',
                       '| | ' + ' | '.join(bins) + ' |', '|---|' + '---|' * len(bins)]
-            for label, k2, fmt in (('SE from I(a)', 'info_se', '.2f'), ('Bootstrap SD', 'boot_sd', '.2f'),
-                                   ('Bootstrap bias', 'boot_bias', '+.2f'),
-                                   ('Bootstrap coverage', 'boot_cover', '.3f')):
+            for label, k2, fmt in (('Bias', 'boot_bias', '+.2f'), ('SD', 'boot_sd', '.2f'),
+                                   ('Coverage', 'boot_cover', '.3f')):
                 lines.append(f"| {label} | " + ' | '.join(format(v, fmt) for v in agg[k2]['mean'])
                              + ' |')
             lines.append('')
@@ -519,7 +551,8 @@ def figure(conditions, edges, path, n):
     if not keys:
         return False
     x = (edges[:-1] + edges[1:]) / 2
-    style = dict(ndm_loglik=('#1f6fb4', '--', 'NormBrainAGE, uncorrected'),
+    style = dict(ndm=('#1f6fb4', '--', 'NormBrainAGE, uncorrected'),
+                 ndm_model=('#1f6fb4', ':', 'NormBrainAGE, minus bootstrap bias'),
                  ndm_trend=('#1f6fb4', '-', 'NormBrainAGE, trend corrected'),
                  gpr_raw=('#d1622b', '--', 'GPR, uncorrected'),
                  gpr_trend=('#d1622b', '-', 'GPR, trend corrected'))
@@ -609,12 +642,15 @@ def main(argv=None):
                 runs += cond
                 agg = conditions[(sc, dist, n)] = aggregate(cond)
                 t = agg['summary']['test']
-                print(f"{sc} {dist:8s} n={n:5d}: slope NDM {t['ndm_loglik']['slope_all']['mean']:+.3f}"
-                      f" (df by MAE {t['ndm_mae']['slope_all']['mean']:+.3f}), GPR trend "
-                      f"{t['gpr_trend']['slope_all']['mean']:+.3f}, raw "
-                      f"{t['gpr_raw']['slope_all']['mean']:+.3f}; MAE NDM "
-                      f"{t['ndm_loglik']['mae']['mean']:.2f}, GPR {t['gpr_trend']['mae']['mean']:.2f}"
-                      f"  [{time.time() - t0:.0f}s]", flush=True)
+                print(f"{sc} {dist:8s} n={n:5d}: slope NDM {t['ndm']['slope_all']['mean']:+.3f}"
+                      + ''.join(f", {m[4:]} {t[m]['slope_all']['mean']:+.3f}"
+                                for m in ('ndm_model', 'ndm_train', 'ndm_model_train') if m in t)
+                      + f"; GPR raw {t['gpr_raw']['slope_all']['mean']:+.3f}, train "
+                      f"{t['gpr_train']['slope_all']['mean']:+.3f}; MAE NDM "
+                      f"{t['ndm']['mae']['mean']:.2f}, GPR trend {t['gpr_trend']['mae']['mean']:.2f}"
+                      f"; recovery NDM {agg['recovery']['ndm']['mean']:.2f}, GPR "
+                      f"{agg['recovery']['gpr_raw']['mean']:.2f}  [{time.time() - t0:.0f}s]",
+                      flush=True)
     with open(a.out + '.json', 'w') as f:
         json.dump(_jsonable(dict(settings=vars(a), age_bins=edges, runs=runs,
                                  conditions={'/'.join(map(str, k)): v

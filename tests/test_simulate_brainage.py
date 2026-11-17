@@ -38,20 +38,33 @@ def test_simulation_runs(tmp_path):
     assert set(cond) == {('gm', 'uniform', 150), ('gm', 'young', 150)}
     agg = cond[('gm', 'uniform', 150)]
     for s in SB.SETS:
-        assert {'ndm_loglik', 'ndm_mae', 'gpr_raw', 'gpr_trend'} <= set(agg['summary'][s])
+        assert {'ndm', 'ndm_trend', 'gpr_raw', 'gpr_trend'} <= set(agg['summary'][s])
     test = agg['summary']['test']
-    assert {'ndm_bc', 'ndm_trend'} <= set(test)
-    assert test['ndm_loglik']['bias']['mean'].shape == (SB.N_BINS,)
-    assert abs(test['ndm_trend']['slope_all']['mean']) < 0.05
+    assert set(test) == set(SB.METHODS)
+    assert test['ndm']['bias']['mean'].shape == (SB.N_BINS,)
     # the uncorrected regression is shrunk toward the mean age, its trend correction is not
     assert test['gpr_raw']['slope_all']['mean'] < -0.05
     assert abs(test['gpr_trend']['slope_all']['mean']) < 0.05
-    assert 0.5 < agg['cover_lr']['mean'] <= 1 and sum(agg['df_loglik'].values()) == 2
+    assert abs(test['ndm_trend']['slope_all']['mean']) < 0.05
+    # and it recovers less of a true difference in brain age than the likelihood
+    rec = agg['recovery']
+    assert set(rec) == {'ndm', 'ndm_model_hat', 'gpr_raw'}
+    assert 0.2 < rec['gpr_raw']['mean'] < rec['ndm']['mean'] < 1.3
+    assert 0.5 < agg['cover_lr']['mean'] <= 1 and sum(agg['df'].values()) == 2
     with open(out + '.json') as f:
         saved = json.load(f)
     assert len(saved['runs']) == 4 and 'gm/uniform/150' in saved['conditions']
     with open(out + '.md') as f:
         assert 'training ages young' in f.read()
+
+
+def test_model_bias_is_the_curve_of_the_sex():
+    cur = dict(age=np.array([20.0, 40.0, 60.0]), male=np.array([0.0, 1.0]),
+               bias=np.array([[1.0, 2.0], [0.0, 0.0], [-1.0, -4.0]]))
+    b = SB.model_bias(cur, np.array([30.0, 30.0, 50.0, 70.0]), np.array([0.0, 1.0, 1.0, 0.0]))
+    assert np.allclose(b, [0.5, 1.0, -2.0, -1.0])
+    one = dict(age=cur['age'], male=np.array([0.0]), bias=cur['bias'][:, :1])
+    assert np.allclose(SB.model_bias(one, np.array([30.0]), np.array([1.0])), [0.5])
 
 
 def test_variant_reproduces_the_estimator():

@@ -27,8 +27,8 @@ means for surface data), which removes near-empty voxels without meaningful
 z-scores.  The spline df of age of mu and sigma are chosen per training sample by
 cross-validation (--df-mu/--df-sigma auto, the default), the same for all
 voxels/vertices: by the held-out likelihood for the z-maps and by the error of the
-brain age for NormBrainAGE (or by the held-out likelihood of its component scores,
---df-criterion).  The choice is stored with the models and in the output files.
+brain age for NormBrainAGE.  The choice is stored with the models and in the output
+files.
 The shape parameters are constant per voxel/vertex or, with --shape-df, splines of
 age where BIC prefers them.  The normal model is fitted by
 the RS algorithm of GAMLSS (ported from ComBatLS); shash and gg start from it and
@@ -58,12 +58,12 @@ voxel/vertex is a feature, R is low-rank plus diagonal (overconfident and less
 accurate), and with --family normal the voxel-wise model is shared with the z-maps.
 
 The estimate comes with a likelihood-ratio interval and a standard error (Laplace
-approximation).  The Fisher information about age shows at which ages the data say
-little about age, and a parametric bootstrap (--bias-replicates) gives the bias of
-the estimate there and at the ends of the age grid.  The estimation error of the
-normative models and the principal component analysis add to this bias with finite
-training samples (scripts/simulate_brainage.py), so the slope of BrainAGE on age is
-reported with every accuracy table.  Further outputs are regional brain
+approximation).  A parametric bootstrap (--bias-replicates) gives its bias and its
+actual standard error along age: the estimate is biased where the data say little
+about age and at the ends of the age grid.  The estimation error of the normative
+models and the principal component analysis add to this bias with finite training
+samples (scripts/simulate_brainage.py), so the slope of BrainAGE on age is reported
+with every accuracy table.  Further outputs are regional brain
 ages for the lobes (--parcellation) and a non-aging deviation, the Mahalanobis
 distance of the z-scores at the brain age (NDM.Deviation; at chronological age:
 NDM.Deviation_age).  --brainloss adds BrainLOSS (Loss Of Substance beyond
@@ -186,19 +186,10 @@ DF_AUTO = 'auto'
 DF_GRID_VOXEL = dict(mu=(2, 3, 4, 5, 6, 8, 10, 12), sigma=(1, 2, 3, 4, 5))
 DF_GRID_BRAINAGE = dict(mu=(1, 2, 3, 4, 5, 6, 8), sigma=(1, 2, 3, 4))
 DF_START_SIGMA, DF_FOLDS, DF_MAX_FEATURES = 3, 5, 1000
-# criterion of the df of the brain age models (--df-criterion): the mean absolute
-# error of the held-out brain age, which in principle rewards estimates that are shrunk
-# toward the middle of the age range, or the held-out log-likelihood of the component
-# scores at chronological age, a proper scoring rule.  The default is the criterion of
-# the comparisons on real data in docs/models.md; in simulations both chose settings
-# with the same age bias (scripts/simulate_brainage.py)
-DF_CRITERIA = ('mae', 'loglik')
-DF_CRITERION = 'mae'
-
 # brain age: level of the likelihood-ratio intervals, spacing [years] of the ages at
-# which the age information and the bias of the estimate are evaluated (age_curves),
-# and the share of the youngest and of the oldest subjects whose mean BrainAGE is
-# reported as the bias at the ends of the age range
+# which the bias of the estimate is evaluated by parametric bootstrap (age_curves), and
+# the share of the youngest and of the oldest subjects whose mean BrainAGE is reported
+# as the bias at the ends of the age range
 CI_LEVEL = 0.95
 CURVE_STEP = 2.0
 TAIL_SHARE = 0.1
@@ -2416,20 +2407,13 @@ class ResidualCorrelation:
         self.A = (self.D[:, None] * V) @ L
         return self
 
-    def _inner(self):
-        """I - A' diag(1/D) A (rank, rank), positive definite."""
-        return np.eye(self.A.shape[1]) - self.A.T @ (self.A / self.D[:, None])
-
-    def logdet(self):
-        """log |R|, from R^-1 = diag(D) - A A'."""
-        return -(np.sum(np.log(self.D)) + np.linalg.slogdet(self._inner())[1])
-
     def factor(self):
         """B (p, rank) with R = diag(1/D) + B B' (Woodbury identity of R^-1 = diag(D)
-        - A A'), for simulating z ~ N(0, R) and for traces with R."""
+        - A A'), for simulating z ~ N(0, R)."""
         if not self.A.shape[1]:
             return np.zeros_like(self.A)
-        return (self.A / self.D[:, None]) @ np.linalg.cholesky(np.linalg.inv(self._inner()))
+        P = self.A / self.D[:, None]
+        return P @ np.linalg.cholesky(np.linalg.inv(np.eye(self.A.shape[1]) - self.A.T @ P))
 
     def get_state(self):
         return dict(rank=int(self.rank), psi_min=float(self.psi_min), D=self.D, A=self.A)
@@ -2561,33 +2545,6 @@ def _lr_interval(ll, grid, age, sd, lmax, level=CI_LEVEL):
     half = sd[i] * np.sqrt(2 * c)
     lower[i], upper[i], open_[i], parts[i] = age[i] - half, age[i] + half, False, 1
     return lower, upper, open_, parts
-
-
-def _information(model, corr, cols, ages, male_val, h):
-    """Expected (Fisher) information about age I(a) (m,) of the features of one subject
-    at the ages (m,), for y ~ N(mu(a), S(a) R S(a)) with S = diag(sigma(a)):
-
-        I(a) = v' R^-1 v + g' (I + R^-1 o R) g,
-
-    with the standardized aging direction v = mu'(a) / sigma(a), g = d log sigma / da
-    and the element-wise product o.  The first term is the information in the means,
-    the second that in the SDs.  The derivatives are central differences with step h;
-    the model is evaluated at the reference site and median covariates, with its site
-    adaptation.  I(a)^-1/2 is the asymptotic standard error of the maximum likelihood
-    age of a subject of true age a: where it is large, the data say little about age.
-    """
-    a = np.asarray(ages, dtype=np.float64)
-    male = np.full(a.shape, float(male_val))
-    (mp, sp), (mm, sm) = (model.mu_sigma(a + s * h, male, cols=cols) for s in (1, -1))
-    v = (mp - mm) / (2 * h) / model.mu_sigma(a, male, cols=cols)[1]
-    g = (np.log(sp) - np.log(sm)) / (2 * h)
-    A, D, B = corr.A, corr.D, corr.factor()
-    info = v ** 2 @ D - np.sum((v @ A) ** 2, axis=1)
-    # tr(G R^-1 G R) with G = diag(g), R^-1 = diag(D) - A A' and R = diag(1/D) + B B'
-    info += g ** 2 @ (2 + D * np.sum(B ** 2, axis=1) - np.sum(A ** 2, axis=1) / D)
-    if A.shape[1]:
-        info -= np.array([np.sum(((A.T * gi) @ B) ** 2) for gi in g])
-    return info
 
 
 def _mahalanobis(model, corr, cols, Y, age, male, C=None):
@@ -2933,13 +2890,6 @@ class NDMBrainAge:
                  out['ci_parts'][sub]) = _lr_interval(ll, self.grid, age, sd, lmax)
         return out
 
-    def information(self, ages, male_val=0.0):
-        """Expected information about age I(a) (m,) of the global model at the ages (m,)
-        for one sex (_information); I(a)^-1/2 is the asymptotic standard error of the
-        brain age of a subject of true age a."""
-        part = self.parts[0]
-        return _information(part.model, part.corr, part.mcols, ages, male_val, self.grid_step)
-
     def bootstrap(self, ages, male_val=0.0, n_rep=200, seed=0, max_bytes=2e8):
         """Parametric bootstrap of the global brain age at the true ages (m,) of one sex.
 
@@ -2986,28 +2936,22 @@ class NDMBrainAge:
                                        axis=1)
         return out
 
-    def age_curves(self, ages=None, n_rep=0, seed=0):
-        """Where the global brain age can be trusted, as functions of the true age.
+    def age_curves(self, ages=None, n_rep=200, seed=0):
+        """Bias and precision of the global brain age as functions of the true age, by
+        parametric bootstrap with n_rep replicates (bootstrap).
 
-        ages  : ages of the curves (default: the age grid in steps of CURVE_STEP)
-        n_rep : replicates of the parametric bootstrap (0: information only)
+        ages : ages of the curves (default: the age grid in steps of CURVE_STEP)
         Returns a dict with 'age' (m,), 'male' (s,), the sexes of the columns (one
-        column if the models do not use sex), and (m, s) arrays: 'info', the expected
-        information I(a) (information), 'se' = I(a)^-1/2 and, with n_rep, 'bias',
-        'bias_se', 'sd', 'at_bound' and 'cover' of bootstrap.
+        column if the models do not use sex), and the (m, s) arrays 'bias', 'bias_se',
+        'sd', 'at_bound' and 'cover' of bootstrap.
         """
         if ages is None:
             ages = np.arange(self.grid[0], self.grid[-1] + CURVE_STEP / 2, CURVE_STEP)
         ages = np.asarray(ages, dtype=np.float64)
         sexes = [0.0, 1.0] if self.parts[0].model.use_male else [0.0]
-        out = dict(age=ages, male=np.array(sexes),
-                   info=np.column_stack([self.information(ages, m) for m in sexes]))
-        with np.errstate(divide='ignore', invalid='ignore'):
-            out['se'] = np.where(out['info'] > 0, out['info'], np.nan) ** -0.5
-        if n_rep:
-            boot = [self.bootstrap(ages, m, n_rep, seed) for m in sexes]
-            out.update({key: np.column_stack([b[key] for b in boot]) for key in boot[0]})
-        return out
+        boot = [self.bootstrap(ages, m, n_rep, seed) for m in sexes]
+        return dict(age=ages, male=np.array(sexes),
+                    **{key: np.column_stack([b[key] for b in boot]) for key in boot[0]})
 
     def predict(self, d: Data, chunk=256):
         """Brain age and non-aging deviation of every subject.
@@ -3361,12 +3305,6 @@ def _df_folds(d, k, seed=0):
     return fold
 
 
-def _estimator_kw(kw, **change):
-    """Arguments of NDMBrainAge from the brain age options kw, which also hold the
-    criterion of the choice of the df, with the given changes."""
-    return {**{key: v for key, v in kw.items() if key != 'df_criterion'}, **change}
-
-
 def _search_df(criteria, df_mu, df_sigma, grid):
     """Coordinate search of (df_mu, df_sigma): df_mu with df_sigma fixed (its given
     value or DF_START_SIGMA), then df_sigma given the chosen df_mu.  criteria(configs)
@@ -3446,26 +3384,6 @@ def select_df_normative(d, cov=None, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS
         folds=k, features=int(cols.size), stages=stages)
 
 
-def _heldout_loglik(est, d):
-    """Log-likelihood (n,) of the features of the subjects d at their chronological
-    ages under the global model of est, log N(y; mu(a), S(a) R S(a)), at their own site
-    where it is a training site and at the reference site otherwise."""
-    d = est._prep(d)
-    part = est.parts[0]
-    m, corr = part.model, part.corr
-    X = part.features(d.Y)
-    known = np.isin(d.site, m.site_levels)
-    ll = np.empty(d.n)
-    for sel, own in ((known, True), (~known, False)):
-        if np.any(sel):
-            mu, sd = m.mu_sigma(d.age[sel], d.male[sel], d.site[sel] if own else None,
-                                cols=part.mcols, C=None if d.C is None else d.C[sel])
-            z = (X[sel] - mu) / sd
-            ll[sel] = (-0.5 * (z ** 2 @ corr.D - np.sum((z @ corr.A) ** 2, axis=1))
-                       - np.sum(np.log(sd), axis=1))
-    return ll - 0.5 * corr.logdet() - 0.5 * X.shape[1] * LOG2PI
-
-
 def age_bias(err, age):
     """Dependence of the BrainAGE values err on chronological age: the slope of their
     regression on age [years per year] and their mean in the youngest and in the oldest
@@ -3480,33 +3398,21 @@ def age_bias(err, age):
                 bias_old=float(np.mean(err[order[-m:]])))
 
 
-def select_df_brainage(d, kw, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS, seed=0,
-                       criterion=None):
+def select_df_brainage(d, kw, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS, seed=0):
     """Spline df of age of the normative models of NDMBrainAge, the same for all
     principal component scores and regions, by k-fold cross-validation of the global
-    model of the training data d (folds stratified by site and age).
+    brain age of the training data d (folds stratified by site and age).
 
-    criterion (default kw['df_criterion'], else DF_CRITERION):
-    'mae'     the mean absolute error of the held-out brain age after removing its
-              median.  An estimate that is shrunk toward the middle of the age range
-              can have a smaller error than an unbiased one, so this criterion can in
-              principle prefer curves that are too stiff at the ends of the age range,
-              where they bias the brain age.
-    'loglik'  the held-out log-likelihood of the component scores at chronological age,
-              with their residual correlation (_heldout_loglik).  It is a proper scoring
-              rule of the normative model that the brain age inverts: only the model
-              that fits the scores best at every age maximizes it.
-    For every setting tried, the record also keeps both criteria and the dependence of
-    the held-out BrainAGE on age (age_bias: 'slope', 'bias_young', 'bias_old'), which
-    shows whether a setting buys its error with such a bias.  df_mu is searched first
-    (_search_df).  The PCA of every fold is computed once (with_df), and the warp is
-    not used during the search.  With pca = 0 the voxel-wise model is shared with the
-    z-maps, and its df are chosen as for them (select_df_normative).  Returns df_mu,
-    df_sigma and a record.
+    A setting is scored by the mean absolute error of the held-out brain age after
+    removing its median; df_mu is searched first (_search_df).  An estimate that is
+    shrunk toward the middle of the age range can have a smaller error than an unbiased
+    one, so the record also keeps, for every setting tried, the dependence of the
+    held-out BrainAGE on age (age_bias: 'slope', 'bias_young', 'bias_old'), which shows
+    whether a setting buys its error with such a bias.  The PCA of every fold is
+    computed once (with_df), and the warp is not used during the search.  With pca = 0
+    the voxel-wise model is shared with the z-maps, and its df are chosen as for them
+    (select_df_normative).  Returns df_mu, df_sigma and a record.
     """
-    criterion = criterion or kw.get('df_criterion') or DF_CRITERION
-    if criterion not in DF_CRITERIA:
-        raise ValueError(f"Unknown criterion {criterion!r}; use one of {', '.join(DF_CRITERIA)}.")
     if not kw.get('pca', 100):
         return select_df_normative(d, kw.get('cov'), df_mu, df_sigma, k, seed=seed,
                                    mask_threshold=kw.get('mask_threshold'),
@@ -3515,8 +3421,7 @@ def select_df_brainage(d, kw, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS, seed=
     if DF_AUTO not in (df_mu, df_sigma):
         return int(df_mu), int(df_sigma), dict(df_mu=int(df_mu), df_sigma=int(df_sigma),
                                                 selected=False)
-    base = {key: v for key, v in _estimator_kw(kw).items()
-            if key not in ('df_mu', 'df_sigma', 'verbose')}
+    base = {key: v for key, v in kw.items() if key not in ('df_mu', 'df_sigma', 'verbose')}
     base.update(parcellation=False, warp=False, brainloss=False)
     fold = _df_folds(d, k, seed)
     folds = []
@@ -3531,42 +3436,36 @@ def select_df_brainage(d, kw, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS, seed=
 
     def score(dm, ds):
         if (dm, ds) not in cache:
-            pred, ll = np.full(d.n, np.nan), np.full(d.n, np.nan)
+            pred = np.full(d.n, np.nan)
             for te, est, inputs, meta in folds:
-                new, dte = est.with_df(meta, dm, ds, inputs), d.subset(te)
-                pred[te] = new.predict(dte)['age']
-                ll[te] = _heldout_loglik(new, dte)
+                pred[te] = est.with_df(meta, dm, ds, inputs).predict(d.subset(te))['age']
             err = pred - d.age
-            cache[(dm, ds)] = dict(loglik=float(np.mean(ll)), **age_bias(err, d.age),
-                                   mae=float(np.mean(np.abs(err - np.median(err)))))
+            cache[(dm, ds)] = dict(mae=float(np.mean(np.abs(err - np.median(err)))),
+                                   **age_bias(err, d.age))
         return cache[(dm, ds)]
 
-    sign = 1 if criterion == 'loglik' else -1
-    dm, ds, stages = _search_df(lambda configs: [sign * score(*c)[criterion] for c in configs],
-                                df_mu, df_sigma, DF_GRID_BRAINAGE)
+    dm, ds, stages = _search_df(lambda configs: [-score(*c)['mae'] for c in configs], df_mu,
+                                df_sigma, DF_GRID_BRAINAGE)
     for st in stages:
         del st['criterion']
-        for key in ('loglik', 'mae', 'slope', 'bias_young', 'bias_old'):
+        for key in ('mae', 'slope', 'bias_young', 'bias_old'):
             st[key] = [cache[c][key] for c in zip(st['df_mu'], st['df_sigma'])]
-    text = dict(loglik='held-out log-likelihood per subject of the component scores at '
-                       'chronological age',
-                mae='mean absolute error of the held-out global brain age after removing '
-                    'its median')[criterion]
-    return dm, ds, dict(df_mu=dm, df_sigma=ds, selected=True, method='cross-validation',
-                        criterion=text, criterion_name=criterion, folds=k, stages=stages)
+    return dm, ds, dict(
+        df_mu=dm, df_sigma=ds, selected=True, method='cross-validation',
+        criterion='mean absolute error of the held-out global brain age after removing '
+                  'its median', folds=k, stages=stages)
 
 
 def _print_df_search(rec):
     """Table of the settings tried in the choice of the df of the brain age models."""
-    print(f"    {'df mu/sigma':12s}{'loglik':>10s}{'MAE':>8s}{'slope':>8s}"
-          f"{'youngest':>10s}{'oldest':>8s}   (BrainAGE on age; mean BrainAGE of the "
-          f"youngest and oldest {100 * TAIL_SHARE:.0f}%)")
+    print(f"    {'df mu/sigma':12s}{'MAE':>8s}{'slope':>8s}{'youngest':>10s}{'oldest':>8s}"
+          f"   (slope of the held-out BrainAGE on age; its mean in the youngest and the "
+          f"oldest {100 * TAIL_SHARE:.0f}%)")
     for st in rec.get('stages', []):
         for i, (m, s_) in enumerate(zip(st['df_mu'], st['df_sigma'])):
             mark = ' *' if (m, s_) == (rec['df_mu'], rec['df_sigma']) else ''
-            print(f"    {f'{m}/{s_}':12s}{st['loglik'][i]:10.3f}{st['mae'][i]:8.3f}"
-                  f"{st['slope'][i]:+8.3f}{st['bias_young'][i]:+10.2f}"
-                  f"{st['bias_old'][i]:+8.2f}{mark}")
+            print(f"    {f'{m}/{s_}':12s}{st['mae'][i]:8.3f}{st['slope'][i]:+8.3f}"
+                  f"{st['bias_young'][i]:+10.2f}{st['bias_old'][i]:+8.2f}{mark}")
 
 
 def _resolve_df(d, kw, which):
@@ -3587,7 +3486,7 @@ def _resolve_df(d, kw, which):
           f"{DF_FOLDS}-fold cross-validation", flush=True)
     if which == 'brainage':
         dm, ds, rec = select_df_brainage(d, kw, dm, ds)
-        if rec.get('stages') and 'loglik' in rec['stages'][0]:
+        if rec.get('stages') and 'slope' in rec['stages'][0]:
             _print_df_search(rec)
     else:
         dm, ds, rec = select_df_normative(d, kw.get('cov'), dm, ds,
@@ -4143,8 +4042,8 @@ def _average_curves(curves):
     """Mean of age curves (NDMBrainAge.age_curves) at the same ages, such as those of
     the folds of a cross-validation or of the estimators of several test sites; curves
     is a list of (curves, weight).  Curves of models without sex count for both sexes."""
-    cols = max(c['info'].shape[1] for c, _ in curves)
-    first = next(c for c, _ in curves if c['info'].shape[1] == cols)
+    cols = max(c['bias'].shape[1] for c, _ in curves)
+    first = next(c for c, _ in curves if c['bias'].shape[1] == cols)
     w = np.array([wt for _, wt in curves], dtype=np.float64)
     out = dict(age=first['age'], male=first['male'])
     for key in first:
@@ -4154,51 +4053,57 @@ def _average_curves(curves):
     return out
 
 
-def _subject_curves(used, age, male, n_rep, ages=None, seed=0):
-    """Age curves of the estimators used for the subjects of one model, and the bias of
-    the brain age of every subject.
+def _subject_curves(used, brain_age, age, male, n_rep, ages=None, seed=0):
+    """Bootstrap curves of the estimators used for the subjects of one model, and the
+    bias that they give for every subject.
 
     used : list of (NDMBrainAge, rows of its subjects): one estimator, or one per test
            site that was adapted on its own
-    age, male : brain ages before any correction and sex of all subjects (n,)
-    Returns the curves, averaged over the estimators with their numbers of subjects as
-    weights, and, with n_rep bootstrap replicates, the bias (n,) of every subject: the
-    bias curve of its estimator and sex at its brain age (else None).
+    brain_age, age, male : brain ages before any correction, chronological ages (NaN:
+           unknown) and sex of all subjects (n,)
+    Returns the curves (age_curves with n_rep replicates), averaged over the estimators
+    with their numbers of subjects as weights, and two (n,) arrays: the bias curve of
+    the estimator and sex of every subject
+    - at its chronological age: the BrainAGE that the fitted models let expect for a
+      subject whose brain is typical of its age.  Like the trend of a trend correction
+      it is a function of the chronological age, so it adds no noise to BrainAGE, but a
+      predicted age corrected with it is no longer a function of the image alone; NaN
+      without age
+    - at its brain age: a function of the image alone, which aims at the true age of
+      every brain but carries the error of the brain age into the correction.
     """
-    curves, bias = [], np.full(len(age), np.nan)
+    n = len(brain_age)
+    curves, at_age, at_brain_age = [], np.full(n, np.nan), np.full(n, np.nan)
     for est, rows in used:
         if not rows.size:
             continue
         cur = est.age_curves(ages, n_rep, seed)
         curves.append((cur, rows.size))
-        if n_rep:
-            col = ((male[rows] > 0.5).astype(int) if cur['male'].size > 1
-                   else np.zeros(rows.size, int))
-            for c in np.unique(col):
-                sub = rows[col == c]
-                bias[sub] = np.interp(age[sub], cur['age'], cur['bias'][:, c])
-    return _average_curves(curves), (bias if n_rep else None)
+        col = ((male[rows] > 0.5).astype(int) if cur['male'].size > 1
+               else np.zeros(rows.size, int))
+        for c in np.unique(col):
+            sub = rows[col == c]
+            at_age[sub] = np.interp(age[sub], cur['age'], cur['bias'][:, c])
+            at_brain_age[sub] = np.interp(brain_age[sub], cur['age'], cur['bias'][:, c])
+    return _average_curves(curves), at_age, at_brain_age
 
 
-def _print_information(names, curves, n_cols=10):
-    """Table of the age curves of the models (means of the sexes) at up to n_cols ages."""
+def _print_bootstrap(names, curves, n_cols=10):
+    """Table of the bootstrap curves of the models (means of the sexes) at up to n_cols
+    ages."""
     age = curves[0]['age']
     idx = np.unique(np.round(np.linspace(0, age.size - 1, min(n_cols, age.size))).astype(int))
-    boot = 'bias' in curves[0]
-    print("\nAge information of the brain age models: standard error [years] expected from "
-          "the Fisher information I(a) at the true age a"
-          + ("; bias [years], SD, share of estimates at the ends of the age grid and coverage "
-             f"of the {100 * CI_LEVEL:.0f}% likelihood-ratio intervals by parametric bootstrap"
-             if boot else " (--bias-replicates adds the bias by parametric bootstrap)"))
+    print("\nParametric bootstrap of the brain age at the true age a (data drawn from the "
+          "fitted models): bias [years], SD, share of estimates at the ends of the age grid "
+          f"and coverage of the {100 * CI_LEVEL:.0f}% likelihood-ratio intervals")
     w = max(len(nm) for nm in names) + 2
     print(f"{'age':{w + 10}s}" + ''.join(f"{a:7.0f}" for a in age[idx]))
-    rows = (('SE', 'se', '7.2f'),) + ((('bias', 'bias', '+7.2f'), ('SD', 'sd', '7.2f'),
-                                       ('at ends', 'at_bound', '7.2f'),
-                                       ('coverage', 'cover', '7.2f')) if boot else ())
+    rows = (('bias', 'bias', '+7.2f'), ('SD', 'sd', '7.2f'), ('at ends', 'at_bound', '7.2f'),
+            ('coverage', 'cover', '7.2f'))
     for nm, cur in zip(names, curves):
         for label, key, fmt in rows:
             vals = np.mean(cur[key], axis=1)[idx]
-            print(f"{nm if key == 'se' else '':{w}s}{label:10s}"
+            print(f"{nm if key == 'bias' else '':{w}s}{label:10s}"
                   + ''.join(format(v, fmt) if np.isfinite(v) else f"{'':7s}" for v in vals))
 
 
@@ -4299,9 +4204,9 @@ def _crossfit_gpr_ensemble(P, ages, ctrl, method, fold):
 
 def cross_validate(datas, kfold=10, seed=0, age_range=(0, np.inf), gpr=True,
                    ensemble='gls', bias_replicates=0, **kw):
-    """k-fold cross-validation of the NDM brain age (and GPR baseline).  The age curves
-    of the outputs (age information and, with bias_replicates, the bias by parametric
-    bootstrap) are the means of the models of the folds."""
+    """k-fold cross-validation of the NDM brain age (and GPR baseline).  With
+    bias_replicates, the bootstrap curves of the outputs are the means of the models of
+    the folds."""
     _check_same_subjects(datas)
     d0 = datas[0]
     ok = _valid_train(d0, age_range)
@@ -4320,7 +4225,7 @@ def cross_validate(datas, kfold=10, seed=0, age_range=(0, np.inf), gpr=True,
     for d in datas:
         # df chosen once on all subjects (slightly optimistic for the CV estimates)
         dm, ds, rec = _resolve_df(d.subset(np.flatnonzero(ok)), kw, 'brainage')
-        kws.append(_estimator_kw(kw, df_mu=dm, df_sigma=ds))
+        kws.append(dict(kw, df_mu=dm, df_sigma=ds))
         if rec.get('selected'):
             print(f"{d.name}: df of mu {dm}, of sigma {ds} chosen by cross-validation on all "
                   f"subjects ({rec['seconds']:.0f}s)", flush=True)
@@ -4330,8 +4235,8 @@ def cross_validate(datas, kfold=10, seed=0, age_range=(0, np.inf), gpr=True,
                         deviation=np.full(n, np.nan), deviation_age=np.full(n, np.nan),
                         at_bound=np.zeros(n, bool), regional=None, regions=[],
                         region_names=[], gpr=np.full(n, np.nan), df_mu=dm, df_sigma=ds,
-                        curves=[], bias=np.full(n, np.nan) if bias_replicates else None))
-    # ages of the age curves: the grid of a model of all subjects
+                        curves=[], bias=np.full(n, np.nan), bias_age=np.full(n, np.nan)))
+    # ages of the bootstrap curves: the grid of a model of all subjects
     margin = kw.get('grid_margin', 5.0)
     curve_ages = np.arange(max(d0.age[ok].min() - margin, 0.0),
                            d0.age[ok].max() + margin + CURVE_STEP / 2, CURVE_STEP)
@@ -4347,11 +4252,11 @@ def cross_validate(datas, kfold=10, seed=0, age_range=(0, np.inf), gpr=True,
                         'deviation', 'deviation_age', 'brainloss', 'brainloss_age'):
                 if key in out:
                     r.setdefault(key, np.full(n, np.nan))[te] = out[key]
-            cur, bias = _subject_curves([(est, np.arange(te.size))], out['age'], d.male[te],
-                                        bias_replicates, curve_ages)
-            r['curves'].append((cur, te.size))
-            if bias is not None:
-                r['bias'][te] = bias
+            if bias_replicates:
+                cur, r['bias_age'][te], r['bias'][te] = _subject_curves(
+                    [(est, np.arange(te.size))], out['age'], d.age[te], d.male[te],
+                    bias_replicates, curve_ages)
+                r['curves'].append((cur, te.size))
             for key in ('regional', 'regional_deviation', 'regional_deviation_age',
                         'regional_brainloss', 'regional_brainloss_age'):
                 if key in out:
@@ -4374,7 +4279,7 @@ def cross_validate(datas, kfold=10, seed=0, age_range=(0, np.inf), gpr=True,
                 tr = np.flatnonzero((fold != f) & ok & np.isfinite(r['gpr']))
                 r['gpr_ba'][te] = trend_correct(r['gpr'], d0.age, tr)[te]
     for r in res:
-        r['curves'] = _average_curves(r['curves'])
+        r['curves'] = _average_curves(r['curves']) if bias_replicates else None
     return _summarize(datas, res, d0.age, ok, ensemble, gpr, fold=fold)
 
 
@@ -4397,7 +4302,7 @@ def fit_models(train, kw, brainage=True, voxel=False, vkw=None):
         info, est, vm, msg, dfs = data_info(d), None, None, '', []
         if brainage:
             dm, ds, info['df_brain_age'] = _resolve_df(d, kw, 'brainage')
-            est = NDMBrainAge(**_estimator_kw(kw, df_mu=dm, df_sigma=ds)).fit(d)
+            est = NDMBrainAge(**dict(kw, df_mu=dm, df_sigma=ds)).fit(d)
             dfs.append(f"brain age {dm}/{ds}")
             if est.loss_model is not None:
                 info['df_brainloss'] = est.loss_record
@@ -4649,7 +4554,7 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
     controls_in_sample : adapt the controls' own z-maps with all controls (former
                      behaviour) instead of leave-one-out
     bias_replicates : replicates of the parametric bootstrap of the bias of the brain
-                     age along age (NDMBrainAge.bootstrap; 0 = only the age information)
+                     age along age (NDMBrainAge.bootstrap; 0 = none)
 
     Test data from several sites (Data.site, e.g. '+'-joined files or --test-site) are
     adapted per site: the z-maps, the brain age models ('adapt', 'agefree') and
@@ -4777,13 +4682,16 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
                 est.adapt_agefree(dte.subset(ctrl))
             out = est.predict(dte)
             used = [(est, np.arange(n))]
-        curves, bias = _subject_curves(used, out['age'], dte.male, bias_replicates)
+        curves, bias_age, bias = (
+            _subject_curves(used, out['age'], np.where(ok, age, np.nan), dte.male,
+                            bias_replicates)
+            if bias_replicates else (None, np.full(n, np.nan), np.full(n, np.nan)))
         corrected = correct_age(out['age'], age, ctrl, post, sites)
         shift = corrected - out['age']         # the intervals move with the estimates
         r = dict(name=dte.name, age_raw=out['age'], age=corrected,
                  sd=out['sd'], at_bound=out['at_bound'], ci_low=out['ci_low'] + shift,
                  ci_high=out['ci_high'] + shift, ci_open=out['ci_open'],
-                 ci_parts=out['ci_parts'], curves=curves, bias=bias,
+                 ci_parts=out['ci_parts'], curves=curves, bias=bias, bias_age=bias_age,
                  df_mu=est.df_mu, df_sigma=est.df_sigma,
                  mask_threshold=(est.mask_info or {}).get('threshold', np.nan),
                  regional=correct_age(out['regional'], age, ctrl, post, sites),
@@ -5089,19 +4997,21 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
         df_sigma=np.array([r.get('df_sigma', np.nan) for r in res], dtype=np.float64),
         mask_threshold=np.array([r.get('mask_threshold', np.nan) for r in res], dtype=np.float64))
     out['BrainAGE'] = out['PredictedAge'] - age[:, None]
-    # where the brain age can be trusted: age information and bias of every model
+    # parametric bootstrap of every model: bias and precision along age, and the bias
+    # of every subject at its chronological age and at its brain age.  Nothing is
+    # subtracted: the accuracy tables refer to estimates that use the image alone
     curves = [r['curves'] for r in res if r.get('curves') is not None]
-    if len(curves) == len(res):
-        _print_information([r['name'] for r in res], curves)
-        if len({c['info'].shape for c in curves}) == 1:
-            out['information'] = dict(
+    if curves and len(curves) == len(res):
+        _print_bootstrap([r['name'] for r in res], curves)
+        if len({c['bias'].shape for c in curves}) == 1:
+            out['bootstrap'] = dict(
                 age=curves[0]['age'], male=curves[0]['male'],
                 **{key: np.stack([c[key] for c in curves], axis=-1)
                    for key in curves[0] if key not in ('age', 'male')})
         else:               # models with different age grids: one struct per model
-            out['information'] = np.array(curves, dtype=object)
-        if res[0].get('bias') is not None:
-            out['PredictedAge_bias'] = np.column_stack([r['bias'] for r in res])
+            out['bootstrap'] = np.array(curves, dtype=object)
+        out['BrainAGE_bias'] = np.column_stack([r['bias_age'] for r in res])
+        out['PredictedAge_bias'] = np.column_stack([r['bias'] for r in res])
     if known:
         n_open, n_parts = int(np.sum(out['ci_open'][ctrl])), int(np.sum(out['ci_parts'][ctrl] > 1))
         if n_open or n_parts:
@@ -5377,26 +5287,19 @@ def _parser():
                    help="NDM brain age: floor of the unique variance of the residual correlation")
     p.add_argument('--df-mu', type=_df_arg, default=DF_AUTO,
                    help="spline df of age for mu: auto (default) chooses one value per "
-                        "training sample and model by cross-validation (brain age: "
-                        "--df-criterion; z-maps: held-out likelihood), or a number; "
+                        "training sample and model by cross-validation (brain age: error "
+                        "of the brain age; z-maps: held-out likelihood), or a number; "
                         "with --penalized the basis size")
     p.add_argument('--df-sigma', type=_df_arg, default=DF_AUTO,
                    help="spline df of age for sigma: auto (default) or a number, as --df-mu")
-    p.add_argument('--df-criterion', choices=DF_CRITERIA, default=None,
-                   help="NDM brain age: criterion of --df-mu/--df-sigma auto.  mae = mean "
-                        "absolute error of the held-out brain age, which can in principle "
-                        "prefer curves that shrink the brain age toward the middle of the "
-                        "age range; loglik = held-out log-likelihood of the component "
-                        "scores at chronological age, a proper scoring rule "
-                        f"(default {DF_CRITERION}).  The table of the settings tried shows "
-                        "both and the slope of the held-out BrainAGE on age")
     p.add_argument('--bias-replicates', type=int, default=0,
-                   help="NDM brain age: replicates of a parametric bootstrap of the bias of "
-                        "the brain age along age (data simulated from the fitted models at "
-                        "every age and estimated again), which also gives the actual "
-                        "standard error and the coverage of the likelihood-ratio intervals; "
-                        "e.g. 200, for publication 1000 (default 0 = only the age "
-                        "information from the Fisher information)")
+                   help="NDM brain age: replicates of a parametric bootstrap of the brain age "
+                        "along age (data drawn from the fitted models at every age and "
+                        "estimated again), which gives the bias of the estimate, its actual "
+                        "standard error, the coverage of the likelihood-ratio intervals and, "
+                        "for every subject, the bias at its chronological age "
+                        "(BrainAGE_bias) and at its brain age (PredictedAge_bias); neither "
+                        "is subtracted.  E.g. 200, for publication 1000 (default 0 = off)")
     p.add_argument('--grid-step', type=float, default=0.25,
                    help="NDM brain age: age grid step [years]")
     p.add_argument('--grid-margin', type=float, default=5.0,
@@ -5424,10 +5327,9 @@ def _check_args(p, a):
     if a.model and not a.test:
         p.error("--model needs --test.")
     if a.model and (a.save_model or a.train_cov or a.cov_mean or a.cov_sd or a.site_sd
-                    or a.site_random or a.penalized or a.df_criterion):
-        p.error("--save-model, --train-cov, --cov-mean, --cov-sd, --site-sd, --site-random, "
-                "--penalized and --df-criterion need --train (saved models only need "
-                "--test-cov).")
+                    or a.site_random or a.penalized):
+        p.error("--save-model, --train-cov, --cov-mean, --cov-sd, --site-sd, --site-random "
+                "and --penalized need --train (saved models only need --test-cov).")
     if a.bias_replicates < 0 or a.bias_replicates == 1:
         p.error("--bias-replicates needs 0 or at least 2 replicates.")
     if a.bias_replicates and a.normative_only:
@@ -5529,9 +5431,8 @@ def main(argv=None):
         for flag, used in (('--site-sd', a.site_sd), ('--site-random', a.site_random)):
             if used and np.unique(train[0].site).size < 2:
                 print(f"{flag} has no effect: the training data come from one site.")
-        kw = dict(df_mu=a.df_mu, df_sigma=a.df_sigma,
-                  df_criterion=a.df_criterion or DF_CRITERION,
-                  mask_threshold=a.mask_threshold, pca=a.pca, rank=a.rank,
+        kw = dict(df_mu=a.df_mu, df_sigma=a.df_sigma, mask_threshold=a.mask_threshold,
+                  pca=a.pca, rank=a.rank,
                   psi_min=a.psi_min, grid_step=a.grid_step, grid_margin=a.grid_margin,
                   parcellation=a.parcellation, warp=a.warp, standardize=not a.no_standardize,
                   brainloss=a.brainloss, cov=cov, site_sd=a.site_sd, site_random=a.site_random,
