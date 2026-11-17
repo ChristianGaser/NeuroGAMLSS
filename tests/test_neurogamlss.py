@@ -403,12 +403,137 @@ def test_brainloss_age_includes_the_older_looking_brain():
 
 def test_select_df_brainage():
     d = simulate_brain()
-    dm, ds, rec = NG.select_df_brainage(d, dict(pca=10, mask_threshold=0))
-    assert dm in NG.DF_GRID_BRAINAGE['mu'] and ds in NG.DF_GRID_BRAINAGE['sigma']
-    first, last = rec['stages']
-    assert first['df_mu'] == list(NG.DF_GRID_BRAINAGE['mu']) and set(last['df_mu']) == {dm}
-    assert last['mae'][last['df_sigma'].index(ds)] == min(last['mae'])
-    assert NG.select_df_brainage(d, dict(pca=10, mask_threshold=0), 2, 3)[2]['selected'] is False
+    kw = dict(pca=10, mask_threshold=0)
+    for crit, best in (('loglik', max), ('mae', min)):
+        dm, ds, rec = NG.select_df_brainage(d, dict(kw, df_criterion=crit))
+        assert dm in NG.DF_GRID_BRAINAGE['mu'] and ds in NG.DF_GRID_BRAINAGE['sigma']
+        assert rec['criterion_name'] == crit
+        first, last = rec['stages']
+        assert first['df_mu'] == list(NG.DF_GRID_BRAINAGE['mu']) and set(last['df_mu']) == {dm}
+        assert last[crit][last['df_sigma'].index(ds)] == best(last[crit])
+        # both criteria and the age bias of the held-out BrainAGE of every setting tried
+        for st in rec['stages']:
+            assert all(len(st[key]) == len(st['df_mu']) and np.isfinite(st[key]).all()
+                       for key in ('loglik', 'mae', 'slope', 'bias_young', 'bias_old'))
+    assert NG.select_df_brainage(d, kw)[2]['criterion_name'] == NG.DF_CRITERION
+    assert NG.select_df_brainage(d, kw, criterion='mae')[2]['criterion_name'] == 'mae'
+    assert NG.select_df_brainage(d, kw, 2, 3)[2]['selected'] is False
+    with pytest.raises(ValueError):
+        NG.select_df_brainage(d, kw, criterion='rmse')
+
+
+def test_heldout_loglik_is_the_multivariate_normal_density():
+    from scipy.stats import multivariate_normal
+    d = simulate_brain(n=400, p=60)
+    tr, te = d.subset(np.arange(300)), d.subset(np.arange(300, 400))
+    est = NG.NDMBrainAge(df_mu=3, df_sigma=2, pca=6, mask_threshold=0).fit(tr)
+    part = est.parts[0]
+    R = np.linalg.inv(np.diag(part.corr.D) - part.corr.A @ part.corr.A.T)
+    assert np.isclose(part.corr.logdet(), np.linalg.slogdet(R)[1])
+    B = part.corr.factor()
+    assert np.allclose(np.diag(1 / part.corr.D) + B @ B.T, R)
+    mu, sd = part.model.mu_sigma(te.age, te.male, te.site, cols=part.mcols)
+    X = part.features(te.Y)
+    ref = [multivariate_normal(mu[i], sd[i][:, None] * R * sd[i]).logpdf(X[i]) for i in range(te.n)]
+    assert np.allclose(NG._heldout_loglik(est, te), ref)
+
+
+def test_age_bias_shows_shrinkage():
+    rng = np.random.default_rng(3)
+    age = rng.uniform(20, 80, 2000)
+    shrunk = 50 + 0.8 * (age - 50) + rng.standard_normal(2000) - age    # BrainAGE
+    b = NG.age_bias(shrunk, age)
+    assert abs(b['slope'] + 0.2) < 0.01 and b['bias_young'] > 4 and b['bias_old'] < -4
+    b = NG.age_bias(rng.standard_normal(2000) + 3, age)
+    assert abs(b['slope']) < 0.01 and abs(b['bias_young']) < 0.3
+
+
+def test_likelihood_ratio_interval():
+    grid = np.arange(20, 80.01, 0.25)
+    quad = lambda a0, s: -0.5 * ((grid - a0) / s) ** 2            # noqa: E731
+    ll = np.stack([
+        quad(50.1, 3.0),                                          # normal: age +- 1.96 sd
+        np.where(grid < 40, quad(40, 2.0), quad(40, 6.0)),        # skewed
+        np.maximum(quad(35, 2.0), quad(60, 2.0) - 0.5),           # two maxima
+        quad(78, 4.0),                                            # near the end of the grid
+        quad(50.1, 0.02)])                                        # narrower than the grid step
+    age, sd, bound, lmax = NG._argmax_refine(ll, grid)
+    lo, hi, open_, parts = NG._lr_interval(ll, grid, age, sd, lmax)
+    assert np.allclose([age[0], sd[0], lo[0], hi[0]], [50.1, 3, 50.1 - 1.96 * 3, 50.1 + 1.96 * 3],
+                       atol=0.01)
+    assert abs(lo[1] - (40 - 1.96 * 2)) < 0.02 and abs(hi[1] - (40 + 1.96 * 6)) < 0.02
+    assert parts[2] == 2 and lo[2] < 35 < 60 < hi[2] and list(parts[[0, 1, 3]]) == [1, 1, 1]
+    assert open_[3] and hi[3] == grid[-1] and not open_[:3].any()
+    assert lo[4] < age[4] < hi[4] and hi[4] - lo[4] < 0.25 and not bound.any()
+
+
+def test_age_information_and_bootstrap():
+    """The information is that of the multivariate normal model, its inverse is the
+    variance of the estimate where the data are informative, and the bias appears at
+    the ends of the age grid."""
+    d = simulate_brain(n=600, p=300)
+    Y = d.Y + 2.0 * np.random.default_rng(1).standard_normal(d.Y.shape).astype(np.float32)
+    d = replace(d, Y=Y)
+    est = NG.NDMBrainAge(df_mu=3, df_sigma=2, pca=8, mask_threshold=0).fit(d)
+    part = est.parts[0]
+    R = np.linalg.inv(np.diag(part.corr.D) - part.corr.A @ part.corr.A.T)
+    ages, h = np.array([30.0, 50.0, 70.0]), est.grid_step
+    info = est.information(ages, 1.0)
+    for a, i in zip(ages, info):
+        (mp, sp), (mm, sm), (_, s0) = (part.model.mu_sigma(np.array([x]), np.array([1.0]))
+                                       for x in (a + h, a - h, a))
+        S, dS, dmu = np.diag(s0[0]), np.diag((sp - sm)[0] / (2 * h)), (mp - mm)[0] / (2 * h)
+        P, dSig = np.linalg.inv(S @ R @ S), dS @ R @ S + S @ R @ dS
+        assert np.isclose(i, dmu @ P @ dmu + 0.5 * np.trace(P @ dSig @ P @ dSig), rtol=1e-6)
+    boot = est.bootstrap(ages, 1.0, n_rep=3000, seed=1)
+    assert np.allclose(boot['sd'], info ** -0.5, rtol=0.08)
+    assert np.all(np.abs(boot['bias']) < 0.15 * boot['sd']) and np.all(boot['bias_se'] < 0.05)
+    assert np.all(np.abs(boot['cover'] - NG.CI_LEVEL) < 0.02) and boot['at_bound'].max() < 0.01
+    assert np.array_equal(est.bootstrap(ages, 1.0, 40, seed=2)['bias'],
+                          est.bootstrap(ages, 1.0, 40, seed=2)['bias'])
+    cur = est.age_curves(n_rep=100)
+    assert cur['info'].shape == (cur['age'].size, 2) and list(cur['male']) == [0, 1]
+    assert cur['age'][0] == est.grid[0] and np.allclose(cur['se'], cur['info'] ** -0.5)
+    # at the ends of the grid the estimates cannot leave it: biased toward the interior
+    assert np.all(cur['bias'][0] > 0) and np.all(cur['bias'][-1] < 0)
+    assert np.all(cur['at_bound'][[0, -1]] > 0.2)
+    out = est.predict(d)
+    assert np.all(out['ci_low'] <= out['age']) and np.all(out['age'] <= out['ci_high'])
+    cover = np.mean((out['ci_low'] <= d.age) & (d.age <= out['ci_high']))
+    assert 0.85 < cover <= 1 and out['ci_parts'].min() >= 1
+
+
+def test_command_line_intervals_and_information(tmp_path):
+    from scipy.io import loadmat
+    d = simulate_brain(n=420, p=120)
+    Y = d.Y + 2.0 * np.random.default_rng(2).standard_normal(d.Y.shape).astype(np.float32)
+    files = {}
+    for name, sel in (('TR', slice(0, 300)), ('TE', slice(300, 420))):
+        files[name] = str(tmp_path / f's4rp1_8mm_{name}_CAT12.9.mat')
+        savemat(files[name], dict(Y=Y[sel], age=d.age[sel][:, None], male=d.male[sel][:, None]))
+    out = str(tmp_path / 'res')
+    common = ['--pca', '10', '--mask-threshold', '0', '--no-gpr', '--out', out]
+    NG.main(['--train', files['TR'], '--kfold', '3', '--df-criterion', 'mae',
+             '--bias-replicates', '20'] + common)
+    r = loadmat(out + '.mat', squeeze_me=True, struct_as_record=False)['NDM']
+    assert np.all(r.PredictedAge_lower <= r.PredictedAge) and np.all(r.PredictedAge <= r.PredictedAge_upper)
+    assert r.ci_level == NG.CI_LEVEL and r.ci_open.shape == r.ci_parts.shape == (300,)
+    inf = r.information
+    assert inf.info.shape == inf.bias.shape == (inf.age.size, 2) and np.all(inf.info > 0)
+    assert r.PredictedAge_bias.shape == (300,) and np.isfinite(r.PredictedAge_bias).all()
+    with open(out + '.csv') as f:
+        head = f.readline().strip().split(',')
+        row = dict(zip(head, map(float, f.readline().split(','))))
+    name = 's4rp1_8mm_TR_CAT12.9'
+    assert row[f'BrainAGE_lower_{name}'] <= row[f'BrainAGE_{name}'] <= row[f'BrainAGE_upper_{name}']
+    # train and test: the intervals move with the offset correction
+    NG.main(['--train', files['TR'], '--test', files['TE'], '--adjust', '1:60', '--df-mu', '3',
+             '--df-sigma', '1'] + common)
+    r = loadmat(out + '.mat', squeeze_me=True, struct_as_record=False)['NDM']
+    assert np.all(r.PredictedAge_lower <= r.PredictedAge) and np.all(r.PredictedAge <= r.PredictedAge_upper)
+    assert not hasattr(r, 'PredictedAge_bias') and r.information.se.shape == r.information.info.shape
+    with pytest.raises(SystemExit):
+        NG.main(['--train', files['TR'], '--bias-replicates', '1'] + common)
 
 
 def test_command_line_stores_the_chosen_df(tmp_path):
