@@ -44,7 +44,7 @@ The difference between the three results is easiest to see in a single normative
 | Link between the columns | none | residual correlation $`\mathbf{R}`$, $`K \times K`$ | none |
 | Spline df of age | 5-fold CV, held-out log-likelihood of normal models of 1,000 random voxels | 5-fold CV, mean absolute error of the held-out global brain age | 5-fold CV, held-out log-likelihood |
 | Test subject read at | the chronological age | every age of a grid; the most likely age is the brain age | the global brain age of the same model; `BrainLOSS_age`: the chronological age |
-| Result per subject | one $`z`$ per voxel; mean $`z`$ per lobe | global and regional brain age, standard error, non-aging deviation | BrainLOSS and BrainLOSS_age of the whole brain and of each lobe |
+| Result per subject | one $`z`$ per voxel; mean $`z`$ per lobe | global and regional brain age, likelihood-ratio interval and standard error, non-aging deviation | BrainLOSS and BrainLOSS_age of the whole brain and of each lobe |
 | Controls of a new site | $`z`$ of every voxel set to mean 0 and SD 1 | their median BrainAGE is subtracted (default) | standardized to mean 0 and SD 1 |
 | Several models | one map per model | weighted mean, GLS weights | mean |
 | Option | `--zmaps`, `--normative-only` | default | `--brainloss` |
@@ -97,7 +97,7 @@ NormBrainAGE does not use the voxel-wise models of the z-maps. It reduces the vo
 \ell(a) = -\tfrac{1}{2}\, \mathbf{z}(a)^\top \mathbf{R}^{-1} \mathbf{z}(a) - \sum_j \log \sigma_j(a)
 ```
 
-8. The brain age $`\hat a`$ is the maximum of $`\ell`$, refined by a parabola through the grid maximum and its neighbours. The curvature gives the standard error, $`\mathrm{SE} = (-\ell''(\hat a))^{-1/2}`$. BrainAGE is $`\hat a`$ minus the chronological age. Estimates at the end of the grid are flagged.
+8. The brain age $`\hat a`$ is the maximum of $`\ell`$, refined by a parabola through the grid maximum and its neighbours. The curvature gives the standard error, $`\mathrm{SE} = (-\ell''(\hat a))^{-1/2}`$, and the ages whose log-likelihood lies within 1.92 of the maximum form the 95% likelihood-ratio interval, which follows a skewed likelihood. BrainAGE is $`\hat a`$ minus the chronological age. Estimates at the end of the grid are flagged.
 9. The non-aging deviation is the Mahalanobis distance $`d^2 = \mathbf{z}(\hat a)^\top \mathbf{R}^{-1} \mathbf{z}(\hat a)`$, turned into a normal score with the Wilson–Hilferty approximation of $`\chi^2`$ with $`K`$ df. The same distance at the chronological age gives the total deviation.
 
 PCA scores are uncorrelated in the training sample. Their z-scores are correlated, because removing age, sex and site and dividing by an age-dependent SD changes them differently. $`\mathbf{R}`$ carries this correlation into the likelihood.

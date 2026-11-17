@@ -178,7 +178,7 @@ where $`\ell_1`$ and $`\ell_2`$ are the unpenalized log-likelihoods of the two f
 By default, the degrees of freedom (df) of the age splines of $`\mu`$ and $`\sigma`$ are chosen for every training sample and model by 5-fold cross-validation. The folds are stratified by site and age: the subjects of every site are sorted by age and dealt to the folds in turn. The same df apply to all voxels and to all component scores.
 
 - **Voxel-wise models.** Normal models of 1,000 random voxels are fitted to the training folds, and every setting is scored by the median over voxels of its held-out log-likelihood per subject, relative to the mean of the settings compared. The df of $`\mu`$ are searched first, from 2 to 12 with 3 for $`\sigma`$, and then those of $`\sigma`$, from 1 to 5. The normal model keeps the search fast, and for SHASH the same df were best in tests.
-- **NormBrainAGE.** Every setting is scored by the mean absolute error of the held-out global brain age after removing its median. The df of $`\mu`$ are searched from 1 to 8 with 3 for $`\sigma`$, then those of $`\sigma`$ from 1 to 4. The principal components of every fold are computed once and reused for all settings, and the warp is left out during the search. With `--pca 0`, the voxel-wise model is shared with the z-maps, and its df are chosen as for them.
+- **NormBrainAGE.** Every setting is scored by the mean absolute error of the held-out global brain age after removing its median (`--df-criterion mae`, the default) or by the held-out log-likelihood per subject of the component scores at chronological age, $`\log \mathcal{N}(\mathbf{y}; \boldsymbol\mu(a), \mathbf{S}(a) \mathbf{R} \mathbf{S}(a))`$ at the subject's own site (`--df-criterion loglik`). The error rewards accuracy of the brain age itself, but an estimate that is shrunk toward the middle of the age range can have a smaller error than an unbiased one. The log-likelihood is a proper scoring rule of the model that the brain age inverts and cannot be improved by shrinkage. For every setting tried, the record keeps both criteria, the slope of the held-out BrainAGE on age and its mean in the youngest and the oldest 10% of the subjects, and the search prints them, so that a setting that gains its accuracy by such a bias is visible; see [Uncertainty and age bias of NormBrainAGE](#uncertainty-and-age-bias-of-normbrainage) for a comparison of the criteria. The df of $`\mu`$ are searched from 1 to 8 with 3 for $`\sigma`$, then those of $`\sigma`$ from 1 to 4. The principal components of every fold are computed once and reused for all settings, and the warp is left out during the search. With `--pca 0`, the voxel-wise model is shared with the z-maps, and its df are chosen as for them.
 
 Given numbers in `--df-mu` or `--df-sigma` are not searched. The choice, its criterion and the scores of all settings tried are stored with the models (`df_voxel` and `df_brain_age` in the JSON description). With `--kfold`, the df are chosen once on all subjects before the folds, which makes the cross-validated errors slightly optimistic.
 
@@ -551,6 +551,129 @@ Brain age was compared with 10-fold cross-validation, with folds stratified by s
 
 Other weights of the voxels were less useful in gray and white matter at 8 mm. Dividing by the residual standard deviation after removing age, sex and site gave errors similar to standardization. Weighting voxels by the strength of their age effect made brain age less accurate, for example 5.39 instead of 5.19 years in gray matter of the lifespan sample. In simulated data, in which the features with the largest variance carry the age signal, the raw values were better, so the advantage of standardization is a property of the image data. The other comparisons of brain age on this page, in [Evidence](#evidence) and [Boundary knots](#boundary-knots), used the raw values.
 
+## Uncertainty and age bias of NormBrainAGE
+
+The brain age is the maximum of the log-likelihood $`\ell(a)`$ of a subject's component scores on the age grid. Three quantities describe how far it can be trusted.
+
+- **Likelihood-ratio interval.** The 95% interval holds the ages with $`\ell(\hat a) - \ell(a) \le \chi^2_{1;\,0.95} / 2 = 1.92`$, with the limits interpolated between grid points (`_lr_interval`). It follows the shape of the likelihood, so it is asymmetric where the age curves flatten on one side of the estimate, which a standard error cannot show. For a likelihood with several maxima, it spans the smallest to the largest age of the set (`ci_parts` counts its intervals), and `ci_open` marks intervals that reach an end of the grid, where the limit is not a bound. The accuracy tables report the share of subjects whose chronological age lies within the interval (`cover95`). The Laplace standard error $`(-\ell''(\hat a))^{-1/2}`$ is still written to the outputs.
+- **Age information.** For $`\mathbf{y} \sim \mathcal{N}(\boldsymbol\mu(a), \mathbf{S}(a) \mathbf{R} \mathbf{S}(a))`$ with $`\mathbf{S} = \operatorname{diag}(\boldsymbol\sigma(a))`$, the Fisher information about age is
+
+  ```math
+  I(a) = \mathbf{v}^\top \mathbf{R}^{-1} \mathbf{v} + \mathbf{g}^\top (\mathbf{I} + \mathbf{R}^{-1} \circ \mathbf{R})\, \mathbf{g},
+  \qquad v_j = \frac{\mu_j'(a)}{\sigma_j(a)}, \quad g_j = \frac{\partial \log \sigma_j(a)}{\partial a},
+  ```
+
+  with the element-wise product $`\circ`$ (`_information`; the second term is $`\tfrac{1}{2} \operatorname{tr}((\boldsymbol\Sigma^{-1} \boldsymbol\Sigma')^2)`$). The first term is the information in the means, the second that in the standard deviations. $`I(a)^{-1/2}`$ is the asymptotic standard error of the brain age of a subject of age $`a`$. It is printed along the age grid and saved as `NDM.information`; where it is large, the age curves are flat, and BrainAGE says little.
+- **Bias by parametric bootstrap.** `--bias-replicates` draws component scores from the fitted model at every age of the grid, in steps of 2 years and for both sexes, $`\mathbf{y}^* = \boldsymbol\mu(a) + \boldsymbol\sigma(a) \circ \mathbf{z}^*`$ with $`\mathbf{z}^* \sim \mathcal{N}(\mathbf{0}, \mathbf{R})`$, and estimates their brain ages on the same grid (`NDMBrainAge.bootstrap`). The mean of the estimates minus $`a`$ is the bias, their SD the actual standard error, and the share of their intervals that contain $`a`$ the coverage. The draws are antithetic pairs $`(\mathbf{z}^*, -\mathbf{z}^*)`$, in which the errors that are linear in $`\mathbf{z}^*`$ cancel, so that 200 replicates give the bias with a Monte Carlo error of a few hundredths of a year where the data are informative; the SD and the coverage need about 1,000. Every subject also gets the bias at its brain age (`PredictedAge_bias`). A first-order formula such as that of Cox and Snell (1968) would be cheaper, but it fails where it matters, at ages with little information and at the ends of the grid.
+
+The bootstrap treats the fitted models as the truth. It therefore shows the bias that comes from little age information, from the ends of the grid and from the linear curves beyond the boundary knots, but not the bias that comes from the estimation error of the models.
+
+### Age bias in simulated data
+
+Whether BrainAGE depends on age for reasons of the method cannot be read from real data, in which the true brain age is unknown. [scripts/simulate_brainage.py](../scripts/simulate_brainage.py) therefore draws data at known ages, so that the true BrainAGE of every subject is 0, and runs them through the whole pipeline: mask, standardization, 100 principal components, choice of the df, normative models, residual correlation and maximum likelihood.
+
+- **Data.** 3,000 voxels whose means follow three spatial patterns with different age trajectories. Subjects differ by 600 latent spatial factors with a power-law spectrum, whose size grows with age by 15%, by a sex effect and by white noise. The data are normal, as the method assumes, but the trajectories are not splines. In the "GM" world, the trajectories change at every age. In the "WM" world, the main trajectory is an inverted U with its maximum at 46 years, so that mid-adulthood carries little age information. The sizes of the effects give errors of 5 to 6 years with 1,000 training subjects, as in the real data.
+- **Design.** Training samples of 300, 1,000 and 3,000 subjects aged 18 to 88 years with five age distributions: uniform, mostly young, mostly old, bimodal (young and old adults) and middle (55 ± 10 years). Every training sample was evaluated on an independent sample of 4,000 subjects with uniform ages, out of fold (10 folds) and in-sample, with five training samples per condition at 1,000 subjects and three at 300 and 3,000.
+- **Comparison.** The replica of the GPR BrainAGE, uncorrected and with the linear trend correction, which was estimated in one half of the test sample and applied to the other. NormBrainAGE was evaluated without any correction and with the same trend correction.
+
+**Slope.** Slope of BrainAGE on age in the independent test sample, in years per year, with 1,000 training subjects and uncorrected estimates. The standard errors over the training samples are 0.003 to 0.010, and 0.026 for WM with old training subjects:
+
+| Training ages | GM, NormBrainAGE | GM, GPR | WM, NormBrainAGE | WM, GPR |
+|---|---|---|---|---|
+| uniform | −0.071 | −0.241 | −0.082 | −0.388 |
+| young | −0.160 | −0.439 | −0.099 | −0.723 |
+| old | −0.093 | −0.445 | −0.345 | −0.627 |
+| bimodal | −0.046 | −0.190 | −0.064 | −0.315 |
+| middle | −0.151 | −0.549 | −0.247 | −0.665 |
+
+- **Not zero.** The slope of NormBrainAGE was negative in every condition: the brain ages of new subjects are shrunk toward the ages that the training sample covers well. It was 21% to 36% of the slope of the uncorrected GPR in GM and 14% to 55% in WM, so much smaller than that of a regression of age on the image, but not zero.
+- **Training age distribution.** The slope depended on it. It was largest where the test ages reach beyond the ages that the training sample covers well (young, old, middle): there the age curves are linear beyond the boundary knots and estimated from few subjects. With young training subjects, the mean BrainAGE of the oldest decile of the test sample was −9.6 years in GM; with old training subjects, that of the youngest decile was +27 years in WM.
+
+![Mean BrainAGE by age in the simulated test sample](figures/brainage_age_bias.png)
+
+**In-sample, out of fold and new subjects.** Slope of the uncorrected NormBrainAGE with 1,000 training subjects:
+
+| Training ages | GM, in-sample | GM, out of fold | GM, test | WM, in-sample | WM, out of fold | WM, test |
+|---|---|---|---|---|---|---|
+| uniform | −0.012 | −0.070 | −0.071 | −0.038 | −0.082 | −0.082 |
+| young | −0.006 | −0.109 | −0.160 | −0.063 | −0.202 | −0.099 |
+| old | −0.017 | −0.099 | −0.093 | +0.019 | −0.052 | −0.345 |
+| bimodal | −0.008 | −0.051 | −0.046 | −0.031 | −0.063 | −0.064 |
+| middle | −0.002 | −0.152 | −0.151 | −0.050 | −0.225 | −0.247 |
+
+- **In-sample.** The training subjects themselves show almost no slope, and their error is too small: 4.63 instead of 5.43 years out of fold in GM with uniform ages. The age bias is therefore invisible in the training fit and must be judged out of fold or in new subjects.
+- **Cause.** It is the estimation error of the normative models. In one training sample (GM, uniform, 1,000 subjects), normative models and a residual correlation that were refitted to 12,000 new subjects, with the principal axes of the training sample, reduced the slope in the test sample from −0.060 to −0.018, while a refit to 1,000 new subjects left it at −0.061 (a single run, not part of the script). Every component adds the noise of its estimated age curve to the likelihood, and the curves are estimated best where the training subjects are many. The scores of new subjects were also less dispersed than the training scores, with a mean total deviation of −0.8 with 1,000 training subjects.
+- **Out of fold.** The out-of-fold slope equals that of new subjects only if they have the age distribution of the training sample. For test ages outside it, the bias can be much larger than the out-of-fold slope suggests (WM, old: −0.052 out of fold, −0.345 in the test sample).
+
+**Training size.** Slope in the test sample, uncorrected:
+
+| Training ages | Subjects | GM, NormBrainAGE | GM, GPR | WM, NormBrainAGE | WM, GPR |
+|---|---|---|---|---|---|
+| uniform | 300 | −0.128 | −0.342 | −0.118 | −0.486 |
+| uniform | 1,000 | −0.071 | −0.241 | −0.082 | −0.388 |
+| uniform | 3,000 | −0.030 | −0.173 | −0.062 | −0.319 |
+| young | 300 | −0.295 | −0.514 | −0.330 | −0.809 |
+| young | 1,000 | −0.160 | −0.439 | −0.099 | −0.723 |
+| young | 3,000 | −0.091 | −0.389 | −0.009 | −0.674 |
+
+The slope of NormBrainAGE shrinks with the training size, in GM by about half for three times as many subjects. In WM with uniform ages, most of what remains at 3,000 subjects is the bias of the estimate itself, which the bootstrap shows (below). A slope near 0 does not mean no age bias where the bias is not linear: in WM with 3,000 young training subjects, the slope was −0.009, but the mean BrainAGE of the age deciles ranged from −5.9 to +3.3 years.
+
+**After a trend correction.** With the same linear trend correction for both methods, the slope is 0 by construction, and what remains is the bias that is not linear in age. Root mean square over the age deciles of the mean BrainAGE, and the mean absolute error, in years, with 1,000 training subjects:
+
+| Training ages | GM bias, NormBrainAGE | GM bias, GPR | GM error, NormBrainAGE | GM error, GPR | WM bias, NormBrainAGE | WM bias, GPR | WM error, NormBrainAGE | WM error, GPR |
+|---|---|---|---|---|---|---|---|---|
+| uniform | 0.82 | 1.76 | 5.21 | 5.20 | 2.18 | 3.49 | 5.94 | 6.31 |
+| young | 0.99 | 2.67 | 5.25 | 4.48 | 2.40 | 2.46 | 7.15 | 4.68 |
+| old | 0.62 | 0.55 | 5.33 | 3.94 | 5.72 | 5.65 | 8.10 | 5.77 |
+| bimodal | 0.45 | 1.80 | 5.23 | 5.52 | 2.11 | 4.88 | 5.98 | 7.30 |
+| middle | 1.33 | 1.31 | 5.82 | 3.21 | 3.65 | 4.07 | 7.36 | 4.50 |
+
+After the correction, the remaining age bias of NormBrainAGE was smaller than that of the GPR or equal to it. Its error was similar with uniform and bimodal training ages and larger with the other three. The simulated data were not built to compare the accuracy of the two methods, which depends on how the age effects are spread over the components, so only the bias should be read from this table.
+
+**Bias that the fitted model shows.** Mean BrainAGE by age decile of the test sample and the bias from the parametric bootstrap (200 replicates), with uniform training ages and 1,000 subjects:
+
+| Age | 18–25 | 25–32 | 32–39 | 39–46 | 46–53 | 53–60 | 60–67 | 67–74 | 74–81 | 81–88 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| GM, test sample | −0.2 | +1.1 | +0.7 | +0.2 | −0.7 | −1.6 | −3.0 | −3.4 | −3.4 | −2.2 |
+| GM, bootstrap | −0.0 | −0.0 | +0.1 | +0.3 | +0.3 | −0.0 | −0.3 | −0.4 | −0.3 | −0.5 |
+| WM, test sample | +0.8 | +2.2 | +2.7 | +0.9 | −2.2 | −5.0 | −5.3 | −3.7 | −2.2 | −0.4 |
+| WM, bootstrap | +0.6 | +1.6 | +2.4 | +1.4 | −1.3 | −3.2 | −2.6 | −1.3 | −0.1 | −0.0 |
+| WM, SE from $`I(a)`$ | 3.8 | 4.1 | 5.2 | 8.0 | 9.8 | 5.9 | 4.1 | 3.2 | 2.9 | 2.8 |
+| WM, SD in the bootstrap | 6.7 | 8.4 | 8.8 | 7.8 | 7.6 | 8.7 | 9.1 | 7.9 | 3.3 | 2.7 |
+
+- **Little information.** Where the trajectories are flat, the estimate itself is biased, and the bootstrap shows it: in WM it gives more than half of the bias around the maximum of the trajectory. In GM, where every age is informative, it gives almost none of the observed bias, which comes from the estimation error of the models.
+- **Removing it.** Subtracting the bootstrap bias at the brain age (`PredictedAge_bias`) reduced the slope in WM from −0.082 to −0.047 with 1,000 and from −0.062 to −0.012 with 3,000 training subjects, and in GM from −0.071 to −0.058 and from −0.030 to −0.014. It raised the mean absolute error (WM, 1,000 subjects: 6.32 instead of 5.78 years), because the bias at the estimated age is a noisy estimate of the bias at the true age. It is therefore reported, not subtracted.
+- **Information is local.** $`I(a)^{-1/2}`$ agreed with the SD of the bootstrap estimates within 8% in GM. In WM it was far too small for young adults (3.8 against 6.7 years at 18 to 25 years): the trajectory takes the same values on both sides of its maximum, the likelihood has a second maximum at the mirror age, and the information at the true age does not know of it. Where the age curves are not monotone, the SD of the bootstrap and the likelihood-ratio intervals are the measures to use.
+
+**Coverage of the 95% intervals** in the test sample, with 1,000 training subjects:
+
+| Training ages | GM, likelihood ratio | GM, Laplace | WM, likelihood ratio | WM, Laplace |
+|---|---|---|---|---|
+| uniform | 0.920 | 0.903 | 0.905 | 0.837 |
+| young | 0.862 | 0.853 | 0.875 | 0.752 |
+| old | 0.893 | 0.866 | 0.837 | 0.828 |
+| bimodal | 0.914 | 0.888 | 0.895 | 0.826 |
+| middle | 0.886 | 0.841 | 0.867 | 0.806 |
+
+The likelihood-ratio intervals covered the true age more often than $`\hat a \pm 1.96\,\mathrm{SE}`$ in every condition, most in WM. Both stay below 95%, because neither includes the estimation error of the models and the bias that follows from it: in the bootstrap from the fitted model, the likelihood-ratio intervals covered 92% to 97% away from the ends of the grid. With uniform training ages, the coverage rose from 0.84 (GM) and 0.80 (WM) with 300 training subjects to 0.94 and 0.93 with 3,000.
+
+**Criterion of the df.** With 1,000 training subjects, the two criteria chose settings with the same slope in eight of ten conditions (differences up to 0.003). With training ages in the middle, the error criterion chose more flexible curves with a larger age bias, a slope of −0.180 instead of −0.151 in GM and −0.302 instead of −0.247 in WM, which the table of the search showed in the held-out training subjects as well (GM: −0.21 against −0.15). The log-likelihood chose stiffer curves throughout, mostly 2 df for $`\mu`$ and 1 for $`\sigma`$, and only 1 df for $`\mu`$ in GM with 300 subjects, where the error was then larger (6.54 instead of 5.88 years with uniform ages). Neither criterion was better throughout, so the default stays the error of the brain age, whose results on real data are those of this page. The comparison on real data has not been made: run `--df-criterion loglik` next to the default and compare the slope and the error out of fold.
+
+**Consequences.**
+
+- **Claim.** NormBrainAGE has a much smaller age bias than a regression of age on the image without correction. It is not unbiased with training samples of realistic size, and its bias depends on the training age distribution.
+- **Report.** The accuracy tables print the slope of BrainAGE on age next to its correlation with age. Judge it out of fold or in controls, never in the training fit.
+- **Age range.** Use the estimates only for ages that the training sample covers well. `ci_open` and the note on test subjects outside the training age range mark the others.
+- **Correction.** `--correction trend` removes the linear part with the controls. What then remains was smaller than or equal to that of the GPR.
+- **Limits.** The simulated data are normal, come from one site and have an assumed spectrum of the variation between subjects, on which the size of the bias depends. Its size in real data must be read from out-of-fold estimates of real data.
+
+The commands of the tables:
+
+```bash
+python scripts/simulate_brainage.py --sizes 1000 --reps 5 --out sim_n1000
+python scripts/simulate_brainage.py --sizes 300 3000 --distributions uniform young --reps 3 --out sim_sizes
+```
+
 ## Warp for NormBrainAGE
 
 NormBrainAGE models principal component scores with normal distributions. `--warp` can first transform every voxel $`x`$, standardized by its training mean and standard deviation, with a sinh-arcsinh warp (Jones and Pewsey, 2009),
@@ -623,6 +746,7 @@ PCNtoolkit offers warped Bayesian linear regression (Fraza et al., 2021) and hie
 ## References
 
 - Bethlehem, R.A.I., Seidlitz, J., White, S.R., et al., 2022. Brain charts for the human lifespan. Nature 604, 525–533.
+- Cox, D.R., Snell, E.J., 1968. A general definition of residuals. Journal of the Royal Statistical Society, Series B 30, 248–275.
 - de Boer, A.A.A., Bayer, J.M.M., Kia, S.M., et al., 2024. Non-Gaussian normative modelling with hierarchical Bayesian regression. Imaging Neuroscience 2, 1–36.
 - Fortin, J.-P., Cullen, N., Sheline, Y.I., et al., 2018. Harmonization of cortical thickness measurements across scanners and sites. NeuroImage 167, 104–120.
 - Fraza, C.J., Dinga, R., Beckmann, C.F., Marquand, A.F., 2021. Warped Bayesian linear regression for normative modelling of big data. NeuroImage 245, 118715.

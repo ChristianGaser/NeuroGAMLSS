@@ -26,10 +26,11 @@ modelled (--mask-threshold; default 0.05 for volume data, 5% of the median of th
 means for surface data), which removes near-empty voxels without meaningful
 z-scores.  The spline df of age of mu and sigma are chosen per training sample by
 cross-validation (--df-mu/--df-sigma auto, the default), the same for all
-voxels/vertices: by the held-out likelihood, of the voxels/vertices for the z-maps
-and of the component scores for NormBrainAGE (--df-criterion).  The choice is stored
-with the models and in the output files.  The shape parameters are constant per voxel/vertex or, with
---shape-df, splines of age where BIC prefers them.  The normal model is fitted by
+voxels/vertices: by the held-out likelihood for the z-maps and by the error of the
+brain age for NormBrainAGE (or by the held-out likelihood of its component scores,
+--df-criterion).  The choice is stored with the models and in the output files.
+The shape parameters are constant per voxel/vertex or, with --shape-df, splines of
+age where BIC prefers them.  The normal model is fitted by
 the RS algorithm of GAMLSS (ported from ComBatLS); shash and gg start from it and
 are refined by damped Newton steps with exact (shash) or numerical (gg)
 derivatives and step halving, in chunks of voxels/vertices that run in parallel
@@ -185,12 +186,14 @@ DF_AUTO = 'auto'
 DF_GRID_VOXEL = dict(mu=(2, 3, 4, 5, 6, 8, 10, 12), sigma=(1, 2, 3, 4, 5))
 DF_GRID_BRAINAGE = dict(mu=(1, 2, 3, 4, 5, 6, 8), sigma=(1, 2, 3, 4))
 DF_START_SIGMA, DF_FOLDS, DF_MAX_FEATURES = 3, 5, 1000
-# criterion of the df of the brain age models (--df-criterion): the held-out
-# log-likelihood of the component scores at chronological age, a proper scoring rule,
-# or the mean absolute error of the held-out brain age, which rewards estimates that
-# are shrunk toward the middle of the age range
-DF_CRITERIA = ('loglik', 'mae')
-DF_CRITERION = 'loglik'
+# criterion of the df of the brain age models (--df-criterion): the mean absolute
+# error of the held-out brain age, which in principle rewards estimates that are shrunk
+# toward the middle of the age range, or the held-out log-likelihood of the component
+# scores at chronological age, a proper scoring rule.  The default is the criterion of
+# the comparisons on real data in docs/models.md; in simulations both chose settings
+# with the same age bias (scripts/simulate_brainage.py)
+DF_CRITERIA = ('mae', 'loglik')
+DF_CRITERION = 'mae'
 
 # brain age: level of the likelihood-ratio intervals, spacing [years] of the ages at
 # which the age information and the bias of the estimate are evaluated (age_curves),
@@ -3484,15 +3487,15 @@ def select_df_brainage(d, kw, df_mu=DF_AUTO, df_sigma=DF_AUTO, k=DF_FOLDS, seed=
     model of the training data d (folds stratified by site and age).
 
     criterion (default kw['df_criterion'], else DF_CRITERION):
+    'mae'     the mean absolute error of the held-out brain age after removing its
+              median.  An estimate that is shrunk toward the middle of the age range
+              can have a smaller error than an unbiased one, so this criterion can in
+              principle prefer curves that are too stiff at the ends of the age range,
+              where they bias the brain age.
     'loglik'  the held-out log-likelihood of the component scores at chronological age,
               with their residual correlation (_heldout_loglik).  It is a proper scoring
               rule of the normative model that the brain age inverts: only the model
               that fits the scores best at every age maximizes it.
-    'mae'     the mean absolute error of the held-out brain age after removing its
-              median (the former criterion).  An estimate that is shrunk toward the
-              middle of the age range has a smaller error than an unbiased one, so
-              this criterion can prefer curves that are too stiff at the ends of the
-              age range, where they bias the brain age.
     For every setting tried, the record also keeps both criteria and the dependence of
     the held-out BrainAGE on age (age_bias: 'slope', 'bias_young', 'bias_old'), which
     shows whether a setting buys its error with such a bias.  df_mu is searched first
@@ -3892,7 +3895,10 @@ def _from_tree(tree, get):
     if isinstance(tree, dict):
         if '__array__' in tree:
             a = np.asarray(get(tree['__array__']))
-            return a.astype(np.dtype(tree['dtype']), copy=False).reshape(tree['shape'])
+            # row-major as when fitted: arrays of mat-files are column-major, and
+            # matrix products of those differ in the last bits
+            return np.ascontiguousarray(
+                a.astype(np.dtype(tree['dtype']), copy=False).reshape(tree['shape']))
         return {k: _from_tree(v, get) for k, v in tree.items()}
     if isinstance(tree, list):
         return [_from_tree(v, get) for v in tree]
@@ -4111,11 +4117,12 @@ def metrics(ba, age, ci=None):
     that of the regression of BrainAGE on age [years per year]; with the limits ci =
     (lower, upper) of the likelihood-ratio intervals of the predicted age, cover95 is
     the share of subjects whose chronological age lies within them."""
+    fin = np.isfinite(ba) & np.isfinite(age)
+    slope = (np.polyfit(age[fin], ba[fin], 1)[0] if fin.sum() > 1 and np.ptp(age[fin]) > 0
+             else np.nan)
     out = dict(MAE=np.mean(np.abs(ba)), RMSE=np.sqrt(np.mean(ba ** 2)),
                r_pred_age=np.corrcoef(ba + age, age)[0, 1],
-               r_BA_age=np.corrcoef(ba, age)[0, 1],
-               slope=np.polyfit(age, ba, 1)[0] if np.ptp(age) > 0 else np.nan,
-               mean_BA=np.mean(ba))
+               r_BA_age=np.corrcoef(ba, age)[0, 1], slope=slope, mean_BA=np.mean(ba))
     if ci is not None:
         ok = np.isfinite(ci[0]) & np.isfinite(ci[1])
         out['cover95'] = (np.mean((ci[0][ok] <= age[ok]) & (age[ok] <= ci[1][ok]))
@@ -4165,7 +4172,8 @@ def _subject_curves(used, age, male, n_rep, ages=None, seed=0):
         cur = est.age_curves(ages, n_rep, seed)
         curves.append((cur, rows.size))
         if n_rep:
-            col = (male[rows] > 0.5).astype(int) if cur['male'].size > 1 else np.zeros(rows.size, int)
+            col = ((male[rows] > 0.5).astype(int) if cur['male'].size > 1
+                   else np.zeros(rows.size, int))
             for c in np.unique(col):
                 sub = rows[col == c]
                 bias[sub] = np.interp(age[sub], cur['age'], cur['bias'][:, c])
@@ -5375,11 +5383,11 @@ def _parser():
     p.add_argument('--df-sigma', type=_df_arg, default=DF_AUTO,
                    help="spline df of age for sigma: auto (default) or a number, as --df-mu")
     p.add_argument('--df-criterion', choices=DF_CRITERIA, default=None,
-                   help="NDM brain age: criterion of --df-mu/--df-sigma auto.  loglik = "
-                        "held-out log-likelihood of the component scores at chronological "
-                        "age, a proper scoring rule; mae = mean absolute error of the "
-                        "held-out brain age, the former criterion, which can prefer curves "
-                        "that shrink the brain age toward the middle of the age range "
+                   help="NDM brain age: criterion of --df-mu/--df-sigma auto.  mae = mean "
+                        "absolute error of the held-out brain age, which can in principle "
+                        "prefer curves that shrink the brain age toward the middle of the "
+                        "age range; loglik = held-out log-likelihood of the component "
+                        "scores at chronological age, a proper scoring rule "
                         f"(default {DF_CRITERION}).  The table of the settings tried shows "
                         "both and the slope of the held-out BrainAGE on age")
     p.add_argument('--bias-replicates', type=int, default=0,

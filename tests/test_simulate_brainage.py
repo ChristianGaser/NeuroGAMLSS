@@ -40,7 +40,9 @@ def test_simulation_runs(tmp_path):
     for s in SB.SETS:
         assert {'ndm_loglik', 'ndm_mae', 'gpr_raw', 'gpr_trend'} <= set(agg['summary'][s])
     test = agg['summary']['test']
-    assert 'ndm_bc' in test and test['ndm_loglik']['bias']['mean'].shape == (SB.N_BINS,)
+    assert {'ndm_bc', 'ndm_trend'} <= set(test)
+    assert test['ndm_loglik']['bias']['mean'].shape == (SB.N_BINS,)
+    assert abs(test['ndm_trend']['slope_all']['mean']) < 0.05
     # the uncorrected regression is shrunk toward the mean age, its trend correction is not
     assert test['gpr_raw']['slope_all']['mean'] < -0.05
     assert abs(test['gpr_trend']['slope_all']['mean']) < 0.05

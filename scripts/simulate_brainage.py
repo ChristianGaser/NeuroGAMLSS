@@ -54,6 +54,8 @@ and these methods:
   gpr_trend  with the linear trend correction: for the test sample estimated in one
              half of it (its "controls") and applied to the other half, out of fold
              from the out-of-fold estimates of the other folds (as cross_validate)
+  ndm_trend  ndm_loglik with the same trend correction, for a comparison of the two
+             methods on equal terms
 
 Reported per method and set: the mean BrainAGE (bias) and the slope of BrainAGE on age
 within the deciles of the reference (uniform) age distribution, the overall slope and
@@ -85,7 +87,7 @@ AGE_RANGE = (18.0, 88.0)
 SCENARIOS = ('gm', 'wm')
 DISTRIBUTIONS = ('uniform', 'young', 'old', 'bimodal', 'middle')
 SETS = ('test', 'oof', 'insample')
-METHODS = ('ndm_loglik', 'ndm_mae', 'ndm_bc', 'gpr_raw', 'gpr_trend')
+METHODS = ('ndm_loglik', 'ndm_mae', 'ndm_bc', 'ndm_trend', 'gpr_raw', 'gpr_trend')
 N_BINS = 10
 
 
@@ -126,7 +128,8 @@ class World:
         x = np.arange(p) / p
         # latent factors: Fourier modes with random phases, finer with their number
         freq = 1 + np.arange(n_factors) // 2
-        self.L = np.sqrt(2) * np.cos(2 * np.pi * freq[:, None] * x + rng.uniform(0, 2 * np.pi, (n_factors, 1)))
+        phase = rng.uniform(0, 2 * np.pi, (n_factors, 1))
+        self.L = np.sqrt(2) * np.cos(2 * np.pi * freq[:, None] * x + phase)
         self.lam = factor_sd * (1 + np.arange(n_factors)) ** (-decay / 2)       # SDs
         # age and sex patterns: smooth mixtures of the first modes
         mix = rng.standard_normal((4, 40)) / np.sqrt(40)
@@ -239,6 +242,9 @@ def run(world, dist, n, seed, args):
             sel = test.male == m if fine['male'].size > 1 else np.ones(test.n, bool)
             bias[sel] = np.interp(out['age'][sel], fine['age'], fine['bias'][:, c])
         err['test']['ndm_bc'] = out['age'] - bias - test.age
+    err['test']['ndm_trend'] = crossfit_trend(out['age'], test.age, half)
+    err['oof']['ndm_trend'] = crossfit_trend(e['oof'], train.age, fold)
+    err['insample']['ndm_trend'] = NG.trend_correct(e['ins'], train.age, np.arange(train.n))
     # GPR replica
     g_test = NG.gpr_baseline(train.Y, train.age, test.Y)
     err['test']['gpr_raw'] = g_test - test.age
@@ -366,10 +372,10 @@ def figure(conditions, edges, path, n):
     if not keys:
         return False
     x = (edges[:-1] + edges[1:]) / 2
-    style = dict(ndm_loglik=('#1f6fb4', '-', 'NormBrainAGE'),
-                 ndm_bc=('#1f6fb4', ':', 'NormBrainAGE, bias removed'),
-                 gpr_trend=('#d1622b', '-', 'GPR, trend corrected'),
-                 gpr_raw=('#d1622b', '--', 'GPR, uncorrected'))
+    style = dict(ndm_loglik=('#1f6fb4', '--', 'NormBrainAGE, uncorrected'),
+                 ndm_trend=('#1f6fb4', '-', 'NormBrainAGE, trend corrected'),
+                 gpr_raw=('#d1622b', '--', 'GPR, uncorrected'),
+                 gpr_trend=('#d1622b', '-', 'GPR, trend corrected'))
     fig, axes = plt.subplots(len(scenarios), len(dists), figsize=(3.1 * len(dists), 2.9 * len(scenarios)),
                              sharex=True, sharey=True, squeeze=False)
     for i, sc in enumerate(scenarios):
