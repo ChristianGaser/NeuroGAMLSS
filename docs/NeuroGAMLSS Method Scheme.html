@@ -945,7 +945,7 @@ svg .pill-outline { fill: var(--surface); stroke: var(--b); stroke-width: 1.3px;
     <dt>--train-cov, --test-cov</dt><dd>Covariates such as image quality measures enter <span class="math"><i>μ</i></span> and log <span class="math"><i>σ</i></span> of all normative models, and every subject is read at its own values.</dd>
     <dt>--test-nuisance</dt><dd>Nuisance effects are estimated in the controls and removed from the test data before brain age and BrainLOSS, and from the z-scores of the z-maps.</dd>
     <dt>--test-site</dt><dd>The sites of a test sample from several scanners, as <code>+</code>-joined test files are. Every site is adapted with its own controls: shrunk shifts for the z-maps, the component scores (<code>adapt</code>, <code>agefree</code>) and BrainLOSS, and the median BrainAGE of its controls.</dd>
-    <dt>--correction</dt><dd><code>adapt</code> rescales the normative models of the scores with the controls instead of subtracting an offset, <code>agefree</code> does so at the controls' estimated brain ages and then subtracts their median BrainAGE, <code>trend</code> removes a linear trend of BrainAGE on age, and <code>none</code> only estimates the ensemble weights.</dd>
+    <dt>--correction</dt><dd><code>adapt</code> rescales the normative models of the scores with the controls instead of subtracting an offset, <code>agefree</code> does so at the controls' estimated brain ages and then subtracts their median BrainAGE, <code>trend</code> removes a linear trend of BrainAGE on age, <code>bias</code> subtracts the bias of the estimate at the chronological age, by parametric bootstrap from the models, before the offset, and <code>none</code> only estimates the ensemble weights.</dd>
   </dl>
 </section>
 

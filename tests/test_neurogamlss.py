@@ -533,6 +533,68 @@ def test_command_line_intervals_and_bootstrap(tmp_path):
         NG.main(['--train', files['TR'], '--bias-replicates', '1'] + common)
 
 
+def test_bias_correction(tmp_path, capsys):
+    """--correction bias subtracts the bootstrap bias at the chronological age, then the
+    median BrainAGE of the controls, with and without controls and in cross-validation."""
+    from scipy.io import loadmat
+    d = simulate_brain(n=420, p=120)
+    Y = d.Y + 2.0 * np.random.default_rng(3).standard_normal(d.Y.shape).astype(np.float32)
+    age = d.age.copy()
+    age[415:] = np.nan                                  # test subjects of unknown age
+    files = {}
+    for name, sel in (('TR', slice(0, 300)), ('TE', slice(300, 420))):
+        files[name] = str(tmp_path / f's4rp1_8mm_{name}_CAT12.9.mat')
+        savemat(files[name], dict(Y=Y[sel], age=age[sel][:, None], male=d.male[sel][:, None]))
+    out = str(tmp_path / 'res')
+    common = ['--pca', '10', '--mask-threshold', '0', '--no-gpr', '--out', out]
+    fixed = ['--df-mu', '3', '--df-sigma', '1', '--bias-replicates', '40']
+    test = ['--train', files['TR'], '--test', files['TE']] + fixed + common
+
+    def run(args):
+        NG.main(args)
+        return loadmat(out + '.mat', squeeze_me=True, struct_as_record=False)['NDM']
+
+    ref = run(test + ['--adjust', '1:60', '--correction', 'none'])     # uncorrected
+    r = run(test + ['--adjust', '1:60', '--correction', 'bias'])
+    text = capsys.readouterr().out
+    assert '(no bias corr.)' in text and 'subject(s) of unknown age keep' in text
+    known, ctrl = np.isfinite(r.age), np.arange(60)
+    assert r.correction == 'bias' and known.sum() == 115
+    assert np.allclose(r.BrainAGE_bias[known], ref.BrainAGE_bias[known])
+    debiased = ref.PredictedAge - np.where(known, ref.BrainAGE_bias, 0)
+    offset = np.median((debiased - r.age)[ctrl])
+    assert np.isclose(r.offset, offset) and np.allclose(r.PredictedAge, debiased - offset)
+    assert np.allclose(r.PredictedAge_nobias,
+                       ref.PredictedAge - np.median((ref.PredictedAge - r.age)[ctrl]))
+    # the intervals move with the estimates, and the controls have cross-fitted estimates
+    assert np.allclose(r.PredictedAge_upper - r.PredictedAge,
+                       ref.PredictedAge_upper - ref.PredictedAge)
+    assert np.isfinite(r.BrainAGE_crossfit[ctrl]).all()
+    # the bias varies with age, so the correction is more than an offset
+    assert np.std((r.PredictedAge - r.PredictedAge_nobias)[known]) > 0.01
+    # without controls: the bias only
+    r = run(test + ['--correction', 'bias'])
+    assert r.correction == 'bias' and np.allclose(r.PredictedAge, debiased)
+    assert np.allclose(r.PredictedAge_nobias, ref.PredictedAge)
+    # cross-validation, with the default number of replicates
+    r = run(['--train', files['TR'], '--kfold', '3', '--correction', 'bias', '--df-mu', '3',
+             '--df-sigma', '1'] + common)
+    assert r.correction == 'bias' and np.isfinite(r.BrainAGE_bias).all()
+    assert np.allclose(r.PredictedAge, r.PredictedAge_nobias - r.BrainAGE_bias)
+    assert np.allclose(r.BrainAGE, r.PredictedAge - r.age) and hasattr(r, 'bootstrap')
+    plain = run(['--train', files['TR'], '--kfold', '3', '--df-mu', '3', '--df-sigma', '1']
+                + common)
+    assert not hasattr(plain, 'correction') and not hasattr(plain, 'PredictedAge_nobias')
+    assert np.allclose(plain.PredictedAge, r.PredictedAge_nobias)
+    data = NG.load_data(files['TR'])
+    with pytest.raises(ValueError):
+        NG.cross_validate([data], kfold=3, gpr=False, correction='bias', pca=10,
+                          mask_threshold=0, df_mu=3, df_sigma=1)
+    with pytest.raises(SystemExit):
+        NG.main(['--normative-only', '--train', files['TR'], '--test', files['TE'],
+                 '--correction', 'bias', '--out', out])
+
+
 def test_command_line_stores_the_chosen_df(tmp_path):
     import json
     from scipy.io import loadmat

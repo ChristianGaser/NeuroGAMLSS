@@ -187,12 +187,14 @@ DF_GRID_VOXEL = dict(mu=(2, 3, 4, 5, 6, 8, 10, 12), sigma=(1, 2, 3, 4, 5))
 DF_GRID_BRAINAGE = dict(mu=(1, 2, 3, 4, 5, 6, 8), sigma=(1, 2, 3, 4))
 DF_START_SIGMA, DF_FOLDS, DF_MAX_FEATURES = 3, 5, 1000
 # brain age: level of the likelihood-ratio intervals, spacing [years] of the ages at
-# which the bias of the estimate is evaluated by parametric bootstrap (age_curves), and
-# the share of the youngest and of the oldest subjects whose mean BrainAGE is reported
-# as the bias at the ends of the age range
+# which the bias of the estimate is evaluated by parametric bootstrap (age_curves), the
+# share of the youngest and of the oldest subjects whose mean BrainAGE is reported as
+# the bias at the ends of the age range, and the bootstrap replicates of the bias
+# correction
 CI_LEVEL = 0.95
 CURVE_STEP = 2.0
 TAIL_SHARE = 0.1
+BIAS_REPLICATES = 200          # of --correction bias, if --bias-replicates gives none
 
 # penalized age splines (--penalized) and random site effects (--site-random): basis
 # size of the penalized splines of mu and sigma, change of the effective df of every
@@ -4203,10 +4205,14 @@ def _crossfit_gpr_ensemble(P, ages, ctrl, method, fold):
 
 
 def cross_validate(datas, kfold=10, seed=0, age_range=(0, np.inf), gpr=True,
-                   ensemble='gls', bias_replicates=0, **kw):
+                   ensemble='gls', bias_replicates=0, correction='none', **kw):
     """k-fold cross-validation of the NDM brain age (and GPR baseline).  With
     bias_replicates, the bootstrap curves of the outputs are the means of the models of
-    the folds."""
+    the folds.  correction 'bias' subtracts the bootstrap bias of the model of every fold
+    at the chronological age of its test subjects (as apply_models, without controls);
+    the estimates without it are kept for comparison."""
+    if correction == 'bias' and not bias_replicates:
+        raise ValueError("The correction 'bias' needs bootstrap replicates (bias_replicates).")
     _check_same_subjects(datas)
     d0 = datas[0]
     ok = _valid_train(d0, age_range)
@@ -4257,6 +4263,10 @@ def cross_validate(datas, kfold=10, seed=0, age_range=(0, np.inf), gpr=True,
                     [(est, np.arange(te.size))], out['age'], d.age[te], d.male[te],
                     bias_replicates, curve_ages)
                 r['curves'].append((cur, te.size))
+            if correction == 'bias':
+                r.setdefault('age_nobias', np.full(n, np.nan))[te] = out['age']
+                for key in ('age', 'ci_low', 'ci_high'):
+                    r[key][te] -= r['bias_age'][te]
             for key in ('regional', 'regional_deviation', 'regional_deviation_age',
                         'regional_brainloss', 'regional_brainloss_age'):
                 if key in out:
@@ -4280,7 +4290,10 @@ def cross_validate(datas, kfold=10, seed=0, age_range=(0, np.inf), gpr=True,
                 r['gpr_ba'][te] = trend_correct(r['gpr'], d0.age, tr)[te]
     for r in res:
         r['curves'] = _average_curves(r['curves']) if bias_replicates else None
-    return _summarize(datas, res, d0.age, ok, ensemble, gpr, fold=fold)
+    out = _summarize(datas, res, d0.age, ok, ensemble, gpr, fold=fold)
+    if correction == 'bias':
+        out['correction'] = correction
+    return out
 
 
 def fit_models(train, kw, brainage=True, voxel=False, vkw=None):
@@ -4534,8 +4547,12 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
                      them without the controls' ages (at their estimated brain ages)
                      and then subtracts their median BrainAGE, 'trend' removes a
                      linear trend of BrainAGE on age, 'none' only estimates the
-                     ensemble weights.  The GPR baseline is corrected in the same way
-                     ('offset' for 'adapt' and 'agefree').  The z-maps are adapted
+                     ensemble weights.  'bias' subtracts the bias of the estimate at the
+                     chronological age of every subject, by parametric bootstrap from
+                     the models (bias_replicates), and then the median BrainAGE of the
+                     controls; it also works without controls, then without the median.
+                     The GPR baseline is corrected in the same way ('offset' for
+                     'adapt', 'agefree' and 'bias').  The z-maps are adapted
                      with the controls unless 'none' (at their estimated brain ages
                      for 'agefree').
     zmaps_out      : also return voxel/vertex-wise z-maps at chronological age
@@ -4577,8 +4594,8 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
     n = test[0].n
     age = test[0].age
     ok = np.isfinite(age) & (age > 0)
-    if adjust is None:
-        correction = 'none'
+    if adjust is None:             # without controls only the bias correction remains
+        correction = correction if correction == 'bias' else 'none'
         ctrl = np.flatnonzero(ok)
     else:
         ctrl = np.intersect1d(adjust, np.flatnonzero(ok))
@@ -4597,7 +4614,7 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
             _note(f"Site(s) {', '.join(nm for nm, c in zip(site_names, n_ctrl) if not c)} "
                   "have no controls: their subjects are adapted with the controls of all "
                   "sites.")
-    zc = None if correction == 'none' else ctrl
+    zc = None if correction == 'none' or adjust is None else ctrl
     cov_names = test[0].cov_names
     nuis = nz = None
     test_ba = test                 # data of the brain age models
@@ -4631,8 +4648,8 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
                       f"of held-out controls; the correction probably does not help.")
 
     if normative_only:
-        if correction == 'agefree':
-            raise ValueError("The correction 'agefree' needs brain age models.")
+        if correction in ('agefree', 'bias'):
+            raise ValueError(f"The correction {correction!r} needs brain age models.")
         zm = []
         for s, d in zip(sets, test):
             t0 = time.time()
@@ -4663,8 +4680,10 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         return out
 
     post = correction if correction in ('offset', 'trend') else 'none'
-    if correction == 'agefree':
+    if correction == 'agefree' or (correction == 'bias' and adjust is not None):
         post = 'offset'
+    if correction == 'bias' and not bias_replicates:
+        raise ValueError("The correction 'bias' needs bootstrap replicates (bias_replicates).")
     gpr_post = 'offset' if correction in ('adapt', 'agefree') else post
     gpr = gpr and train is not None
     res = []
@@ -4686,9 +4705,14 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
             _subject_curves(used, out['age'], np.where(ok, age, np.nan), dte.male,
                             bias_replicates)
             if bias_replicates else (None, np.full(n, np.nan), np.full(n, np.nan)))
-        corrected = correct_age(out['age'], age, ctrl, post, sites)
+        # brain age before the correction with the controls: with 'bias' minus the bias
+        # at the chronological age (subjects of unknown age keep their estimate)
+        raw = out['age']
+        if correction == 'bias':
+            raw = raw - np.where(np.isfinite(bias_age), bias_age, 0.0)
+        corrected = correct_age(raw, age, ctrl, post, sites)
         shift = corrected - out['age']         # the intervals move with the estimates
-        r = dict(name=dte.name, age_raw=out['age'], age=corrected,
+        r = dict(name=dte.name, age_raw=raw, age=corrected,
                  sd=out['sd'], at_bound=out['at_bound'], ci_low=out['ci_low'] + shift,
                  ci_high=out['ci_high'] + shift, ci_open=out['ci_open'],
                  ci_parts=out['ci_parts'], curves=curves, bias=bias, bias_age=bias_age,
@@ -4696,10 +4720,12 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
                  mask_threshold=(est.mask_info or {}).get('threshold', np.nan),
                  regional=correct_age(out['regional'], age, ctrl, post, sites),
                  regions=est.regions, region_names=est.region_names, gpr=np.full(n, np.nan),
-                 offset=np.nanmedian(out['age'][ctrl] - age[ctrl]) if ctrl.size else np.nan)
+                 offset=np.nanmedian(raw[ctrl] - age[ctrl]) if ctrl.size else np.nan)
+        if correction == 'bias':               # the same without the bias correction
+            r['age_nobias'] = correct_age(out['age'], age, ctrl, post, sites)
         if sites is not None and adjust is not None:   # median BrainAGE of site controls
             r['site_offset'] = np.array([
-                np.nanmedian(out['age'][c] - age[c]) if c.size else np.nan
+                np.nanmedian(raw[c] - age[c]) if c.size else np.nan
                 for c in (ctrl[code[ctrl] == j] for j in range(k))])
         for key in ('deviation', 'deviation_age', 'regional_deviation', 'regional_deviation_age'):
             r[key] = out[key]
@@ -4722,8 +4748,13 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
                 mask_nonconverged=mask_nonconverged, loo_controls=not controls_in_sample)
         res.append(r)
         print(f"  {dte.name}: {time.time() - t0:.1f}s", flush=True)
+    if correction == 'bias' and not np.all(ok):
+        print(f"{int(np.sum(~ok))} subject(s) of unknown age keep their brain age without the "
+              "bias correction, which needs the chronological age.")
     if adjust is None:
-        print("No --adjust given: no correction for the test site and equal ensemble weights.")
+        print("No --adjust given: no correction for the test site and equal ensemble weights."
+              + (" The bias of the estimate at chronological age is subtracted (bias)."
+                 if correction == 'bias' else ''))
     elif sites is None:
         print(f"Correction for the test site: {correction} ({ctrl.size} controls)")
     else:
@@ -4771,7 +4802,8 @@ def _crossfit_accuracy(sets, test, ctrl, age, correction, ensemble, gpr, train, 
                        k=5, seed=0, sites=None):
     """Accuracy of the brain age in the controls ctrl by k-fold cross-fitting over them.
 
-    For every fold, the site correction (offset, trend, adapt, agefree), the nuisance
+    For every fold, the site correction (offset, trend, adapt, agefree, and the offset
+    after the bias correction, which is not estimated in the controls), the nuisance
     correction and the ensemble weights are estimated in the controls of the other
     folds and applied to the held-out controls, so that no control is evaluated with
     an estimate it entered.  With the site codes sites (n,) of several test sites, the
@@ -4784,7 +4816,8 @@ def _crossfit_accuracy(sets, test, ctrl, age, correction, ensemble, gpr, train, 
     if k < 2:
         _note(f"{nc} controls are too few for a cross-fitted accuracy (at least 10).")
         return None
-    post = {'offset': 'offset', 'trend': 'trend', 'agefree': 'offset'}.get(correction, 'none')
+    post = {'offset': 'offset', 'trend': 'trend', 'agefree': 'offset',
+            'bias': 'offset'}.get(correction, 'none')
     gpr_post = 'offset' if correction in ('adapt', 'agefree') else post
     refit = correction in ('adapt', 'agefree') or nuisance is not None
     ac = age[ctrl]
@@ -4814,6 +4847,8 @@ def _crossfit_accuracy(sets, test, ctrl, age, correction, ensemble, gpr, train, 
                     elif correction == 'agefree':
                         est.adapt_agefree(dc.subset(tr))
                     pa = est.predict(dc)['age']
+                if correction == 'bias':
+                    pa = pa - r['bias_age'][ctrl]
                 pg = (gpr_baseline(train[i].Y, train[i].age, dc.Y)
                       if gpr and nuisance is not None else (r['gpr'][ctrl] if gpr else None))
             else:
@@ -4917,7 +4952,11 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
     use = ensemble if weights_from_data else 'mean'     # ensemble written to the outputs
     who = 'controls' if weights_from_data else 'all test subjects'
     rows = []
+    nobias = all(r.get('age_nobias') is not None for r in res)   # correction 'bias'
     for r in res:
+        if known and nobias:
+            rows.append((f"NDM {r['name']} (no bias corr.)",
+                         metrics(r['age_nobias'][ctrl] - age[ctrl], age[ctrl])))
         if known:
             rows.append((f"NDM {r['name']}", metrics(r['age'][ctrl] - age[ctrl], age[ctrl],
                                                      (r['ci_low'][ctrl], r['ci_high'][ctrl]))))
@@ -4955,6 +4994,12 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
         if table_title:
             print(table_title)
         _print_table(rows)
+        if nobias:
+            print("\nBias correction: the BrainAGE that the models let expect at the "
+                  "chronological age of every subject (BrainAGE_bias, by parametric bootstrap) "
+                  "is subtracted. It adjusts BrainAGE for age and uses the chronological age "
+                  "to do so: MAE and r_pred_age after it are not those of a prediction from "
+                  "the image alone, which the rows 'no bias corr.' show.")
         if use != ensemble:
             print(f"\nNo --adjust: the test subjects are not known to be controls, so the "
                   f"ensembles in the outputs use equal weights instead of {ensemble!r}. The "
@@ -4998,8 +5043,8 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
         mask_threshold=np.array([r.get('mask_threshold', np.nan) for r in res], dtype=np.float64))
     out['BrainAGE'] = out['PredictedAge'] - age[:, None]
     # parametric bootstrap of every model: bias and precision along age, and the bias
-    # of every subject at its chronological age and at its brain age.  Nothing is
-    # subtracted: the accuracy tables refer to estimates that use the image alone
+    # of every subject at its chronological age and at its brain age.  Only the
+    # correction 'bias' subtracts the first
     curves = [r['curves'] for r in res if r.get('curves') is not None]
     if curves and len(curves) == len(res):
         _print_bootstrap([r['name'] for r in res], curves)
@@ -5011,6 +5056,8 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
         else:               # models with different age grids: one struct per model
             out['bootstrap'] = np.array(curves, dtype=object)
         out['BrainAGE_bias'] = np.column_stack([r['bias_age'] for r in res])
+        if nobias:              # the estimates without the bias correction
+            out['PredictedAge_nobias'] = np.column_stack([r['age_nobias'] for r in res])
         out['PredictedAge_bias'] = np.column_stack([r['bias'] for r in res])
     if known:
         n_open, n_parts = int(np.sum(out['ci_open'][ctrl])), int(np.sum(out['ci_parts'][ctrl] > 1))
@@ -5167,13 +5214,18 @@ def _parser():
                    help="test mat-files, one per model with the same subjects, in the order of "
                         "--train or of the saved models")
     p.add_argument('--adjust', help="1-based indices of test controls, e.g. 1:108")
-    p.add_argument('--correction', choices=['offset', 'adapt', 'agefree', 'trend', 'none'],
+    p.add_argument('--correction',
+                   choices=['offset', 'adapt', 'agefree', 'trend', 'bias', 'none'],
                    default='offset',
                    help="use of the --adjust controls: offset = subtract their median "
                         "BrainAGE (default), adapt = adapt the normative models to the "
                         "test site, agefree = adapt them without the controls' ages, then "
-                        "offset, trend = linear trend of BrainAGE on age, none.  z-maps "
-                        "are adapted to the test site unless none")
+                        "offset, trend = linear trend of BrainAGE on age, none.  bias = "
+                        "subtract the bias of the estimate at the chronological age of "
+                        "every subject, by parametric bootstrap from the models "
+                        "(--bias-replicates), then offset; it needs no controls and also "
+                        "applies in the cross-validation and without --adjust (then without "
+                        "offset).  z-maps are adapted to the test site unless none")
     p.add_argument('--test-male', help="text file with the sex of the test subjects "
                                        "(1 = male), if the mat-files contain none")
     p.add_argument('--test-site',
@@ -5298,8 +5350,9 @@ def _parser():
                         "estimated again), which gives the bias of the estimate, its actual "
                         "standard error, the coverage of the likelihood-ratio intervals and, "
                         "for every subject, the bias at its chronological age "
-                        "(BrainAGE_bias) and at its brain age (PredictedAge_bias); neither "
-                        "is subtracted.  E.g. 200, for publication 1000 (default 0 = off)")
+                        "(BrainAGE_bias) and at its brain age (PredictedAge_bias); only "
+                        "--correction bias subtracts the first.  E.g. 200, for publication "
+                        f"1000 (default 0 = off; {BIAS_REPLICATES} with --correction bias)")
     p.add_argument('--grid-step', type=float, default=0.25,
                    help="NDM brain age: age grid step [years]")
     p.add_argument('--grid-margin', type=float, default=5.0,
@@ -5334,6 +5387,8 @@ def _check_args(p, a):
         p.error("--bias-replicates needs 0 or at least 2 replicates.")
     if a.bias_replicates and a.normative_only:
         p.error("--bias-replicates needs brain age models (not with --normative-only).")
+    if a.correction == 'bias' and not a.bias_replicates:
+        a.bias_replicates = BIAS_REPLICATES
     if (a.cov_mean or a.cov_sd) and not a.train_cov:
         p.error("--cov-mean and --cov-sd need --train-cov.")
     if a.test_nuisance and not (a.test and a.adjust):
@@ -5351,8 +5406,9 @@ def _check_args(p, a):
     if a.normative_only:
         if not (a.test or a.save_model):
             p.error("--normative-only needs --test and/or --save-model.")
-        if a.correction == 'agefree':
-            p.error("--correction agefree needs brain age models (not with --normative-only).")
+        if a.correction in ('agefree', 'bias'):
+            p.error(f"--correction {a.correction} needs brain age models (not with "
+                    "--normative-only).")
         if a.brainloss:
             p.error("--brainloss needs brain age models (not with --normative-only).")
     elif not (a.test or a.save_model or kfold):
@@ -5461,7 +5517,8 @@ def main(argv=None):
                 if a.zmaps:
                     print("z-maps are only computed for --test.")
                 out = cross_validate(train, kfold, a.seed, a.age_range, not a.no_gpr,
-                                     a.ensemble, a.bias_replicates, **kw)
+                                     a.ensemble, a.bias_replicates,
+                                     'bias' if a.correction == 'bias' else 'none', **kw)
                 save_results(out, a.out)
             print(f"Total time {time.time() - t0:.0f}s")
             return
