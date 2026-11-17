@@ -52,3 +52,39 @@ def test_simulation_runs(tmp_path):
     assert len(saved['runs']) == 4 and 'gm/uniform/150' in saved['conditions']
     with open(out + '.md') as f:
         assert 'training ages young' in f.read()
+
+
+def test_variant_reproduces_the_estimator():
+    """The axes of pca_axes are those of the estimator, and a variant with the training
+    data and these axes gives the same brain ages."""
+    world = SB.World('gm', p=200)
+    rng = np.random.default_rng(2)
+    d = world.sample(SB.draw_ages('uniform', 500, rng), rng)
+    est = SB.NG.NDMBrainAge(df_mu=2, df_sigma=1, pca=8).fit(d)
+    centre, axes = SB.pca_axes(d, 8)
+    part = est.parts[0]
+    cos = np.sum(axes * part.Vt, axis=1) / (np.linalg.norm(axes, axis=1)
+                                            * np.linalg.norm(part.Vt, axis=1))
+    assert np.allclose(centre, part.center, atol=1e-6) and np.allclose(np.abs(cos), 1)
+    same = SB.variant(est, d, (centre, axes))
+    assert np.allclose(same.predict(d)['age'], est.predict(d)['age'], atol=1e-3)
+    assert same.parts[0].model is not part.model and est.parts[0] is part
+
+
+def test_sources_of_the_bias(tmp_path):
+    out = str(tmp_path / 'sim')
+    cond = SB.main(['--sources', '--scenarios', 'gm', '--distributions', 'uniform', '--sizes',
+                    '200', '--reps', '2', '--n-test', '400', '--features', '150', '--pca', '10',
+                    '--components', '5', '--n-big', '3000', '--out', out])
+    res = cond[('gm', 'uniform', 200)]
+    assert {'pipeline', 'new_scores', 'big_models', 'big_axes', 'big_both', 'big_flexible',
+            'no PCA', '5 components'} <= set(res)
+    # test subjects are distributed as models of many new subjects say, and their scores
+    # are less dispersed than the training scores that took part in the PCA
+    assert abs(res['big_both']['var_z']['mean'] - 1) < 0.1
+    assert res['pipeline']['var_z']['mean'] < res['new_scores']['var_z']['mean']
+    assert sum(res['pipeline']['df'].values()) == 2 and 'df' not in res['big_both']
+    with open(out + '_sources.md') as f:
+        assert '| big_axes |' in f.read()
+    with open(out + '_sources.json') as f:
+        assert 'gm/uniform/200' in json.load(f)['conditions']

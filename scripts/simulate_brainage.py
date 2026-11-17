@@ -63,15 +63,47 @@ the mean absolute error; for NormBrainAGE also the coverage of the 95% likelihoo
 ratio and Laplace intervals, the share of estimates at the ends of the age grid, the
 df chosen by both criteria and the bias that the parametric bootstrap predicts.
 
+Sources of the bias (--sources)
+------------------------------
+The estimate of a new subject can be biased by the principal component analysis and
+by the normative models, which are both estimated from the training sample.  With
+--sources, every training sample is evaluated on the test sample in five variants
+that replace one estimate at a time, with the df of the pipeline in all of them:
+
+  pipeline    axes of the training sample; models (normative models and residual
+              correlation) of its own scores, which took part in the PCA
+  new_scores  the same axes; models of as many new subjects, whose scores did not
+              take part in the PCA, like those of a test subject
+  big_models  the same axes; models of a large sample (--n-big)
+  big_axes    axes of the large sample; models of the training sample
+  big_both    axes and models of the large sample: what remains is the bias of the
+              estimate itself and that of age curves with the df chosen for the
+              training sample, which can be too stiff
+  big_flexible  as big_both with 8 and 3 df for mu and sigma, which the large sample
+              supports: what remains is the bias of the estimate itself
+
+pipeline minus new_scores is the effect of the scores that took part in the PCA,
+new_scores minus big_axes that of the estimation error of the axes, big_axes minus
+big_both that of the estimation error of the models, and big_both minus big_flexible
+that of the stiffness of the curves.  The pipeline is also run with
+other numbers of components (--components) and without PCA (pca = 0: a normative
+model of every voxel with a low-rank residual correlation), with the df chosen for
+each.  Reported: slope and mean of BrainAGE, mean absolute error, variance of the
+z-scores of the test subjects at their true ages (1 if their scores are distributed
+as the models say), mean total deviation and coverage of the intervals.
+
 Usage
 -----
     python scripts/simulate_brainage.py --out sim                 # full design, slow
     python scripts/simulate_brainage.py --sizes 300 --reps 2 --distributions uniform young
+    python scripts/simulate_brainage.py --sources --distributions uniform --sizes 300 1000
 
 Outputs: <out>.json (all runs and their means), <out>.md (tables) and, with
-matplotlib, <out>_bias.png (bias by age for every training age distribution).
+matplotlib, <out>_bias.png (bias by age for every training age distribution); with
+--sources <out>_sources.json and <out>_sources.md instead.
 """
 import argparse
+import copy
 import json
 import os
 import sys
@@ -264,6 +296,121 @@ def run(world, dist, n, seed, args):
     return res
 
 
+def pca_axes(d, k):
+    """Centre and k leading principal axes of the standardized data d, in the form of
+    NDMBrainAge (applied to the raw data), from the covariance matrix of the features:
+    for samples with more subjects than features."""
+    from scipy.linalg import eigh
+    X = np.asarray(d.Y, dtype=np.float64)
+    sd = X.std(axis=0)
+    X = X / sd
+    centre = X.mean(axis=0)
+    X -= centre
+    p = X.shape[1]
+    V = eigh(X.T @ X, subset_by_index=[p - k, p - 1])[1]
+    return centre * sd, V[:, ::-1].T / sd
+
+
+def variant(est, models, axes=None, df=None):
+    """Copy of the brain age estimator est whose normative models and residual
+    correlation are fitted to the component scores of the data models, on the
+    principal axes of est or on the given ones (centre, axes of pca_axes).  The age
+    grid is that of est, and so are the df unless df = (df_mu, df_sigma) is given."""
+    new = copy.copy(est)
+    if df is not None:
+        new.df_mu, new.df_sigma = df
+    part = copy.copy(est.parts[0])
+    if axes is not None:
+        part.center, part.Vt = axes
+    F = part.model_input(models.Y)
+    part.model = new._normative(F, models)
+    part.mcols = np.arange(part.model.valid.size)
+    Z = part.model.zscores(F, models.age, models.male, models.site)
+    part.corr = NG.ResidualCorrelation(Z.shape[1], est.psi_min).fit(Z)
+    new.parts = [part]
+    return new
+
+
+def measure(est, test, edges):
+    """BrainAGE of the test subjects with the estimator est: age bias (summarize),
+    variance of their z-scores at their true ages (mean over the features), mean total
+    deviation and coverage of the likelihood-ratio intervals."""
+    out = est.predict(test)
+    res = summarize(out['age'] - test.age, test.age, edges)
+    part = est.parts[0]
+    mu, sd = part.model.mu_sigma(test.age, test.male, cols=part.mcols)
+    z = (part.features(test.Y) - mu) / sd
+    res.update(var_z=float(np.mean(np.var(z, axis=0))),
+               deviation=float(np.mean(out['deviation_age'])),
+               cover=float(np.mean((out['ci_low'] <= test.age) & (test.age <= out['ci_high']))))
+    return res
+
+
+SOURCE_KEYS = ('slope_all', 'mean', 'mae', 'var_z', 'deviation', 'cover')
+FLEXIBLE_DF = (8, 3)           # df of mu and sigma that a large sample supports
+
+
+def sources(world, dist, n, args):
+    """Sources of the age bias of new subjects for training samples of size n (see the
+    module docstring): dict variant -> mean and standard error over the training
+    samples of every measure, and the df chosen."""
+    edges = np.linspace(*AGE_RANGE, N_BINS + 1)
+    rng = np.random.default_rng(args.seed + 7)
+    big = world.sample(draw_ages(dist, args.n_big, rng), rng)
+    big_axes = pca_axes(big, args.pca)
+    runs = []
+    for r in range(args.reps):
+        rng = np.random.default_rng(args.seed + 1000 * r + n)      # the samples of run
+        train = world.sample(draw_ages(dist, n, rng), rng)
+        test = world.sample(rng.uniform(*AGE_RANGE, args.n_test), rng)
+        new = world.sample(draw_ages(dist, n, rng), rng)
+        res, dfs = {}, {}
+        for k in sorted(set(args.components) | {args.pca, 0}):
+            if k >= n * (1 - 1 / NG.DF_FOLDS) - 1:      # more components than subjects
+                continue
+            kw = dict(pca=k)
+            dm, ds, _ = NG.select_df_brainage(train, kw, criterion='loglik')
+            est = NG.NDMBrainAge(df_mu=dm, df_sigma=ds, **kw).fit(train)
+            name = 'pipeline' if k == args.pca else ('no PCA' if not k else f'{k} components')
+            res[name], dfs[name] = measure(est, test, edges), f'{dm}/{ds}'
+            if k == args.pca:
+                res['new_scores'] = measure(variant(est, new), test, edges)
+                res['big_models'] = measure(variant(est, big), test, edges)
+                res['big_axes'] = measure(variant(est, train, big_axes), test, edges)
+                res['big_both'] = measure(variant(est, big, big_axes), test, edges)
+                res['big_flexible'] = measure(variant(est, big, big_axes, FLEXIBLE_DF), test,
+                                              edges)
+        runs.append(dict(res=res, df=dfs))
+    out = {}
+    for name in runs[0]['res']:
+        vals = {key: np.array([r['res'][name][key] for r in runs]) for key in SOURCE_KEYS}
+        out[name] = {key: dict(mean=float(v.mean()),
+                               se=float(v.std(ddof=1) / np.sqrt(len(v))) if len(v) > 1 else np.nan)
+                     for key, v in vals.items()}
+        if name in runs[0]['df']:
+            dfs = [r['df'][name] for r in runs]
+            out[name]['df'] = {d: dfs.count(d) for d in sorted(set(dfs))}
+    return out
+
+
+def report_sources(conditions):
+    """Markdown tables of the sources of the bias (dict key -> result of sources)."""
+    head = ('| Variant | df | Slope | Mean BrainAGE | MAE | Variance of z | Deviation | '
+            'Coverage |', '|---|---|---|---|---|---|---|---|')
+    lines = []
+    for (scenario, dist, n), res in conditions.items():
+        lines += [f"### {scenario}, training ages {dist}, n = {n}", '', *head]
+        for name, m in res.items():
+            df = ', '.join(f'{d} ({c})' for d, c in m.get('df', {}).items())
+            lines.append(
+                f"| {name} | {df} | {m['slope_all']['mean']:+.3f} ± {m['slope_all']['se']:.3f} | "
+                f"{m['mean']['mean']:+.2f} ± {m['mean']['se']:.2f} | {m['mae']['mean']:.2f} | "
+                f"{m['var_z']['mean']:.2f} | {m['deviation']['mean']:+.2f} | "
+                f"{m['cover']['mean']:.3f} |")
+        lines.append('')
+    return '\n'.join(lines)
+
+
 def aggregate(runs):
     """Mean and standard error over the runs of one condition."""
     def stats(values):
@@ -421,12 +568,39 @@ def main(argv=None):
     p.add_argument('--noise-sd', type=float, default=0.01, help="SD of the white noise")
     p.add_argument('--age-sd', type=float, default=None,
                    help="size of the age patterns (default 0.015 for gm, 0.02 for wm)")
+    p.add_argument('--sources', action='store_true',
+                   help="sources of the bias instead of the comparison of the methods: "
+                        "principal axes and normative models of the training sample or of "
+                        "a large sample, other numbers of components and no PCA")
+    p.add_argument('--n-big', type=int, default=12000,
+                   help="--sources: subjects of the large sample")
+    p.add_argument('--components', nargs='+', type=int, default=[25, 50, 200],
+                   help="--sources: other numbers of principal components of the pipeline")
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--out', default='simulate_brainage', help="output prefix")
     a = p.parse_args(argv)
     edges = np.linspace(*AGE_RANGE, N_BINS + 1)
     runs, conditions = [], {}
     t0 = time.time()
+    if a.sources:
+        for sc in a.scenarios:
+            world = World(sc, p=a.features, noise_sd=a.noise_sd, age_sd=a.age_sd, seed=a.seed)
+            for n in a.sizes:
+                for dist in a.distributions:
+                    res = conditions[(sc, dist, n)] = sources(world, dist, n, a)
+                    print(f"{sc} {dist:8s} n={n:5d}: slope "
+                          + ', '.join(f"{name} {m['slope_all']['mean']:+.3f}"
+                                      for name, m in res.items())
+                          + f"  [{time.time() - t0:.0f}s]", flush=True)
+        with open(a.out + '_sources.json', 'w') as f:
+            json.dump(_jsonable(dict(settings=vars(a),
+                                     conditions={'/'.join(map(str, k)): v
+                                                 for k, v in conditions.items()})), f)
+        with open(a.out + '_sources.md', 'w') as f:
+            f.write(report_sources(conditions) + '\n')
+        print(f"Saved {a.out}_sources.json and {a.out}_sources.md; total time "
+              f"{time.time() - t0:.0f}s")
+        return conditions
     for sc in a.scenarios:
         world = World(sc, p=a.features, noise_sd=a.noise_sd, age_sd=a.age_sd, seed=a.seed)
         for n in a.sizes:

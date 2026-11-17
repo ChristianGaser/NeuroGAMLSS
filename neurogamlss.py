@@ -60,10 +60,10 @@ accurate), and with --family normal the voxel-wise model is shared with the z-ma
 The estimate comes with a likelihood-ratio interval and a standard error (Laplace
 approximation).  The Fisher information about age shows at which ages the data say
 little about age, and a parametric bootstrap (--bias-replicates) gives the bias of
-the estimate there and at the ends of the age grid.  With finite training samples the
-estimate is also biased toward the ages at which the normative curves are estimated
-best (scripts/simulate_brainage.py), so the slope of BrainAGE on age is reported with
-every accuracy table.  Further outputs are regional brain
+the estimate there and at the ends of the age grid.  The estimation error of the
+normative models and the principal component analysis add to this bias with finite
+training samples (scripts/simulate_brainage.py), so the slope of BrainAGE on age is
+reported with every accuracy table.  Further outputs are regional brain
 ages for the lobes (--parcellation) and a non-aging deviation, the Mahalanobis
 distance of the z-scores at the brain age (NDM.Deviation; at chronological age:
 NDM.Deviation_age).  --brainloss adds BrainLOSS (Loss Of Substance beyond
