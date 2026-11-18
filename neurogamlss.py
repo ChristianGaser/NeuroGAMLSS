@@ -5052,7 +5052,9 @@ def _summarize(datas, res, age, ok, ensemble, gpr, fold=None, ctrl=None, gpr_lab
     curves = [r['curves'] for r in res if r.get('curves') is not None]
     if curves and len(curves) == len(res):
         _print_bootstrap([r['name'] for r in res], curves)
-        if len({c['bias'].shape for c in curves}) == 1:
+        if all(c['bias'].shape == curves[0]['bias'].shape
+               and np.array_equal(c['age'], curves[0]['age'])
+               and np.array_equal(c['male'], curves[0]['male']) for c in curves):
             out['bootstrap'] = dict(
                 age=curves[0]['age'], male=curves[0]['male'],
                 **{key: np.stack([c[key] for c in curves], axis=-1)
