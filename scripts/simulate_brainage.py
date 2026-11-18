@@ -339,6 +339,7 @@ def pca_axes(d, k):
     centre = X.mean(axis=0)
     X -= centre
     p = X.shape[1]
+    k = min(k, X.shape[0] - 1, p - 1)
     V = eigh(X.T @ X, subset_by_index=[p - k, p - 1])[1]
     return centre * sd, V[:, ::-1].T / sd
 
