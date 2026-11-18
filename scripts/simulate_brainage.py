@@ -269,7 +269,7 @@ def run(world, dist, n, seed, args):
     last = rec['stages'][-1]
     res = dict(dist=dist, n=n, seed=seed, scenario=world.scenario, df=[dm, ds],
                cv={key: last[key][last['df_sigma'].index(ds)]
-                   for key in ('mae', 'slope', 'bias_young', 'bias_old')})
+                   for key in ('mae', 'slope', 'bias_young', 'bias_old') if key in last})
     est = NG.NDMBrainAge(df_mu=dm, df_sigma=ds, **kw).fit(train)
     out, out_s = est.predict(test), est.predict(shifted)
     oof = np.full(train.n, np.nan)
