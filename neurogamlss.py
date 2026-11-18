@@ -4093,6 +4093,10 @@ def _subject_curves(used, brain_age, age, male, n_rep, ages=None, seed=0):
 def _print_bootstrap(names, curves, n_cols=10):
     """Table of the bootstrap curves of the models (means of the sexes) at up to n_cols
     ages."""
+    if any(not np.array_equal(c['age'], curves[0]['age']) for c in curves[1:]):
+        for name, cur in zip(names, curves):
+            _print_bootstrap([name], [cur], n_cols)
+        return
     age = curves[0]['age']
     idx = np.unique(np.round(np.linspace(0, age.size - 1, min(n_cols, age.size))).astype(int))
     print("\nParametric bootstrap of the brain age at the true age a (data drawn from the "
