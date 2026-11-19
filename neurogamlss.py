@@ -209,6 +209,14 @@ EDF_TOL, SP_RANGE = 0.01, (1e-6, 1e6)
 # fitted in the arrowhead layout (_Arrow): sums per site and a Schur complement
 # instead of products and solves of all columns
 SITE_ARROW = 8
+
+# nuisance variables of the test data (--test-nuisance, --nuisance-model): penalized
+# splines (P-splines, the default) with this many cubic B-spline functions per variable
+# and one penalty for all variables and features, searched by REML on a grid of this
+# many values over 14 decades, or linear terms
+NUISANCE_MODELS = ('pspline', 'linear')
+NUISANCE_DEFAULT = 'pspline'
+NUISANCE_BASIS, NUISANCE_GRID = 10, 141
 LOG2PI = np.log(2 * np.pi)
 
 _NOTES = set()
@@ -3127,15 +3135,18 @@ class VoxelModel:
         adapted to the site of d.  If d comes from several sites (d.site), every
         site gets its own offset, shrunk toward the mean of all controls, and all
         sites share one scale (site_adaptation).  nuisance = dict(values (n, k), ctrl,
-        df, names) removes the effects of nuisance variables such as image quality
+        model, names) removes the effects of nuisance variables such as image quality
         measures on the z-scores, estimated in the controls nuisance['ctrl'] as in
-        remove_nuisance (nuisance_design, within the sites), before the adaptation.
+        remove_nuisance (nuisance_design, within the sites; model 'pspline', the
+        default, or 'linear'), before the adaptation.
         Returns Z (n,
         n_features) as float32, with NaN for features without a model and for
         subjects without a valid age, the convergence of the fit per feature (1, 0
         or NaN without a model) and, with parcellation, the lobe-wise mean z (n,
         n_regions), the region labels and their names; with nuisance also the
-        median share of the variance of the controls' z-scores removed.  With several
+        median share of the variance of the controls' z-scores removed (with several
+        sites: of their variance within the sites, as in remove_nuisance) and the
+        effective df of the nuisance terms.  With several
         sites also the 1-based site of every subject, the site names, their numbers of
         controls, the median over features of the shrinkage factor of their offsets
         and the RMS over features of their offsets from the mean of all controls.
@@ -3159,21 +3170,27 @@ class VoxelModel:
         N = G = None
         if nuisance is not None:
             nc = np.asarray(nuisance['ctrl'])
-            N, P, _, _ = nuisance_design(nuisance['values'], d.age, d.male, nc,
-                                         nuisance.get('df', 1), nuisance.get('names'), sites)
+            kind = nuisance.get('model', NUISANCE_DEFAULT)
+            N, D, pen, _, _ = nuisance_design(nuisance['values'], d.age, d.male, nc, kind,
+                                              nuisance.get('names'), sites)
+            sc = _several_sites(sites, nc)      # sites of the controls, if several
             raw = self.model.copy()
             raw.offset[:], raw.scale[:] = 0, 1
             Zc = raw.zscores(Y[nc], d.age[nc], d.male[nc], C=Cs(nc))
             fin = np.all(np.isfinite(Zc), axis=0)
+            Zf = Zc[:, fin]
+            P, _, edf = nuisance_solve(D, pen, N.shape[1], [Zf])
             G = np.zeros((N.shape[1], Zc.shape[1]))
-            G[:, fin] = P @ Zc[:, fin]
-            folds = _nuisance_folds(nuisance['values'], d.age, d.male, nc,
-                                    nuisance.get('df', 1), nuisance.get('names'), site=sites)
+            G[:, fin] = P @ Zf
+            folds = _nuisance_folds(nuisance['values'], d.age, d.male, nc, kind,
+                                    nuisance.get('names'), site=sites,
+                                    data=lambda rows: [Zf[rows]])
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', RuntimeWarning)
-                explained = float(np.nanmedian(np.var(N[nc] @ G, axis=0)[fin]
-                                               / np.var(Zc[:, fin], axis=0)))
-                explained_cv = (float(np.nanmedian(_crossfit_share(Zc[:, fin], folds)))
+                explained = float(np.nanmedian(
+                    np.var(_within_sites(N[nc] @ G, sc), axis=0)[fin]
+                    / np.var(_within_sites(Zc[:, fin], sc), axis=0)))
+                explained_cv = (float(np.nanmedian(_crossfit_share(Zc[:, fin], folds, sc)))
                                 if folds and fin.any() else np.nan)
         O = None                       # offsets of several sites (k, p_valid)
         if ctrl is not None and sites is not None:
@@ -3209,6 +3226,7 @@ class VoxelModel:
         if G is not None:
             out['nuisance_explained'] = explained
             out['nuisance_explained_crossfit'] = explained_cv
+            out['nuisance_edf'] = edf
         if O is not None:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', RuntimeWarning)
@@ -4365,27 +4383,165 @@ def _site_columns(site, ctrl):
     return (sc[:, None] == levels[None, 1:]).astype(np.float64)
 
 
-def nuisance_design(Q, age, male, ctrl, df=1, names=None, site=None):
+def _several_sites(site, ctrl):
+    """Codes 0..k-1 of the sites of the controls ctrl if they come from several of the
+    sites site (n,), else None (one site, or site None)."""
+    if site is None:
+        return None
+    levels, code = np.unique(np.asarray(site)[ctrl], return_inverse=True)
+    return code if levels.size > 1 else None
+
+
+def _within_sites(X, code):
+    """X (n, p) minus the mean of every site code (n,): the variation within the sites.
+    X itself for one site (code None)."""
+    if code is None:
+        return X
+    X = np.array(X, dtype=np.float64)
+    for s in np.unique(code):
+        X[code == s] -= X[code == s].mean(axis=0)
+    return X
+
+
+class PSpline:
+    """Penalized spline basis of a nuisance variable (P-spline, Eilers & Marx, 1996), as
+    in ComCat: a linear column, which is not penalized, and the nonlinear part of a
+    cubic B-spline basis with size functions on equally spaced knots over the range of
+    the training values.  The nonlinear part is the basis minus its least-squares fit
+    by intercept and slope in the training values, in coordinates in which the
+    second-order difference penalty of the B-spline coefficients is the sum of squares
+    of the size - 2 coefficients (a ridge penalty).  Values outside the training range
+    get the nonlinear part of the nearest boundary, so that the curve continues there
+    with the slope of the linear column.  A variable with fewer than size + 2 distinct
+    training values stays linear."""
+
+    penalized = np.zeros(1, dtype=bool)         # columns with the penalty (linear: none)
+
+    def __init__(self, x, size=NUISANCE_BASIS, degree=3):
+        x = np.asarray(x, dtype=np.float64)
+        sd = float(x.std())
+        self.mean, self.sd = float(x.mean()), sd if sd > 0 else 1.0
+        self.lo, self.hi, self.degree, self.knots = float(x.min()), float(x.max()), degree, None
+        if size - degree < 1 or np.unique(x).size < size + 2:
+            return
+        inner = np.linspace(self.lo, self.hi, size - degree + 1)
+        step = inner[1] - inner[0]
+        self.knots = np.concatenate([self.lo - step * np.arange(degree, 0, -1), inner,
+                                     self.hi + step * np.arange(1, degree + 1)])
+        self.line = np.linalg.lstsq(np.column_stack([np.ones_like(x), x]), self._basis(x),
+                                    rcond=None)[0]
+        D = np.diff(np.eye(size), n=2, axis=0)
+        ev, V = np.linalg.eigh(D.T @ D)
+        pos = ev > ev.max() * 1e-10
+        self.T = V[:, pos] / np.sqrt(ev[pos])
+        self.penalized = np.r_[False, np.ones(self.T.shape[1], dtype=bool)]
+
+    def _basis(self, x):
+        from scipy.interpolate import BSpline
+        return BSpline(self.knots, np.eye(len(self.knots) - self.degree - 1), self.degree)(x)
+
+    def __call__(self, x):
+        x = np.asarray(x, dtype=np.float64)
+        lin = ((x - self.mean) / self.sd)[:, None]
+        if self.knots is None:
+            return lin
+        c = np.clip(x, self.lo, self.hi)
+        rest = self._basis(c) - np.column_stack([np.ones_like(c), c]) @ self.line
+        return np.hstack([lin, rest @ self.T])
+
+
+def _reml_penalty(D, pen, data):
+    """Common ridge penalty of the penalized columns pen (q,) of the design D (n, q),
+    estimated by REML from all features of the data, an iterable of arrays (n,
+    features) without missing values, each feature standardized.
+
+    Per feature, y = U a + B b + e with b ~ N(0, s^2 / lam) and e ~ N(0, s^2): U are
+    the unpenalized columns, B the penalized ones, and the variance s^2 is profiled
+    out.  The restricted log-likelihood is summed over the features and maximized over
+    NUISANCE_GRID values of lam, 14 decades around the median squared singular value of
+    B after projecting out U.  Returns lam and the effective df of the penalized
+    columns; (inf, 0) if these columns add nothing to U or there are no features."""
+    n = D.shape[0]
+    eps = np.finfo(np.float64).eps
+    U, B = D[:, ~pen], D[:, pen]
+    Uu, su, _ = np.linalg.svd(U, full_matrices=False)
+    Qu = Uu[:, :int(np.sum(su > su[0] * max(U.shape) * eps))] if su.size else Uu[:, :0]
+    W, s, _ = np.linalg.svd(B - Qu @ (Qu.T @ B), full_matrices=False)
+    ok = s > (s[0] if s.size else 0) * max(B.shape) * eps
+    W, s2 = W[:, ok], s[ok] ** 2
+    rss, C2 = [], []
+    for Y in data:
+        sd = Y.std(axis=0)
+        y = (Y - Y.mean(axis=0)) / np.where(sd > 0, sd, 1.0)
+        c2 = (W.T @ y) ** 2
+        rss.append(np.sum(y ** 2, axis=0) - np.sum((Qu.T @ y) ** 2, axis=0) - c2.sum(axis=0))
+        C2.append(c2)
+    if not s2.size or not sum(r.size for r in rss):
+        return np.inf, 0.0
+    rss, C2 = np.maximum(np.concatenate(rss), 0.0), np.hstack(C2)
+    n_eff = n - Qu.shape[1]
+    grid = np.median(s2) * 10.0 ** np.linspace(-6, 8, NUISANCE_GRID)
+    score = np.empty(grid.size)
+    for i, lam in enumerate(grid):
+        sig2 = (rss + (lam / (s2 + lam)) @ C2) / n_eff     # residual variance per feature
+        score[i] = (n_eff * np.sum(np.log(np.maximum(sig2, 1e-300)))
+                    + rss.size * np.sum(np.log1p(s2 / lam)))
+    lam = float(grid[int(np.argmin(score))])
+    return lam, float(np.sum(s2 / (s2 + lam)))
+
+
+def nuisance_solve(D, pen, k, data=None):
+    """Rows P (k, n_controls) that give the coefficients of the k nuisance columns, the
+    last ones of the controls' design D of nuisance_design, for any data of the
+    controls; the penalty; and the effective df of the nuisance columns.
+
+    Without penalized columns pen (linear model), P comes from the pseudo-inverse of D
+    (penalty None, k df).  With them (P-splines), they share one ridge penalty,
+    estimated by REML from the controls' data (_reml_penalty): data is an iterable of
+    arrays (n_controls, features) without missing values.  An infinite penalty leaves
+    the linear terms only."""
+    if not pen.any():
+        return np.linalg.pinv(D)[-k:], None, float(k)
+    if data is None:
+        raise ValueError("The penalty of the P-splines needs the data of the controls.")
+    lam, edf = _reml_penalty(D, pen, data)
+    P = np.zeros((D.shape[1], D.shape[0]))
+    if np.isfinite(lam):
+        A = np.vstack([D, np.diag(np.sqrt(np.where(pen, lam, 0.0)))])
+        P = np.linalg.pinv(A)[:, :D.shape[0]]
+    else:
+        P[~pen] = np.linalg.pinv(D[:, ~pen])
+    return P[-k:], lam, edf + float(np.sum(~pen[-k:]))
+
+
+def nuisance_design(Q, age, male, ctrl, model=NUISANCE_DEFAULT, names=None, site=None):
     """Regression of the nuisance correction (remove_nuisance, VoxelModel.zmaps).
 
     Returns the nuisance bases N (n, k) of all subjects, centred at their mean in the
-    controls ctrl, the rows P (k, n_controls) of the pseudo-inverse of the controls'
-    design that give the nuisance coefficients of any data of the controls, the names
-    of the variables used and the df of age.  With the sites site (n,) of several test
-    sites, the design also has an indicator of every site of the controls but one, so
-    that the nuisance effects are estimated within the sites; the site effects are
-    left to the adaptation with the controls.
+    controls ctrl, the design D (n_controls, q) of the controls, whose last k columns
+    are these bases, its penalized columns pen (q,), the names of the variables used
+    and the df of age.  nuisance_solve gives the nuisance coefficients of any data of
+    the controls from D and pen.  model 'pspline' (the default) has the columns of a
+    P-spline per variable (PSpline), whose nonlinear ones are penalized; 'linear' has
+    one column per variable and no penalty.  Missing values get the mean of the
+    controls and bases of 0, i.e. no correction.  With the sites site (n,) of several
+    test sites, the design also has an indicator of every site of the controls but
+    one, so that the nuisance effects are estimated within the sites; the site effects
+    are left to the adaptation with the controls.
     """
+    if model not in NUISANCE_MODELS:
+        raise ValueError(f"Unknown nuisance model {model!r}: use one of {NUISANCE_MODELS}.")
     Q = np.asarray(Q, dtype=np.float64).reshape(len(age), -1)
     names = [str(j + 1) for j in range(Q.shape[1])] if names is None else list(names)
     ctrl = np.asarray(ctrl)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)
         mean = np.nanmean(Q[ctrl], axis=0)
-    Q = np.where(np.isfinite(Q), Q, mean)
+    missing = ~np.isfinite(Q)
+    Q = np.where(missing, mean, Q)
     sc = None if site is None else np.asarray(site)[ctrl]
     groups = [] if sc is None or np.unique(sc).size < 2 else [sc == s for s in np.unique(sc)]
-    bases, used = [], []
+    bases, used, pen = [], [], []
     for j, nm in enumerate(names):
         x = Q[ctrl, j]
         if not (np.isfinite(mean[j]) and np.ptp(x) > 0):
@@ -4394,8 +4550,11 @@ def nuisance_design(Q, age, male, ctrl, df=1, names=None, site=None):
             _note(f"Nuisance variable {nm} does not vary within the sites of the controls and "
                   "is not used: the sites are adapted separately.")
         else:
-            b = NaturalSpline(x, df)
+            b = NaturalSpline(x, 1) if model == 'linear' else PSpline(x)
             bases.append(b(Q[:, j]) - b(x).mean(axis=0))
+            if model != 'linear':       # a curve at the mean is not its mean: no correction
+                bases[-1][missing[:, j]] = 0
+            pen.append(np.zeros(1, dtype=bool) if model == 'linear' else b.penalized)
             used.append(nm)
     if not used:
         raise ValueError("No nuisance variable varies in the control subjects.")
@@ -4408,18 +4567,23 @@ def nuisance_design(Q, age, male, ctrl, df=1, names=None, site=None):
     if np.unique(male[ctrl]).size > 1:
         cols.append(np.asarray(male[ctrl], dtype=np.float64)[:, None])
     D = np.hstack(cols + [_site_columns(site, ctrl), N[ctrl]])
-    if ctrl.size <= D.shape[1]:
-        raise ValueError(f"{ctrl.size} controls are too few for {D.shape[1]} regression terms "
-                         "of the nuisance correction.")
-    return N, np.linalg.pinv(D)[-N.shape[1]:], used, age_df
+    pen = np.r_[np.zeros(D.shape[1] - N.shape[1], dtype=bool), np.concatenate(pen)]
+    if ctrl.size <= np.sum(~pen):
+        raise ValueError(f"{ctrl.size} controls are too few for {int(np.sum(~pen))} "
+                         f"{'unpenalized ' if pen.any() else ''}regression terms of the "
+                         "nuisance correction.")
+    return N, D, pen, used, age_df
 
 
-def _nuisance_folds(Q, age, male, ctrl, df=1, names=None, k=5, seed=0, site=None):
+def _nuisance_folds(Q, age, male, ctrl, model=NUISANCE_DEFAULT, names=None, k=5, seed=0,
+                    site=None, data=None):
     """Designs of a k-fold cross-fit of the nuisance correction over the controls:
-    list of (held-out, training) positions in ctrl with the bases N of the held-out
-    controls and the rows P fitted on the training controls (nuisance_design).
-    With several sites, the folds are stratified by site.  Empty if the training
-    folds are too small for the regression."""
+    list of (held-out, training) positions in ctrl with the bases N of all controls
+    and the rows P fitted on the training controls (nuisance_design,
+    nuisance_solve).  With several sites, the folds are stratified by site.  For
+    P-splines, data(rows) gives the data of the controls at the positions rows (as for
+    nuisance_solve), from which every fold estimates its own penalty.  Empty if the
+    training folds are too small for the regression."""
     ctrl = np.asarray(ctrl)
     k = min(k, ctrl.size)
     if k < 2:
@@ -4434,70 +4598,105 @@ def _nuisance_folds(Q, age, male, ctrl, df=1, names=None, k=5, seed=0, site=None
     for j in range(k):
         te, tr = np.flatnonzero(f == j), np.flatnonzero(f != j)
         try:
-            N, P, _, _ = nuisance_design(Q, age, male, ctrl[tr], df, names, site)
+            N, D, pen, _, _ = nuisance_design(Q, age, male, ctrl[tr], model, names, site)
         except ValueError:
             return []
-        folds.append((te, tr, N[ctrl[te]], P))
+        P = nuisance_solve(D, pen, N.shape[1], data(tr) if pen.any() else None)[0]
+        folds.append((te, tr, N[ctrl], P))
     return folds
 
 
-def _crossfit_share(Yc, folds):
+def _crossfit_share(Yc, folds, site=None, chunk=20000):
     """Held-out reduction of the controls' variance by the nuisance correction per
     feature, 1 - var(Yc - R) / var(Yc), where R of every control comes from the
     coefficients of the other folds.  Negative values mean that removing the fitted
-    nuisance part adds variance to new subjects, i.e. the correction does not help."""
-    R = np.full(Yc.shape, np.nan)
-    for te, tr, Nte, P in folds:
-        R[te] = Nte @ (P @ Yc[tr])
-    v0 = np.var(Yc, axis=0)
+    nuisance part adds variance to new subjects, i.e. the correction does not help.
+
+    With the site codes site (n_controls,) of several sites, the share refers to the
+    variance that the adaptation leaves: with and without the correction, every
+    held-out control loses the shrunk offset of its site (site_adaptation), estimated
+    in the training controls of its fold from their values, corrected with the
+    coefficients of that fold.  Differences between the sites, which the adaptation
+    removes anyway, then count for neither."""
+    if site is None:
+        R = np.full(Yc.shape, np.nan)
+        for te, tr, Nc, P in folds:
+            R[te] = Nc[te] @ (P @ Yc[tr])
+        v0, v1 = np.var(Yc, axis=0), np.var(Yc - R, axis=0)
+    else:
+        k = int(site.max()) + 1
+        v0, v1 = np.empty(Yc.shape[1]), np.empty(Yc.shape[1])
+        for c0 in range(0, Yc.shape[1], chunk):
+            Y = Yc[:, c0:c0 + chunk]
+            E0, E1 = np.full(Y.shape, np.nan), np.full(Y.shape, np.nan)
+            for te, tr, Nc, P in folds:
+                W = Y - Nc @ (P @ Y[tr])            # corrected with this fold's coefficients
+                E0[te] = Y[te] - site_adaptation(Y[tr], site[tr], k)[0][site[te]]
+                E1[te] = W[te] - site_adaptation(W[tr], site[tr], k)[0][site[te]]
+            v0[c0:c0 + chunk], v1[c0:c0 + chunk] = np.var(E0, axis=0), np.var(E1, axis=0)
     with np.errstate(invalid='ignore', divide='ignore'):
-        return np.where(v0 > 0, 1 - np.var(Yc - R, axis=0) / v0, np.nan)
+        return np.where(v0 > 0, 1 - v1 / v0, np.nan)
 
 
-def nuisance_terms(Q, age, male, ctrl, df=1, names=None, site=None):
-    """Number of regression terms of the nuisance correction (as nuisance_design)."""
-    N, _, _, age_df = nuisance_design(Q, age, male, ctrl, df, names, site)
-    return (1 + age_df + int(np.unique(np.asarray(male)[ctrl]).size > 1)
-            + _site_columns(site, ctrl).shape[1] + N.shape[1])
+def nuisance_terms(Q, age, male, ctrl, model=NUISANCE_DEFAULT, names=None, site=None):
+    """Number of unpenalized regression terms of the nuisance correction (as
+    nuisance_design): all terms of the linear model, and all but the penalized
+    nonlinear ones of the P-splines."""
+    pen = nuisance_design(Q, age, male, ctrl, model, names, site)[2]
+    return int(np.sum(~pen))
 
 
-def remove_nuisance(d: Data, Q, ctrl, df=1, names=None, chunk=20000):
+def remove_nuisance(d: Data, Q, ctrl, model=NUISANCE_DEFAULT, names=None, chunk=20000):
     """Test data d without the effects of nuisance variables Q (n, k), such as image
     quality measures, estimated in the control subjects ctrl of the test sample.
 
     Every voxel/vertex of the controls is regressed on an intercept, a natural spline
     of age (up to 3 df by the number of controls; none if their ages span less than 5
     years, as for repeated scans of one subject), sex, the sites of the controls if
-    there are several (d.site), and natural splines of the nuisance variables with df
-    degrees of freedom (1 = linear).  The nuisance part, relative to its mean in the
-    controls, is removed from all test subjects, whose data then enter models fitted
-    without these variables.  Effects of age and sex are kept, and so are effects of a
-    disease, which the controls do not have; site effects are left to the adaptation.
-    Values outside the range of the controls are extrapolated linearly, and missing
-    values are set to the mean of the controls (no correction).  Returns the corrected
-    data and a record with the share of the controls' variance removed (median over
-    voxels/vertices; in-sample, optimistic) and its 5-fold cross-fitted counterpart
-    explained_crossfit (_crossfit_share).
+    there are several (d.site), and the nuisance variables: penalized splines (model
+    'pspline', the default: PSpline, with one penalty for all variables and
+    voxels/vertices, estimated by REML) or linear terms (model 'linear').  The
+    nuisance part, relative to its mean in the controls, is removed from all test
+    subjects, whose data then enter models fitted without these variables.  Effects
+    of age and sex are kept, and so are effects of a disease, which the controls do
+    not have; site effects are left to the adaptation.  Values outside the range of
+    the controls are extrapolated linearly, and missing values get no correction.
+    Returns the corrected data and a record with the share of the controls' variance
+    removed (median over voxels/vertices; in-sample, optimistic), its 5-fold
+    cross-fitted counterpart explained_crossfit (_crossfit_share) and the effective df
+    of the nuisance terms (edf; with P-splines also their penalty).  With controls
+    from several sites, both shares refer to the variance within the sites, which is
+    what the adaptation leaves: in-sample around the means of the sites, cross-fitted
+    around the site offsets of the other folds.
     """
     ctrl = np.asarray(ctrl)
-    N, P, used, age_df = nuisance_design(Q, d.age, d.male, ctrl, df, names, d.site)
-    folds = _nuisance_folds(Q, d.age, d.male, ctrl, df, names, site=d.site)
+    N, D, pen, used, age_df = nuisance_design(Q, d.age, d.male, ctrl, model, names, d.site)
+    sc = _several_sites(d.site, ctrl)
     Y = np.array(d.Y, dtype=np.float32)
     share = np.full(Y.shape[1], np.nan)
     share_cv = np.full(Y.shape[1], np.nan)
     idx = np.flatnonzero(np.all(np.isfinite(Y[ctrl]), axis=0))
+
+    def data(rows):                 # the controls at the positions rows, in chunks
+        return (np.asarray(Y[np.ix_(ctrl[rows], idx[c0:c0 + chunk])], dtype=np.float64)
+                for c0 in range(0, idx.size, chunk))
+    # the penalties (of all controls and of every fold) come from the uncorrected data
+    P, lam, edf = nuisance_solve(D, pen, N.shape[1], data(np.arange(ctrl.size)))
+    folds = _nuisance_folds(Q, d.age, d.male, ctrl, model, names, site=d.site, data=data)
     for c0 in range(0, idx.size, chunk):
         f = idx[c0:c0 + chunk]
         Yc = np.asarray(Y[np.ix_(ctrl, f)], dtype=np.float64)
         R = N @ (P @ Yc)                            # nuisance part of all subjects
         Y[:, f] = Y[:, f] - R
-        vy, vr = np.var(Yc, axis=0), np.var(R[ctrl], axis=0)
+        vy = np.var(_within_sites(Yc, sc), axis=0)
+        vr = np.var(_within_sites(R[ctrl], sc), axis=0)
         share[f] = np.where(vy > 0, vr / np.where(vy > 0, vy, 1), np.nan)
         if folds:
-            share_cv[f] = _crossfit_share(Yc, folds)
+            share_cv[f] = _crossfit_share(Yc, folds, sc)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)
-        rec = dict(names=used, n_controls=int(ctrl.size), df=int(df), age_df=int(age_df),
+        rec = dict(names=used, n_controls=int(ctrl.size), model=model, age_df=int(age_df),
+                   edf=float(edf), penalty=lam,
                    explained=float(np.nanmedian(share)) if idx.size else np.nan,
                    explained_crossfit=float(np.nanmedian(share_cv)) if idx.size else np.nan)
     return replace(d, Y=Y), rec
@@ -4564,10 +4763,11 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
     parcellation   : lobe-wise mean z of the z-maps (also if the brain age models
                      were fitted with parcellation)
     train          : training data of the models, needed for the GPR baseline
-    nuisance       : dict(names, values (n, k), df) of nuisance variables of the test
+    nuisance       : dict(names, values (n, k), model) of nuisance variables of the test
                      subjects, such as image quality measures, whose effects are
                      estimated in the controls (adjust) and removed from the test data
-                     before the models are applied (remove_nuisance)
+                     before the models are applied (remove_nuisance); model 'pspline'
+                     (penalized splines, the default) or 'linear'
     crossfit_folds : with adjust, the accuracy in the controls is also estimated by
                      k-fold cross-fitting over the controls (correction, nuisance
                      correction and ensemble weights from the other folds), because the
@@ -4626,30 +4826,38 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
         if adjust is None:
             raise ValueError("The nuisance correction needs the control subjects (adjust).")
         nz = dict(nuisance, ctrl=ctrl)
-        names = nuisance_design(nuisance['values'], age, test[0].male, ctrl,
-                                nuisance.get('df', 1), nuisance['names'], sites)[2]
-        nuis = dict(names=names, explained=[], explained_crossfit=[])
-        n_terms = nuisance_terms(nuisance['values'], age, test[0].male, ctrl,
-                                 nuisance.get('df', 1), nuisance['names'], sites)
+        kind = nuisance.get('model', NUISANCE_DEFAULT)
+        splines = kind == 'pspline'
+        within = '' if _several_sites(sites, ctrl) is None else ' within the sites'
+        names = nuisance_design(nuisance['values'], age, test[0].male, ctrl, kind,
+                                nuisance['names'], sites)[3]
+        nuis = dict(names=names, model=kind, explained=[], explained_crossfit=[], edf=[])
+        n_terms = nuisance_terms(nuisance['values'], age, test[0].male, ctrl, kind,
+                                 nuisance['names'], sites)
         if not normative_only:
-            res = [remove_nuisance(d, nuisance['values'], ctrl, nuisance.get('df', 1),
-                                   nuisance['names']) for d in test]
+            res = [remove_nuisance(d, nuisance['values'], ctrl, kind, nuisance['names'])
+                   for d in test]
             test_ba = [r[0] for r in res]
             nuis['explained'] = [r[1]['explained'] for r in res]
             nuis['explained_crossfit'] = [r[1]['explained_crossfit'] for r in res]
-        print(f"Nuisance variables {', '.join(names)}: effects estimated in {ctrl.size} "
-              f"controls{'' if sites is None else f' within {k} sites'} and removed from the "
-              "test data (brain age) and z-scores (z-maps)", flush=True)
+            nuis['edf'] = [r[1]['edf'] for r in res]
+        print(f"Nuisance variables {', '.join(names)} "
+              f"({'penalized splines' if splines else 'linear terms'}): effects estimated in "
+              f"{ctrl.size} controls{'' if sites is None else f' within {k} sites'} and removed "
+              "from the test data (brain age) and z-scores (z-maps)", flush=True)
         if ctrl.size < 10 * n_terms:
-            _note(f"The nuisance correction has {n_terms} regression terms for {ctrl.size} "
+            _note(f"The nuisance correction has {n_terms} "
+                  f"{'unpenalized ' if splines else ''}regression terms for {ctrl.size} "
                   f"controls (fewer than 10 per term): its coefficients are noisy, and the "
                   f"correction can add more variance to new subjects than it removes.")
-        for d, sh, cv in zip(test, nuis['explained'], nuis['explained_crossfit']):
-            print(f"  {d.name}: share of the controls' variance removed {sh:.3f} (in-sample), "
-                  f"held-out reduction {cv:+.3f} (5-fold cross-fitted)")
+        for d, sh, cv, edf in zip(test, nuis['explained'], nuis['explained_crossfit'],
+                                  nuis['edf']):
+            print(f"  {d.name}: share of the controls' variance{within} removed {sh:.3f} "
+                  f"(in-sample), held-out reduction {cv:+.3f} (5-fold cross-fitted)"
+                  + (f"; {edf:.1f} effective df of the nuisance terms" if splines else ''))
             if np.isfinite(cv) and cv <= 0:
                 _note(f"{d.name}: removing the nuisance effects does not reduce the variance "
-                      f"of held-out controls; the correction probably does not help.")
+                      f"of held-out controls{within}; the correction probably does not help.")
 
     if normative_only:
         if correction in ('agefree', 'bias'):
@@ -4665,6 +4873,17 @@ def apply_models(sets, test, adjust=None, correction='offset', ensemble='gls',
                            df_sigma=s.voxel.model.df_sigma,
                            mask_threshold=(s.voxel.mask_info or {}).get('threshold', np.nan)))
             print(f"  {d.name}: {time.time() - t0:.1f}s", flush=True)
+            if nuis is not None:
+                cv = z['nuisance_explained_crossfit']
+                print(f"    z-scores: share of the controls' variance{within} removed "
+                      f"{z['nuisance_explained']:.3f} (in-sample), held-out reduction {cv:+.3f} "
+                      "(5-fold cross-fitted)"
+                      + (f"; {z['nuisance_edf']:.1f} effective df of the nuisance terms"
+                         if splines else ''), flush=True)
+                if np.isfinite(cv) and cv <= 0:
+                    _note(f"{d.name}: removing the nuisance effects does not reduce the "
+                          f"variance of the z-scores of held-out controls{within}; the "
+                          "correction probably does not help.")
         if zc is None:
             print("No adaptation to the test site: z-maps at the reference site of the "
                   "training data.")
@@ -4839,7 +5058,8 @@ def _crossfit_accuracy(sets, test, ctrl, age, correction, ensemble, gpr, train, 
                 dc = d.subset(ctrl)
                 if nuisance is not None:
                     dc = remove_nuisance(dc, nuisance['values'][ctrl], tr,
-                                         nuisance.get('df', 1), nuisance['names'])[0]
+                                         nuisance.get('model', NUISANCE_DEFAULT),
+                                         nuisance['names'])[0]
                 est = s.brainage.copy()
                 if sc is not None and correction in ('adapt', 'agefree'):
                     pa = est.predict_sites(est.adapt_sites(
@@ -4886,18 +5106,21 @@ def _crossfit_accuracy(sets, test, ctrl, age, correction, ensemble, gpr, train, 
 
 
 def _add_nuisance(out, nuis):
-    """Record of the nuisance correction in the results and z-maps: the names and the
-    median share of the controls' variance removed (brain age data per model; the
-    z-maps keep their own share of the variance of the z-scores)."""
+    """Record of the nuisance correction in the results and z-maps: the names, the
+    model of the terms, the median share of the controls' variance removed and the
+    effective df of the nuisance terms (brain age data per model; the z-maps keep
+    their own share and df, of the z-scores)."""
     if nuis is None:
         return
     out['nuisance'] = np.array(nuis['names'], dtype=object)
+    out['nuisance_model'] = nuis['model']
     if nuis['explained']:
         out['nuisance_explained'] = np.array(nuis['explained'], dtype=np.float64)
         out['nuisance_explained_crossfit'] = np.array(nuis['explained_crossfit'],
                                                       dtype=np.float64)
+        out['nuisance_edf'] = np.array(nuis['edf'], dtype=np.float64)
     for z in out.get('zmaps') or []:
-        z['nuisance'] = out['nuisance']
+        z['nuisance'], z['nuisance_model'] = out['nuisance'], nuis['model']
 
 
 def train_test(train, test, adjust=None, correction='offset', age_range=(0, np.inf),
@@ -5327,8 +5550,13 @@ def _parser():
     p.add_argument('--nuisance-cols',
                    help="columns of --test-nuisance: comma-separated names or 1-based "
                         "numbers (default: all numeric columns)")
-    p.add_argument('--nuisance-df', type=int, default=1,
-                   help="spline df of the nuisance variables (default 1 = linear)")
+    p.add_argument('--nuisance-model', choices=NUISANCE_MODELS, default=None,
+                   help=f"terms of the nuisance variables: pspline (default), penalized "
+                        f"splines ({NUISANCE_BASIS} cubic B-spline functions per variable) "
+                        "with one smoothing parameter for all variables and voxels/vertices, "
+                        "estimated by REML in the controls, which gives nearly linear curves "
+                        "with few controls; or linear")
+    p.add_argument('--nuisance-df', type=int, default=None, help=argparse.SUPPRESS)
     p.add_argument('--kfold', type=int,
                    help="folds of the cross-validation of the brain age if no --test "
                         "(default 10; with --save-model 0 = no cross-validation)")
@@ -5403,8 +5631,13 @@ def _check_args(p, a):
         p.error("--test-site needs --test.")
     if a.nuisance_cols and not a.test_nuisance:
         p.error("--nuisance-cols needs --test-nuisance.")
-    if a.nuisance_df < 1:
-        p.error("--nuisance-df must be at least 1.")
+    if a.nuisance_model and not a.test_nuisance:
+        p.error("--nuisance-model needs --test-nuisance.")
+    a.nuisance_model = a.nuisance_model or NUISANCE_DEFAULT
+    if a.nuisance_df is not None:
+        p.error("--nuisance-df was removed: unpenalized splines of the nuisance variables "
+                "added variance to new subjects.  Use --nuisance-model linear for linear "
+                "terms (the former default) or pspline for penalized splines (the default).")
     if a.save_model and os.path.splitext(a.save_model)[1].lower() not in ('.mat', '.npz'):
         p.error("--save-model needs the extension .mat or .npz.")
     kfold = a.kfold if a.kfold is not None else (0 if a.save_model else 10)
@@ -5604,7 +5837,7 @@ def main(argv=None):
                                 f"{nm} (values of {'column ' if numbered else ''}{c} of "
                                 "--test-nuisance)" for c, nm in both) + ".")
         nuisance = dict(names=cols, values=values[:, [names.index(nm) for nm in cols]],
-                        df=a.nuisance_df)
+                        model=a.nuisance_model)
     out = apply_models(sets, test, adjust, a.correction, a.ensemble, a.zmaps,
                        a.normative_only, a.parcellation, fit_train, not a.no_gpr, nuisance,
                        mask_nonconverged=a.mask_nonconverged, crossfit_folds=a.crossfit_folds,
