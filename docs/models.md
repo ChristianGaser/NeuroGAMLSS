@@ -347,9 +347,10 @@ CAT12 rates every scan by quality measures (IQMs): noise (NCR), inhomogeneity (I
 y_{ij} = \alpha_j + f_j(a_i) + \beta_j s_i + \mathbf{h}(\mathbf{q}_i)^\top \boldsymbol\gamma_j + e_{ij}, \qquad i \in C .
 ```
 
-- **Terms.** $`\mathbf{h}`$ is linear, or a natural spline with `--nuisance-df`. Age has up to 3 df, one per 20 controls, and is left out if the controls' ages span less than 5 years. Sex is left out if the controls have only one. With several test sites, the regression also has an indicator of every site but one, so that $`\boldsymbol\gamma_j`$ comes from the variation within the sites. The site effects are not removed here but left to the adaptation, and nuisance variables that do not vary within any site are dropped.
+- **Terms.** $`\mathbf{h}`$ is a penalized spline by default, or linear with `--nuisance-model linear` (below). Age has up to 3 df, one per 20 controls, and is left out if the controls' ages span less than 5 years. Sex is left out if the controls have only one. With several test sites, the regression also has an indicator of every site but one, so that $`\boldsymbol\gamma_j`$ comes from the variation within the sites. The site effects are not removed here but left to the adaptation, and nuisance variables that do not vary within any site are dropped.
 - **Brain age.** It uses the data $`y_{ij} - (\mathbf{h}(\mathbf{q}_i) - \bar{\mathbf{h}})^\top \hat{\boldsymbol\gamma}_j`$ of all test subjects, where $`\bar{\mathbf{h}}`$ is the mean over the controls.
 - **z-maps.** They are corrected on their own scale: the controls' normal scores are regressed on the same terms, and the nuisance part is subtracted from all normal scores before the adaptation with the controls. For the normal family, both corrections are nearly the same. For SHASH, a shift of the data is not a constant shift of the skewed normal score.
+- **Shares of the variance.** The output gives the share of the controls' variance that the nuisance part takes in-sample, and the reduction of the variance of held-out controls in 5 folds. With several test sites, both refer to the variance within the sites, which is what the adaptation leaves: in-sample around the means of the sites, and held out around the shrunk offsets of the sites, estimated in the other folds from values corrected with the coefficients of these folds. Relative to all variance, the shares would also count the differences between the sites that the correction shifts and the adaptation removes.
 - **Disease.** Effects of a disease are kept, because the controls have none. Estimated in all subjects instead, the IQM effects would absorb the part of a disease effect that goes along with worse image quality.
 
 Within the training sample, IQMs improved the fit. Held-out log-likelihood as above, with the four samples as sites:
@@ -379,7 +380,7 @@ The test-sample corrections were estimated in two ways:
 - **In-sample.** All scans of a test sample served as controls, and the same scans were scored, as when a whole sample is harmonized.
 - **Held-out half.** The effects were estimated on one half of the subjects (the scans, for Tohoku and Buchert) and removed from the other half, which shows how they carry over to new subjects.
 
-`--test-nuisance` used the four ratings ICR, NCR, res_ECR and contrastr. ComCat harmonized every test sample as one site, with all seven IQMs as B-splines (5 to 10 df per IQM, as ComCat chooses them) and age preserved where the subjects differ. These are the IQM-only conditions of the ComCat evaluation; scanners as sites were not used. This was the ComCat of 2026-10, with a variance step also for one site; the current ComCat (four IQMs, P-splines with REML, location only with one site, cross-fitted) is applied by `scripts/comcat_data.py` and compared held out by `scripts/harmonization_comparison.py`. Brain age:
+`--test-nuisance` used the four ratings ICR, NCR, res_ECR and contrastr as linear terms (`--nuisance-model linear`, the default at that time). ComCat harmonized every test sample as one site, with all seven IQMs as B-splines (5 to 10 df per IQM, as ComCat chooses them) and age preserved where the subjects differ. These are the IQM-only conditions of the ComCat evaluation; scanners as sites were not used. This was the ComCat of 2026-10, with a variance step also for one site; the current ComCat (four IQMs, P-splines with REML, location only with one site, cross-fitted) is applied by `scripts/comcat_data.py` and compared held out by `scripts/harmonization_comparison.py`. Brain age:
 
 | IQMs | BrainAGE SD, Tohoku | BrainAGE SD, Buchert | BrainAGE SD, ON-Harmony | BrainAGE SD, MR-ART | Motion effect |
 |---|---|---|---|---|---|
@@ -412,6 +413,29 @@ z-maps, with the share of $`|z| \gt 2.58`$ in the MR-ART scans without motion, w
 
 For z-maps, IQMs are best used on the test data with `--test-nuisance`. This needs enough controls with a spread of image quality: it worked with 74 subjects per half in MR-ART, but not with 5 in ON-Harmony. The controls should cover the image quality of the patients, whose values are otherwise extrapolated linearly. Few non-redundant ratings are safer than all seven. IQMs in the normative models should be a few ratings without the composites, and should stay out of the log scale if the test data may leave their training range.
 
+**Curved effects of the nuisance variables.** By default (`--nuisance-model pspline`), every nuisance variable enters as a P-spline (Eilers & Marx, 1996), as in ComCat: a linear term plus the nonlinear part of a cubic B-spline basis with 10 functions on equally spaced knots over the range of the controls, with a second-order difference penalty. All variables and voxels share one smoothing parameter, estimated by REML from the controls' data (the normal scores for the z-maps, the voxel values for brain age), with a variance per voxel. Outside the range of the controls the curves continue linearly. A large penalty gives the linear model, so that the number of fitted parameters adapts to the sample.
+
+[scripts/nuisance_model_comparison.py](../scripts/nuisance_model_comparison.py) estimated the effects of ICR, NCR, res_ECR and contrastr on the normal scores (SHASH, 4 mm, 6 mm smoothing, TIV in the mean, no adaptation) in a random part of the scans and removed them from the others. The table gives the SD of z over the held-out scans relative to no correction, for MR-ART the within-subject SD of held-out subjects, as the mean of 20 random parts. Values above 1 mean that the correction added variance. Natural splines are unpenalized, with 3 df per variable, as the former `--nuisance-df 3`:
+
+| Estimated in | Linear | Natural spline, 3 df | P-spline | Effective df of the P-splines (of 36) |
+|---|---|---|---|---|
+| Tohoku, 20 scans | 0.953 | 1.765 | 0.960 | 7.3 |
+| Tohoku, 40 scans | 0.902 | 1.079 | 0.911 | 9.0 |
+| Tohoku, 80 scans | 0.819 | 0.827 | 0.756 | 11.1 |
+| Buchert, 20 scans | 1.175 | 2.285 | 1.168 | 4.8 |
+| Buchert, 80 scans | 0.994 | 1.047 | 0.980 | 7.1 |
+| Buchert, 350 scans | 0.958 | 0.932 | 0.912 | 14.5 |
+| MR-ART, 10 subjects | 1.127 | 1.867 | 1.153 | 5.7 |
+| MR-ART, 40 subjects | 0.948 | 1.078 | 0.957 | 6.6 |
+| MR-ART, 118 subjects | 0.914 | 0.950 | 0.915 | 7.3 |
+
+- **P-splines.** They were never more than 0.03 worse than linear terms and better where the effects are curved and the scans suffice (Tohoku with 80 scans, Buchert with 160 or more). In MR-ART they gained nothing.
+- **Unpenalized splines.** They were worse than linear terms at every size in MR-ART, and worse than no correction with 40 scans of Tohoku, 80 scans of Buchert and 40 subjects of MR-ART. `--nuisance-df` was therefore removed.
+- **Few scans.** With 20 scans of Buchert, or 10 to 20 subjects of MR-ART, even linear terms added variance. The form of the terms matters less than the size of the sample.
+- **Several sites.** With the effects estimated within the scanners and the scanner offsets of the other folds removed, the SD of z over the held-out scans of Buchert (116 scanners, 3 folds) was 0.308 with the offsets alone, 0.297 with linear terms and 0.292 with P-splines. For the held-out controls of ABIDE (229 controls, 14 scanners, 5 folds) it was 1.045, 1.054 and 1.053: there the IQMs added variance in either form. The shares that `--test-nuisance` reports agree: within the scanners of Buchert, the held-out reduction of the variance was +0.05 for linear terms and +0.07 for P-splines, and within those of ABIDE −0.02 for both. Relative to all variance, as reported before, they were −0.24 and −0.46 in Buchert, although both models helped once the offsets were removed.
+
+P-splines are therefore the default: they were never clearly worse than linear terms, the penalty returns them to linear terms where the data show no curvature (ADNI with 231 controls: 4.0 effective df for four variables, the z-maps of linear terms), and they removed more where the effects are curved. `--nuisance-model linear` gives the linear terms.
+
 ### Several test sites
 
 The test samples above were adapted as one site each. ABIDE (ABIDE437, 10 to 18 years) comes from 14 scanners, the `SITE_ID` of ABIDE with UM_1 and UM_2 apart, with 5 to 52 typically developing controls each. Models of NIH879 and NKIe2213 aged 5 to 30 years, of gray matter at 8 mm with 6 mm smoothing, were applied to it: SHASH z-maps and NormBrainAGE with the defaults. Every adaptation was estimated in some controls and evaluated in the others, in 5 folds stratified by scanner and 5 repetitions, with [scripts/test_sites_comparison.py](../scripts/test_sites_comparison.py). The table gives the held-out log density of the normal scores relative to one site for the whole sample, in thousandths of a nat per subject and voxel, and the share beyond ±2.58, which would be 1% for calibrated scores:
@@ -423,7 +447,7 @@ The test samples above were adapted as one site each. ABIDE (ABIDE437, 10 to 18 
 | Fixed offsets per scanner, common SD | +16.8 | 1.43% |
 | Shrunk offsets, common scale with $`n - 1`$ degrees of freedom | +32.2 | 1.40% |
 | Shrunk offsets, common scale with $`n - \mathrm{edf}`$ degrees of freedom (default) | +33.8 | 1.25% |
-| One site, IQMs with `--test-nuisance` | +7.6 | 1.23% |
+| One site, IQMs with `--test-nuisance` (linear terms, also below) | +7.6 | 1.23% |
 | Shrunk offsets, IQMs within the scanners (`--test-nuisance` with test sites) | +22.0 | 1.51% |
 | Shrunk offsets, IQMs across the scanners | +25.2 | 1.37% |
 
@@ -832,6 +856,7 @@ PCNtoolkit offers warped Bayesian linear regression (Fraza et al., 2021) and hie
 - Bethlehem, R.A.I., Seidlitz, J., White, S.R., et al., 2022. Brain charts for the human lifespan. Nature 604, 525–533.
 - Cox, D.R., Snell, E.J., 1968. A general definition of residuals. Journal of the Royal Statistical Society, Series B 30, 248–275.
 - de Boer, A.A.A., Bayer, J.M.M., Kia, S.M., et al., 2024. Non-Gaussian normative modelling with hierarchical Bayesian regression. Imaging Neuroscience 2, 1–36.
+- Eilers, P.H.C., Marx, B.D., 1996. Flexible smoothing with B-splines and penalties. Statistical Science 11, 89–121.
 - Fortin, J.-P., Cullen, N., Sheline, Y.I., et al., 2018. Harmonization of cortical thickness measurements across scanners and sites. NeuroImage 167, 104–120.
 - Fraza, C.J., Dinga, R., Beckmann, C.F., Marquand, A.F., 2021. Warped Bayesian linear regression for normative modelling of big data. NeuroImage 245, 118715.
 - Gardner, M., Shinohara, R.T., Bethlehem, R.A.I., et al., 2024. ComBatLS: a location- and scale-preserving method for multi-site image harmonization. bioRxiv.
