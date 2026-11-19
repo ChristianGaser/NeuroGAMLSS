@@ -15,7 +15,7 @@ zmaps     5 folds stratified by scanner, 5 seeds: log density of the held-out
           per scanner with a common SD; offsets shrunk toward the mean of all
           controls with a common scale (site_adaptation, with n - 1 or n - edf
           degrees of freedom); and with the IQMs ICR, NCR, res_ECR and contrastr
-          (--test-nuisance) estimated within or across the scanners.
+          (--test-nuisance, linear terms) estimated within or across the scanners.
 controls  the same with k = 3, 5, 8 and 12 controls per scanner (30 draws; the other
           controls of every scanner are held out).
 brainage  the cross-fitted accuracy of the controls that apply_models reports, with
@@ -104,8 +104,9 @@ def with_iqm(adapt, within):
     """Nuisance correction of the IQMs (VoxelModel.zmaps), within or across scanners,
     followed by the adaptation adapt."""
     def f(Z, ctrl, code, iqm=None, age=None, male=None):
-        N, P, _, _ = NG.nuisance_design(iqm, age, male, ctrl, 1, IQM_NAMES,
-                                        code if within else None)
+        N, D, pen, _, _ = NG.nuisance_design(iqm, age, male, ctrl, 'linear', IQM_NAMES,
+                                             code if within else None)
+        P = NG.nuisance_solve(D, pen, N.shape[1])[0]
         R = N @ (P @ Z[ctrl])
         m, r = adapt(Z - R, ctrl, code)
         return m + R, r

@@ -16,9 +16,11 @@ test     models of the lifespan sample applied, without any adaptation, to four
          SHASH z-maps of one model.
 testonly the same test samples with models without IQMs; the IQM effects are
          estimated within every test sample instead and removed from the data, by
-         --test-nuisance of neurogamlss.py or by ComCat harmonization of the test
-         data only, on all scans (in-sample) or on one half of the subjects (scans
-         of a single subject) and removed from the other (split).
+         --test-nuisance of neurogamlss.py (with linear terms, --nuisance-model
+         linear, its default when the results were computed) or by ComCat
+         harmonization of the test data only, on all scans (in-sample) or on one half
+         of the subjects (scans of a single subject) and removed from the other
+         (split).
 cv       10-fold cross-validation of NormBrainAGE in the lifespan sample (four
          models): mean absolute error and the brain age offsets of the samples.
 
@@ -322,14 +324,14 @@ def correct(method, d, Q, several, est, app, residual_delta=False):
     """Data of the scans app of the test sample d with the effects of the IQMs Q (n, k)
     removed, estimated on the scans est (the same scans: in-sample).
 
-    neurogamlss : remove_nuisance (--test-nuisance) with est as controls
+    neurogamlss : remove_nuisance (--test-nuisance, linear terms) with est as controls
     comcat      : ComCat harmonization as of the test data only: all scans one site,
                   the IQMs as nuisance (B-splines, gam_df chosen by ComCat) and age
                   preserved if the sample has several subjects; split halves through
                   comcat_from_training with spline bounds covering all scans
     """
     if method == 'neurogamlss':
-        return NG.remove_nuisance(d, Q, est)[0].Y[app]
+        return NG.remove_nuisance(d, Q, est, 'linear')[0].Y[app]
     import comcat as CC
     Y = np.asarray(d.Y, np.float64)
     pres = d.age[:, None] if several else None
@@ -383,7 +385,7 @@ def run_testonly(args):
                 else:                     # --test-nuisance: z-maps corrected on the z scale
                     Z = np.empty_like(Z0)
                     for est, app in parts:
-                        nz = dict(values=Q, ctrl=est, names=list(iqms))
+                        nz = dict(values=Q, ctrl=est, names=list(iqms), model='linear')
                         Z[app] = zset.voxel.zmaps(ds[zi], nuisance=nz)['Z'][app][:, m.valid]
                 rows.append(test_row(f'{name}_{mode}', t, P, age, Z, subject, motion,
                                      args.models))

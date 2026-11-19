@@ -1112,6 +1112,66 @@ def test_command_line_test_nuisance(tmp_path):
     hdr = str(tmp_path / 'iqm_hdr.csv')
     np.savetxt(hdr, np.column_stack([q, d.age]), delimiter=',', header='1,age', comments='')
     NG.main(cov + [hdr, '--nuisance-cols', '1'])
+    # penalized splines are the default: the linear effect of the simulation leaves them
+    # nearly linear, and linear terms give nearly the same z-maps
+    assert NG.NUISANCE_DEFAULT == 'pspline'
+    assert str(z.nuisance_model) == 'pspline' and 1 <= z.nuisance_edf < 3
+    assert str(r.nuisance_model) == 'pspline' and 1 <= float(r.nuisance_edf) < 3
+    linear = ['--test-nuisance', table, '--nuisance-cols', 'IQR', '--nuisance-model', 'linear']
+    NG.main(base + linear)
+    zl = loadmat(out + '_zmaps_s4rp1_8mm_TE_CAT12.9.mat', squeeze_me=True,
+                 struct_as_record=False)['NDMzmap']
+    assert str(zl.nuisance_model) == 'linear' and zl.nuisance_edf == 1
+    assert np.corrcoef(np.nanmean(zl.Z, axis=1), mean_z[1])[0, 1] > 0.99
+    with pytest.raises(SystemExit):                             # needs --test-nuisance
+        NG.main(base + ['--nuisance-model', 'linear'])
+    with pytest.raises(SystemExit):                             # removed: unpenalized splines
+        NG.main(base + linear[:4] + ['--nuisance-df', '1'])
+
+
+def test_nuisance_pspline():
+    """Penalized splines of the nuisance variables: a curved effect is removed from new
+    subjects, which a linear term cannot; a linear effect and few distinct values give
+    linear terms; outside the range of the controls the curves continue linearly."""
+    rng = np.random.default_rng(36)
+    n, p = 600, 40
+    age, q = rng.uniform(20, 80, n), rng.uniform(-2, 2, n)
+    base = (1 - 0.01 * (age - 20))[:, None]
+    noise = 0.1 * rng.standard_normal((n, p))
+    fit, new = np.arange(300), np.arange(300, n)
+
+    def sample(effect):
+        Y = base + effect[:, None] * rng.uniform(0.5, 1.5, p) + noise
+        return NG.Data(Y.astype(np.float32), age, np.zeros(n), np.zeros(n, int),
+                       'sim_8mm_T.mat', res='8')
+    d, left, rec = sample(0.2 * q ** 2), {}, {}
+    for model in NG.NUISANCE_MODELS:
+        out, rec[model] = NG.remove_nuisance(d, q[:, None], fit, model)
+        left[model] = np.std(out.Y[new] - base[new] - noise[new], axis=0).mean()
+    assert left['pspline'] < 0.2 * left['linear']               # curve removed, held out
+    assert rec['pspline']['model'] == 'pspline' and 2 < rec['pspline']['edf'] < 9
+    assert rec['pspline']['explained_crossfit'] > rec['linear']['explained_crossfit'] + 0.3
+    assert rec['linear']['edf'] == 1 and rec['linear']['penalty'] is None
+    d = sample(0.2 * q)                                         # linear effect
+    lin = NG.remove_nuisance(d, q[:, None], fit, 'linear')[0]
+    out, r = NG.remove_nuisance(d, q[:, None], fit)             # the default
+    assert r['model'] == 'pspline' and r['edf'] < 2 and np.abs(out.Y - lin.Y).max() < 0.03
+    d = sample(0.2 * q ** 2)
+    gap = np.where(np.arange(n) == new[0], np.nan, q)           # missing: no correction
+    out = NG.remove_nuisance(d, gap[:, None], fit)[0]
+    assert np.array_equal(out.Y[new[0]], d.Y[new[0]])
+    assert not np.allclose(out.Y[new[1]], d.Y[new[1]], atol=1e-3)
+    # basis: a linear column and the penalized nonlinear part, constant outside the range
+    b = NG.PSpline(q[fit])
+    B = b(np.array([-4.0, -3.0, 3.0, 4.0]))
+    assert B.shape == (4, NG.NUISANCE_BASIS - 1) and b.penalized.sum() == NG.NUISANCE_BASIS - 2
+    assert not b.penalized[0]
+    assert np.allclose(B[0, 1:], B[1, 1:]) and np.allclose(B[2, 1:], B[3, 1:])
+    grades = rng.integers(0, 5, n).astype(float)                # few values: linear
+    N, D, pen, _, _ = NG.nuisance_design(grades[:, None], age, np.zeros(n), fit, 'pspline')
+    assert N.shape[1] == 1 and not pen.any()
+    with pytest.raises(ValueError):
+        NG.nuisance_design(q[:, None], age, np.zeros(n), fit, 'spline')
 
 
 def write_brain(tmp_path, name, d, sel, age):
@@ -1384,7 +1444,8 @@ def test_zmaps_of_several_test_sites():
 def test_nuisance_within_sites():
     """With several sites, the nuisance effects are estimated within the sites, and the
     site offsets are kept for the adaptation; across sites, the effect of a quality
-    measure that differs between the sites is confounded with the site offset."""
+    measure that differs between the sites is confounded with the site offset.  The
+    shares of the variance removed refer to the variance within the sites."""
     rng = np.random.default_rng(35)
     n, p = 400, 30
     site = np.arange(n) % 2
@@ -1393,9 +1454,14 @@ def test_nuisance_within_sites():
     Y = ((1 - 0.01 * (age - 20))[:, None] - 0.2 * q[:, None] * rng.uniform(0.5, 1.5, p)
          + 0.8 * site[:, None] + 0.1 * rng.standard_normal((n, p)))
     d = NG.Data(Y.astype(np.float32), age, np.zeros(n), site, 'sim_8mm_T.mat', res='8')
-    out = NG.remove_nuisance(d, q[:, None], np.arange(n), names=['q'])[0]
-    e_site, e_q = effects(out.Y, age, site, q)[1:]
-    assert np.all(np.abs(e_q) < 0.03) and abs(e_site.mean() - 0.8) < 0.05
+    for model in NG.NUISANCE_MODELS:
+        out, rec = NG.remove_nuisance(d, q[:, None], np.arange(n), model, names=['q'])
+        e_site, e_q = effects(out.Y, age, site, q)[1:]
+        assert np.all(np.abs(e_q) < 0.03) and abs(e_site.mean() - 0.8) < 0.05
+        # the correction is right, but it widens the gap between the sites from about
+        # 0.4 to 0.8: relative to all variance, the shares would be misleading
+        assert 0.3 < rec['explained'] < 0.6 and 0.3 < rec['explained_crossfit'] < 0.6
+        assert np.median(1 - np.var(out.Y, axis=0) / np.var(d.Y, axis=0)) < 0
     pooled = NG.remove_nuisance(replace(d, site=np.zeros(n, int)), q[:, None], np.arange(n))[0]
     assert effects(pooled.Y, age, site, q)[2].mean() < -0.15   # within-site effect left
     with pytest.raises(ValueError):                           # site indicators: not nuisance

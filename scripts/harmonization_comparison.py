@@ -40,7 +40,8 @@ Conditions
   comcat_z              as comcat (comcat_zmaps.py)
   approach 2: terms of the GAMLSS
   gamlss_test_nuisance  + IQM effects estimated in the controls within the sites and
-                        removed from the normal scores (--test-nuisance)
+                        removed from the normal scores (--test-nuisance with linear
+                        terms, --nuisance-model linear)
   gamlss_iqm_model      + ICR, NCR, res_ECR and contrastr in the mean of the normative
                         models (--train-cov, --cov-mean)
 Variants of comcat and comcat_z
@@ -454,8 +455,9 @@ def corrector(CC, S, R, spec):
 
     def correct(fit, rows):
         if level == 'nuisance':
-            N, Pm, _, _ = NG.nuisance_design(Q, S.age, S.male_used, fit, 1, list(IQM4),
-                                             S.code if S.k > 1 else None)
+            N, D, pen, _, _ = NG.nuisance_design(Q, S.age, S.male_used, fit, 'linear',
+                                                 list(IQM4), S.code if S.k > 1 else None)
+            Pm = NG.nuisance_solve(D, pen, N.shape[1])[0]
             H = R.Z0[rows] - N[rows] @ (Pm @ R.Z0[fit])
             return H, np.ones((rows.size, 1)), H
         X = R.Z0 if level == 'z' else R.Ydata
